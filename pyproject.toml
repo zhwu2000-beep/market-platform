@@ -1,0 +1,64 @@
+[project]
+name = "market-platform"
+version = "0.1.0"
+description = "AI investment research platform"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "httpx>=0.28.0",
+    "numpy>=2.0.0",
+    "pandas>=2.2.0",
+    "pydantic>=2.10.0",
+    "pydantic-settings>=2.7.0",
+    "python-dotenv>=1.0.0",
+    "rich>=13.9.0",
+]
+
+[project.optional-dependencies]
+charts = [
+    "matplotlib>=3.10.0",
+    "plotly>=5.24.0",
+]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=6.29.0",
+    "mypy>=1.14.0",
+    "pandas-stubs>=2.2.0",
+    "pre-commit>=4.0.0",
+    "pytest>=8.3.0",
+    "pytest-cov>=6.0.0",
+    "ruff>=0.8.0",
+]
+
+[project.scripts]
+market-platform = "market_platform.cli.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+package = true
+
+[tool.ruff]
+line-length = 88
+target-version = "py314"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+mypy_path = "src"
+packages = ["market_platform"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"
+markers = [
+    "integration: tests that touch provider integration boundaries",
+]
