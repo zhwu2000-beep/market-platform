@@ -42,3 +42,11 @@ class DataProvider(ABC):
     @abstractmethod
     async def health_check(self) -> pd.DataFrame:
         """Return provider health status using the canonical health schema."""
+
+
+def normalize_date_like(value: date | str) -> str:
+    """Return an ISO-formatted date string from a date-like value."""
+
+    if isinstance(value, date):
+        return value.isoformat()
+    return value

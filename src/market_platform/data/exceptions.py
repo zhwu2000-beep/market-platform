@@ -5,6 +5,10 @@ class DataProviderError(Exception):
     """Base exception for normalized data provider failures."""
 
 
+class ConfigurationError(DataProviderError):
+    """Raised when a provider or data-layer configuration is missing."""
+
+
 class AuthenticationError(DataProviderError):
     """Raised when provider credentials are missing, invalid, or rejected."""
 
