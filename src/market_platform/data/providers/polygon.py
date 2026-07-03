@@ -89,9 +89,14 @@ class PolygonProvider(DataProvider):
         raise NotImplementedError
 
     async def health_check(self) -> pd.DataFrame:
-        """Placeholder for future health check support."""
+        """Return a lightweight health check result for Polygon."""
 
-        raise NotImplementedError
+        api_key = self._require_api_key()
+        payload = self._request(
+            "/v1/marketstatus/now",
+            params={"apiKey": api_key},
+        )
+        return self._health_payload_to_frame(payload)
 
     def _require_api_key(self) -> str:
         if not self._api_key:
@@ -141,3 +146,23 @@ class PolygonProvider(DataProvider):
         frame = normalize_price_frame(frame)
         frame = frame.sort_values("timestamp", ascending=True, kind="stable")
         return frame.reset_index(drop=True)
+
+    def _health_payload_to_frame(self, payload: JsonValue) -> pd.DataFrame:
+        if not isinstance(payload, dict):
+            raise DataProviderError("Polygon health response must be an object")
+
+        status = payload.get("status", "ok")
+        message = payload.get("message")
+        if message is None:
+            message = payload.get("market", "connected")
+
+        frame = pd.DataFrame(
+            [
+                {
+                    "provider": self.name,
+                    "status": status,
+                    "message": message,
+                }
+            ]
+        )
+        return frame.loc[:, ["provider", "status", "message"]]
