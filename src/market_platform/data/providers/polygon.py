@@ -8,7 +8,12 @@ import pandas as pd
 
 from market_platform.data.exceptions import ConfigurationError, DataProviderError
 from market_platform.data.http import HTTPClient, JsonValue
-from market_platform.data.models import PRICE_COLUMNS, normalize_price_frame
+from market_platform.data.models import (
+    LATEST_PRICE_COLUMNS,
+    PRICE_COLUMNS,
+    normalize_latest_price_frame,
+    normalize_price_frame,
+)
 from market_platform.data.provider import DataProvider, normalize_date_like
 
 POLYGON_BASE_URL = "https://api.polygon.io"
@@ -84,9 +89,14 @@ class PolygonProvider(DataProvider):
         raise NotImplementedError
 
     async def get_latest_price(self, symbol: str) -> pd.DataFrame:
-        """Placeholder for future latest price support."""
+        """Return the latest Polygon price as a standardized DataFrame."""
 
-        raise NotImplementedError
+        api_key = self._require_api_key()
+        payload = self._request(
+            f"/v2/aggs/ticker/{symbol.upper()}/prev",
+            params={"adjusted": "true", "apiKey": api_key},
+        )
+        return self._latest_payload_to_frame(symbol=symbol, payload=payload)
 
     async def health_check(self) -> pd.DataFrame:
         """Return a lightweight health check result for Polygon."""
@@ -166,3 +176,44 @@ class PolygonProvider(DataProvider):
             ]
         )
         return frame.loc[:, ["provider", "status", "message"]]
+
+    def _latest_payload_to_frame(self, symbol: str, payload: JsonValue) -> pd.DataFrame:
+        if not isinstance(payload, dict):
+            raise DataProviderError("Polygon latest price response must be an object")
+
+        results = payload.get("results", [])
+        if results is None:
+            results = []
+        if not isinstance(results, list):
+            raise DataProviderError("Polygon latest price results must be a list")
+        if not results:
+            raise DataProviderError("Polygon latest price response has no results")
+
+        item = results[0]
+        if not isinstance(item, dict):
+            raise DataProviderError("Polygon latest price result must be an object")
+
+        try:
+            price_value = item["c"] if "c" in item else item["price"]
+            latest_frame = pd.DataFrame(
+                [
+                    {
+                        "symbol": symbol.upper(),
+                        "timestamp": pd.to_datetime(
+                            cast(float | str | datetime | date, item["t"]),
+                            unit="ms",
+                            utc=True,
+                        ),
+                        "price": price_value,
+                        "provider": self.name,
+                    }
+                ],
+                columns=LATEST_PRICE_COLUMNS,
+            )
+        except KeyError as exc:
+            raise DataProviderError(
+                f"Polygon latest price result missing field: {exc.args[0]}"
+            ) from exc
+
+        latest_frame = normalize_latest_price_frame(latest_frame)
+        return latest_frame.reset_index(drop=True)
