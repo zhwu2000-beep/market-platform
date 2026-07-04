@@ -18,6 +18,20 @@ The architecture reserves room for:
 Application code should depend on the unified `DataProvider` interface rather
 than a concrete vendor client.
 
+## Preferred Entry Point
+
+Upper layers should prefer:
+
+```python
+from market_platform.data import get_provider
+
+provider = get_provider("polygon")
+```
+
+Provider names are normalized, so `get_provider(" POLYGON ")` also works.
+Provider construction remains lazy, and a missing `POLYGON_API_KEY` fails only
+when `PolygonProvider` actually makes a request.
+
 ## Provider Responsibilities
 
 Concrete providers are responsible for a narrow boundary:
