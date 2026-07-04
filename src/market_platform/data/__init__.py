@@ -17,7 +17,12 @@ from market_platform.data.models import (
     normalize_price_frame,
 )
 from market_platform.data.provider import DataProvider, normalize_date_like
-from market_platform.data.registry import DataProviderRegistry, ProviderRegistry
+from market_platform.data.registry import (
+    DataProviderRegistry,
+    ProviderRegistry,
+    create_default_registry,
+    get_provider,
+)
 
 __all__ = [
     "HEALTH_CHECK_COLUMNS",
@@ -34,7 +39,9 @@ __all__ = [
     "ProviderNotFoundError",
     "ProviderRegistry",
     "RateLimitError",
+    "create_default_registry",
     "create_http_client",
+    "get_provider",
     "normalize_date_like",
     "normalize_health_check_frame",
     "normalize_price_frame",

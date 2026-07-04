@@ -63,3 +63,22 @@ class ProviderRegistry:
 
 
 DataProviderRegistry = ProviderRegistry
+
+
+def create_default_registry() -> ProviderRegistry:
+    """Create the default provider registry."""
+
+    from market_platform.data.providers.polygon import PolygonProvider
+
+    registry = ProviderRegistry()
+    registry.register("polygon", PolygonProvider)
+    return registry
+
+
+_DEFAULT_REGISTRY = create_default_registry()
+
+
+def get_provider(name: str, **kwargs: Any) -> DataProvider:
+    """Create a provider from the default registry."""
+
+    return _DEFAULT_REGISTRY.create(name, **kwargs)
