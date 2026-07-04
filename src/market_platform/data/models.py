@@ -17,6 +17,12 @@ PRICE_COLUMNS: Final[list[str]] = [
     "volume",
     "provider",
 ]
+LATEST_PRICE_COLUMNS: Final[list[str]] = [
+    "symbol",
+    "timestamp",
+    "price",
+    "provider",
+]
 HEALTH_CHECK_COLUMNS: Final[list[str]] = [
     "provider",
     "status",
@@ -50,6 +56,19 @@ def normalize_price_frame(frame: pd.DataFrame) -> pd.DataFrame:
         raise ValueError(f"Price frame is missing required columns: {missing}")
 
     normalized = frame.loc[:, PRICE_COLUMNS].copy()
+    normalized["timestamp"] = pd.to_datetime(normalized["timestamp"], utc=True)
+    return normalized
+
+
+def normalize_latest_price_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    """Return a latest-price frame with canonical columns and UTC timestamps."""
+
+    missing_columns = set(LATEST_PRICE_COLUMNS) - set(frame.columns)
+    if missing_columns:
+        missing = ", ".join(sorted(missing_columns))
+        raise ValueError(f"Latest price frame is missing required columns: {missing}")
+
+    normalized = frame.loc[:, LATEST_PRICE_COLUMNS].copy()
     normalized["timestamp"] = pd.to_datetime(normalized["timestamp"], utc=True)
     return normalized
 

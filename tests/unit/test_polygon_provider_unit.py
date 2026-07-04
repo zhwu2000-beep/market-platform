@@ -7,7 +7,7 @@ import httpx
 import pandas as pd
 import pytest
 
-from market_platform.data.exceptions import ConfigurationError
+from market_platform.data.exceptions import ConfigurationError, DataProviderError
 from market_platform.data.http import HTTPClient
 from market_platform.data.providers.polygon import POLYGON_BASE_URL, PolygonProvider
 
@@ -25,9 +25,7 @@ def test_polygon_provider_uses_injected_http_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("POLYGON_API_KEY", raising=False)
-    transport = httpx.MockTransport(
-        lambda request: httpx.Response(200, json={})
-    )
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json={}))
     client = HTTPClient(client=httpx.Client(transport=transport))
 
     provider = PolygonProvider(http_client=client)
@@ -77,9 +75,7 @@ def test_polygon_provider_daily_prices_are_normalized(
         )
 
     provider = PolygonProvider(
-        http_client=HTTPClient(
-            client=httpx.Client(transport=httpx.MockTransport(handler))
-        )
+        http_client=HTTPClient(client=httpx.Client(transport=httpx.MockTransport(handler)))
     )
 
     frame = asyncio.run(
@@ -145,3 +141,93 @@ def test_polygon_provider_health_check_is_normalized(
     assert frame.at[0, "provider"] == "polygon"
     assert frame.at[0, "status"] == "OK"
     assert frame.at[0, "message"] == "connected"
+
+
+def test_polygon_provider_latest_price_is_normalized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("POLYGON_API_KEY", "test-key")
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["apiKey"] = request.url.params["apiKey"]
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "t": 1767312000000,
+                        "c": 123.45,
+                    }
+                ]
+            },
+        )
+
+    provider = PolygonProvider(
+        http_client=HTTPClient(client=httpx.Client(transport=httpx.MockTransport(handler)))
+    )
+
+    frame = asyncio.run(provider.get_latest_price("msft"))
+
+    assert "/v2/aggs/ticker/MSFT/prev" in captured["url"]
+    assert captured["apiKey"] == "test-key"
+    assert list(frame.columns) == ["symbol", "timestamp", "price", "provider"]
+    assert frame.at[0, "symbol"] == "MSFT"
+    assert frame.at[0, "provider"] == "polygon"
+    assert frame.at[0, "price"] == 123.45
+    assert frame["timestamp"].dt.tz is not None
+
+
+def test_polygon_provider_latest_price_requires_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("POLYGON_API_KEY", raising=False)
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"results": []})
+    )
+    provider = PolygonProvider(
+        http_client=HTTPClient(client=httpx.Client(transport=transport))
+    )
+
+    with pytest.raises(ConfigurationError, match="POLYGON_API_KEY is not configured"):
+        asyncio.run(provider.get_latest_price("msft"))
+
+
+def test_polygon_provider_latest_price_rejects_empty_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("POLYGON_API_KEY", "test-key")
+    provider = PolygonProvider(
+        http_client=HTTPClient(
+            client=httpx.Client(
+                transport=httpx.MockTransport(
+                    lambda request: httpx.Response(200, json={"results": []})
+                )
+            )
+        )
+    )
+
+    with pytest.raises(DataProviderError, match="no results"):
+        asyncio.run(provider.get_latest_price("msft"))
+
+
+def test_polygon_provider_latest_price_rejects_missing_price_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("POLYGON_API_KEY", "test-key")
+    provider = PolygonProvider(
+        http_client=HTTPClient(
+            client=httpx.Client(
+                transport=httpx.MockTransport(
+                    lambda request: httpx.Response(
+                        200,
+                        json={"results": [{"t": 1767312000000}]},
+                    )
+                )
+            )
+        )
+    )
+
+    with pytest.raises(DataProviderError, match="missing field"):
+        asyncio.run(provider.get_latest_price("msft"))
