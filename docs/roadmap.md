@@ -9,5 +9,6 @@
 - `ProviderNotFoundError`
 - default `get_provider()`
 - Polygon Provider improvements
+- real-time latest trade support
 - future Twelve Data provider
 - documentation and ADRs

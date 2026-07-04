@@ -60,3 +60,9 @@ yet. Daily price data is returned with the standard price columns: `symbol`,
 
 Polygon integration tests are skipped by default. To run the real API test,
 set both `POLYGON_API_KEY` and `RUN_POLYGON_INTEGRATION=1`.
+
+`get_latest_price()` currently uses Polygon's previous close endpoint
+(`/v2/aggs/ticker/{symbol}/prev`). The returned price comes from the previous
+close OHLC response and should not be treated as real-time last trade data.
+The standardized output schema is `symbol`, `timestamp`, `price`, and
+`provider`.
