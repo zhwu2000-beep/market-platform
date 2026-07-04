@@ -1,28 +1,65 @@
-"""Provider registry for selecting data sources by name."""
+"""Lightweight provider registry."""
 
+from collections.abc import Callable
+from typing import Any
+
+from market_platform.data.exceptions import ProviderNotFoundError
 from market_platform.data.provider import DataProvider
 
+ProviderFactory = Callable[..., DataProvider]
 
-class DataProviderRegistry:
-    """In-memory registry of available data providers."""
+
+class ProviderRegistry:
+    """Registry of provider factories keyed by normalized provider name."""
 
     def __init__(self) -> None:
-        self._providers: dict[str, DataProvider] = {}
+        self._factories: dict[str, ProviderFactory] = {}
 
-    def register(self, provider: DataProvider) -> None:
-        """Register a provider implementation."""
+    def register(
+        self,
+        name: str,
+        factory: ProviderFactory,
+        *,
+        overwrite: bool = False,
+    ) -> None:
+        """Register a provider factory under a normalized name."""
 
-        self._providers[provider.name] = provider
+        normalized_name = self._normalize_name(name)
+        if not overwrite and normalized_name in self._factories:
+            raise ValueError(f"Provider already registered: {normalized_name}")
+        self._factories[normalized_name] = factory
 
-    def get(self, name: str) -> DataProvider:
-        """Return a provider by name."""
+    def create(self, name: str, **kwargs: Any) -> DataProvider:
+        """Create a provider instance from a registered factory."""
 
+        normalized_name = self._normalize_name(name)
         try:
-            return self._providers[name]
+            factory = self._factories[normalized_name]
         except KeyError as exc:
-            raise KeyError(f"Unknown data provider: {name}") from exc
+            raise ProviderNotFoundError(
+                f"Unknown provider: {normalized_name}"
+            ) from exc
+        return factory(**kwargs)
 
     def names(self) -> list[str]:
         """Return registered provider names."""
 
-        return sorted(self._providers)
+        return sorted(self._factories)
+
+    def __contains__(self, name: str) -> bool:
+        """Return whether a normalized provider name is registered."""
+
+        try:
+            normalized_name = self._normalize_name(name)
+        except ValueError:
+            return False
+        return normalized_name in self._factories
+
+    def _normalize_name(self, name: str) -> str:
+        normalized_name = name.strip().lower()
+        if not normalized_name:
+            raise ValueError("Provider name cannot be empty")
+        return normalized_name
+
+
+DataProviderRegistry = ProviderRegistry

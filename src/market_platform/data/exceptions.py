@@ -9,6 +9,10 @@ class ConfigurationError(DataProviderError):
     """Raised when a provider or data-layer configuration is missing."""
 
 
+class ProviderNotFoundError(DataProviderError):
+    """Raised when a requested provider is not registered."""
+
+
 class AuthenticationError(DataProviderError):
     """Raised when provider credentials are missing, invalid, or rejected."""
 
