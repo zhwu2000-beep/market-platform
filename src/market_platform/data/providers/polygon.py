@@ -80,13 +80,30 @@ class PolygonProvider(DataProvider):
     async def get_intraday_prices(
         self,
         symbol: str,
-        start: datetime,
-        end: datetime,
+        start: datetime | date | str,
+        end: datetime | date | str,
         interval: str = "1min",
     ) -> pd.DataFrame:
-        """Placeholder for future intraday price support."""
+        """Return Polygon intraday aggregates as a standardized DataFrame."""
 
-        raise NotImplementedError
+        api_key = self._require_api_key()
+        multiplier, timespan = self._interval_to_polygon_params(interval)
+        start_str = normalize_date_like(start)
+        end_str = normalize_date_like(end)
+        payload = self._request(
+            (
+                f"/v2/aggs/ticker/{symbol.upper()}/range/{multiplier}/"
+                f"{timespan}/{start_str}/{end_str}"
+            ),
+            params={"apiKey": api_key},
+        )
+        return self._historical_payload_to_frame(
+            symbol=symbol,
+            payload=payload,
+            missing_field_message=(
+                "Polygon intraday price result missing field: {field}"
+            ),
+        )
 
     async def get_latest_price(self, symbol: str) -> pd.DataFrame:
         """Return the latest Polygon price as a standardized DataFrame."""
@@ -117,45 +134,11 @@ class PolygonProvider(DataProvider):
         return self._http_client.get(f"{self._base_url}{path}", params=params)
 
     def _daily_payload_to_frame(self, symbol: str, payload: JsonValue) -> pd.DataFrame:
-        if not isinstance(payload, dict):
-            raise DataProviderError("Polygon daily prices response must be an object")
-
-        results = payload.get("results", [])
-        if results is None:
-            results = []
-        if not isinstance(results, list):
-            raise DataProviderError("Polygon daily prices results must be a list")
-
-        rows: list[dict[str, object]] = []
-        for item in results:
-            if not isinstance(item, dict):
-                raise DataProviderError("Polygon daily price result must be an object")
-            row = item
-            try:
-                timestamp_value = cast(float | str | datetime | date, row["t"])
-                rows.append(
-                    {
-                        "symbol": symbol.upper(),
-                        "timestamp": pd.to_datetime(
-                            timestamp_value, unit="ms", utc=True
-                        ),
-                        "open": row["o"],
-                        "high": row["h"],
-                        "low": row["l"],
-                        "close": row["c"],
-                        "volume": row["v"],
-                        "provider": self.name,
-                    }
-                )
-            except KeyError as exc:
-                raise DataProviderError(
-                    f"Polygon daily price result missing field: {exc.args[0]}"
-                ) from exc
-
-        frame = pd.DataFrame(rows, columns=PRICE_COLUMNS)
-        frame = normalize_price_frame(frame)
-        frame = frame.sort_values("timestamp", ascending=True, kind="stable")
-        return frame.reset_index(drop=True)
+        return self._historical_payload_to_frame(
+            symbol=symbol,
+            payload=payload,
+            missing_field_message="Polygon daily price result missing field: {field}",
+        )
 
     def _health_payload_to_frame(self, payload: JsonValue) -> pd.DataFrame:
         if not isinstance(payload, dict):
@@ -176,6 +159,71 @@ class PolygonProvider(DataProvider):
             ]
         )
         return frame.loc[:, ["provider", "status", "message"]]
+
+    def _historical_payload_to_frame(
+        self,
+        *,
+        symbol: str,
+        payload: JsonValue,
+        missing_field_message: str,
+    ) -> pd.DataFrame:
+        if not isinstance(payload, dict):
+            raise DataProviderError("Polygon historical response must be an object")
+
+        results = payload.get("results", [])
+        if results is None:
+            results = []
+        if not isinstance(results, list):
+            raise DataProviderError("Polygon historical results must be a list")
+        if not results:
+            empty_frame = pd.DataFrame(columns=PRICE_COLUMNS)
+            empty_frame = normalize_price_frame(empty_frame)
+            return empty_frame.sort_values("timestamp", ascending=True, kind="stable")
+
+        rows: list[dict[str, object]] = []
+        for item in results:
+            if not isinstance(item, dict):
+                raise DataProviderError("Polygon historical result must be an object")
+            try:
+                timestamp_value = cast(float | str | datetime | date, item["t"])
+                rows.append(
+                    {
+                        "symbol": symbol.upper(),
+                        "timestamp": pd.to_datetime(
+                            timestamp_value, unit="ms", utc=True
+                        ),
+                        "open": item["o"],
+                        "high": item["h"],
+                        "low": item["l"],
+                        "close": item["c"],
+                        "volume": item["v"],
+                        "provider": self.name,
+                    }
+                )
+            except KeyError as exc:
+                raise DataProviderError(
+                    missing_field_message.format(field=exc.args[0])
+                ) from exc
+
+        frame = pd.DataFrame(rows, columns=PRICE_COLUMNS)
+        frame = normalize_price_frame(frame)
+        frame = frame.sort_values("timestamp", ascending=True, kind="stable")
+        return frame.reset_index(drop=True)
+
+    def _interval_to_polygon_params(self, interval: str) -> tuple[int, str]:
+        mapping: dict[str, tuple[int, str]] = {
+            "1min": (1, "minute"),
+            "5min": (5, "minute"),
+            "15min": (15, "minute"),
+            "30min": (30, "minute"),
+            "1hour": (1, "hour"),
+        }
+        try:
+            return mapping[interval]
+        except KeyError as exc:
+            raise ValueError(
+                "Unsupported interval. Use one of: 1min, 5min, 15min, 30min, 1hour"
+            ) from exc
 
     def _latest_payload_to_frame(self, symbol: str, payload: JsonValue) -> pd.DataFrame:
         if not isinstance(payload, dict):
