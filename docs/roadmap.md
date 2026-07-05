@@ -12,3 +12,6 @@
 - real-time latest trade support
 - future Twelve Data provider
 - documentation and ADRs
+
+## v0.3.0 Completed Work
+- Polygon intraday prices

@@ -53,9 +53,15 @@ download workflows. Those responsibilities belong to other layers.
 
 - `health_check()`
 - `get_daily_prices()`
+- `get_intraday_prices()`
 
-The intraday, options, and websocket surfaces are intentionally not implemented
-yet. Daily price data is returned with the standard price columns: `symbol`,
+Supported intraday intervals are `1min`, `5min`, `15min`, `30min`, and
+`1hour`. Intraday data uses the same standardized OHLCV schema as daily
+prices, with timestamps normalized to UTC. Unsupported intervals raise
+`ValueError`.
+
+The options and websocket surfaces are intentionally not implemented yet.
+Daily price data is returned with the standard price columns: `symbol`,
 `timestamp`, `open`, `high`, `low`, `close`, `volume`, and `provider`.
 
 Polygon integration tests are skipped by default. To run the real API test,
