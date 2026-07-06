@@ -8,6 +8,7 @@ import pytest
 from market_platform.data.exceptions import ProviderNotFoundError
 from market_platform.data.provider import DataProvider
 from market_platform.data.providers.polygon import PolygonProvider
+from market_platform.data.providers.twelvedata import TwelveDataProvider
 from market_platform.data.registry import (
     ProviderRegistry,
     create_default_registry,
@@ -124,10 +125,12 @@ def test_create_default_registry_includes_polygon(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("POLYGON_API_KEY", raising=False)
+    monkeypatch.delenv("TWELVE_DATA_API_KEY", raising=False)
 
     registry = create_default_registry()
 
     assert "polygon" in registry.names()
+    assert "twelvedata" in registry.names()
 
 
 def test_get_provider_returns_polygon_provider(
@@ -148,6 +151,37 @@ def test_get_provider_normalizes_names(
     provider = get_provider(" POLYGON ")
 
     assert isinstance(provider, PolygonProvider)
+
+
+def test_get_provider_returns_twelve_data_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("TWELVE_DATA_API_KEY", raising=False)
+
+    provider = get_provider("twelvedata")
+
+    assert isinstance(provider, TwelveDataProvider)
+
+
+def test_get_provider_normalizes_twelve_data_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("TWELVE_DATA_API_KEY", raising=False)
+
+    provider = get_provider(" TWELVEDATA ")
+
+    assert isinstance(provider, TwelveDataProvider)
+
+
+def test_get_provider_twelve_data_is_lazy_about_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("TWELVE_DATA_API_KEY", raising=False)
+
+    provider = get_provider("twelvedata")
+
+    assert isinstance(provider, TwelveDataProvider)
+    assert provider.api_key == ""
 
 
 def test_get_provider_unknown_raises_provider_not_found_error() -> None:
