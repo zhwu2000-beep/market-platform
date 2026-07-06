@@ -67,7 +67,7 @@ def compare_daily_prices(
         right_volume = row.get("volume_right")
         close_diff = _difference(left_close, right_close)
         close_diff_pct = _percentage_difference(close_diff, right_close)
-        volume_diff = _difference(left_volume, right_volume, allow_missing=True)
+        volume_diff = _difference(left_volume, right_volume)
 
         rows.append(
             {
@@ -121,16 +121,11 @@ def _row_symbol(row: pd.Series) -> str:
     return ""
 
 
-def _difference(
-    left_value: Any,
-    right_value: Any,
-    *,
-    allow_missing: bool = False,
-) -> Any:
+def _difference(left_value: Any, right_value: Any) -> Any:
     left_numeric = pd.to_numeric(left_value, errors="coerce")
     right_numeric = pd.to_numeric(right_value, errors="coerce")
     if pd.isna(left_numeric) or pd.isna(right_numeric):
-        return pd.NA if allow_missing else pd.NA
+        return pd.NA
     return left_numeric - right_numeric
 
 
