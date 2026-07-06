@@ -32,6 +32,17 @@ Provider names are normalized, so `get_provider(" POLYGON ")` also works.
 Provider construction remains lazy, and a missing `POLYGON_API_KEY` fails only
 when `PolygonProvider` actually makes a request.
 
+## Provider Switching
+
+`get_provider("polygon")` returns `PolygonProvider`, and
+`get_provider("twelvedata")` returns `TwelveDataProvider`. Both providers
+implement the shared `DataProvider` interface, and provider names are
+normalized before lookup.
+
+Both providers currently support `get_daily_prices()`. Polygon also supports
+`get_latest_price()` and `get_intraday_prices()`. Twelve Data intraday and
+latest price methods are still not implemented.
+
 ## Provider Responsibilities
 
 Concrete providers are responsible for a narrow boundary:

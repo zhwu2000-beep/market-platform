@@ -15,3 +15,9 @@
 
 ## v0.3.0 Completed Work
 - Polygon intraday prices
+
+## v0.4.0 Completed Work
+- TwelveDataProvider skeleton
+- Twelve Data daily prices
+- default registry registration
+- provider switching through `get_provider()`
