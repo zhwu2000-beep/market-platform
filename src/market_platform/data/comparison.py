@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any, cast
 
 import pandas as pd
 
 from market_platform.data.models import PRICE_COLUMNS
+from market_platform.data.provider import DataProvider
 
 COMPARISON_COLUMNS = [
     "symbol",
@@ -89,6 +91,22 @@ def compare_daily_prices(
     return pd.DataFrame(rows, columns=COMPARISON_COLUMNS)
 
 
+async def compare_provider_daily_prices(
+    left_provider: DataProvider,
+    right_provider: DataProvider,
+    symbol: str,
+    start: date | str,
+    end: date | str,
+) -> pd.DataFrame:
+    """Fetch and compare daily prices from two providers."""
+
+    start_date = _coerce_date_like(start)
+    end_date = _coerce_date_like(end)
+    left_prices = await left_provider.get_daily_prices(symbol, start_date, end_date)
+    right_prices = await right_provider.get_daily_prices(symbol, start_date, end_date)
+    return compare_daily_prices(left_prices, right_prices)
+
+
 def _prepare_daily_prices(frame: pd.DataFrame) -> pd.DataFrame:
     missing_columns = set(PRICE_COLUMNS) - set(frame.columns)
     if missing_columns:
@@ -134,3 +152,9 @@ def _percentage_difference(close_diff: Any, right_close: Any) -> Any:
     if pd.isna(close_diff) or pd.isna(right_numeric) or right_numeric == 0:
         return pd.NA
     return close_diff / right_numeric
+
+
+def _coerce_date_like(value: date | str) -> date:
+    if isinstance(value, date):
+        return value
+    return pd.Timestamp(value).date()
