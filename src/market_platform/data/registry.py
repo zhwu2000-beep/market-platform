@@ -69,9 +69,11 @@ def create_default_registry() -> ProviderRegistry:
     """Create the default provider registry."""
 
     from market_platform.data.providers.polygon import PolygonProvider
+    from market_platform.data.providers.twelvedata import TwelveDataProvider
 
     registry = ProviderRegistry()
     registry.register("polygon", PolygonProvider)
+    registry.register("twelvedata", TwelveDataProvider)
     return registry
 
 
