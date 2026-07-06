@@ -2,12 +2,14 @@
 
 import os
 from datetime import date, datetime
+from typing import cast
 
 import pandas as pd
 
 from market_platform.data.exceptions import ConfigurationError, DataProviderError
 from market_platform.data.http import HTTPClient, JsonValue
-from market_platform.data.provider import DataProvider
+from market_platform.data.models import PRICE_COLUMNS, normalize_price_frame
+from market_platform.data.provider import DataProvider, normalize_date_like
 
 TWELVE_DATA_BASE_URL = "https://api.twelvedata.com"
 TWELVE_DATA_PROVIDER_NAME = "twelvedata"
@@ -58,12 +60,23 @@ class TwelveDataProvider(DataProvider):
     async def get_daily_prices(
         self,
         symbol: str,
-        start: date,
-        end: date,
+        start: date | str,
+        end: date | str,
     ) -> pd.DataFrame:
-        """Placeholder for future daily price support."""
+        """Return Twelve Data daily prices as a standardized DataFrame."""
 
-        raise NotImplementedError
+        api_key = self._require_api_key()
+        payload = self._request(
+            "/time_series",
+            params={
+                "symbol": symbol.upper(),
+                "interval": "1day",
+                "start_date": normalize_date_like(start),
+                "end_date": normalize_date_like(end),
+                "apikey": api_key,
+            },
+        )
+        return self._daily_payload_to_frame(symbol=symbol, payload=payload)
 
     async def get_intraday_prices(
         self,
@@ -101,6 +114,69 @@ class TwelveDataProvider(DataProvider):
 
     def _request(self, path: str, *, params: dict[str, str]) -> JsonValue:
         return self._http_client.get(f"{self._base_url}{path}", params=params)
+
+    def _daily_payload_to_frame(self, symbol: str, payload: JsonValue) -> pd.DataFrame:
+        if not isinstance(payload, dict):
+            raise DataProviderError("Twelve Data daily response must be an object")
+
+        status = payload.get("status", "ok")
+        if isinstance(status, str) and status.lower() in {"error", "fail"}:
+            message = payload.get("message") or payload.get("code") or "request failed"
+            raise DataProviderError(str(message))
+
+        values = payload.get("values", [])
+        if values is None:
+            values = []
+        if not isinstance(values, list):
+            raise DataProviderError("Twelve Data daily values must be a list")
+        if not values:
+            empty_frame = pd.DataFrame(columns=PRICE_COLUMNS)
+            empty_frame = normalize_price_frame(empty_frame)
+            return empty_frame.sort_values("timestamp", ascending=True, kind="stable")
+
+        rows: list[dict[str, object]] = []
+        for item in values:
+            if not isinstance(item, dict):
+                raise DataProviderError("Twelve Data daily value must be an object")
+            if "datetime" not in item:
+                raise DataProviderError(
+                    "Twelve Data daily value missing field: datetime"
+                )
+
+            volume_value: object | None = item.get("volume")
+            if volume_value in {"", None}:
+                volume_value = pd.NA
+
+            try:
+                timestamp_value = item["datetime"]
+                if not isinstance(timestamp_value, (str, datetime, date, int, float)):
+                    raise DataProviderError(
+                        "Twelve Data daily value datetime must be a scalar value"
+                    )
+                rows.append(
+                    {
+                        "symbol": symbol.upper(),
+                        "timestamp": pd.to_datetime(
+                            cast(str | datetime | date | int | float, timestamp_value),
+                            utc=True,
+                        ),
+                        "open": item["open"],
+                        "high": item["high"],
+                        "low": item["low"],
+                        "close": item["close"],
+                        "volume": volume_value,
+                        "provider": self.name,
+                    }
+                )
+            except KeyError as exc:
+                raise DataProviderError(
+                    f"Twelve Data daily value missing field: {exc.args[0]}"
+                ) from exc
+
+        frame = pd.DataFrame(rows, columns=PRICE_COLUMNS)
+        frame = normalize_price_frame(frame)
+        frame = frame.sort_values("timestamp", ascending=True, kind="stable")
+        return frame.reset_index(drop=True)
 
     def _health_payload_to_frame(self, payload: JsonValue) -> pd.DataFrame:
         if not isinstance(payload, dict):
