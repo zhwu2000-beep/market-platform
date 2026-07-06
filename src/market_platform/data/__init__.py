@@ -29,6 +29,8 @@ from market_platform.data.registry import (
     create_default_registry,
     get_provider,
 )
+from market_platform.data.selection import ProviderCandidate, ProviderSelectionPolicy
+from market_platform.data.service import MarketDataService
 
 __all__ = [
     "HEALTH_CHECK_COLUMNS",
@@ -42,9 +44,12 @@ __all__ = [
     "DataProviderRegistry",
     "HTTPClient",
     "HttpClientConfig",
+    "MarketDataService",
     "NetworkError",
     "ProviderNotFoundError",
+    "ProviderCandidate",
     "ProviderRegistry",
+    "ProviderSelectionPolicy",
     "RateLimitError",
     "create_default_registry",
     "create_http_client",
