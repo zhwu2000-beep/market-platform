@@ -1,11 +1,16 @@
 from __future__ import annotations
 
-from datetime import UTC
+import asyncio
+from datetime import UTC, date
 
 import pandas as pd
 import pytest
 
-from market_platform.data.comparison import compare_daily_prices
+from market_platform.data.comparison import (
+    compare_daily_prices,
+    compare_provider_daily_prices,
+)
+from market_platform.data.provider import DataProvider
 
 
 def _daily_frame(
@@ -28,6 +33,37 @@ def _daily_frame(
             "provider": [provider] * len(timestamps),
         }
     )
+
+
+class _FakeProvider(DataProvider):
+    def __init__(self, frame: pd.DataFrame) -> None:
+        self.frame = frame
+        self.calls: list[tuple[str, object, object]] = []
+        self.name = "fake"
+
+    async def get_daily_prices(
+        self,
+        symbol: str,
+        start: date | str,
+        end: date | str,
+    ) -> pd.DataFrame:
+        self.calls.append((symbol, start, end))
+        return self.frame
+
+    async def get_intraday_prices(
+        self,
+        symbol: str,
+        start: date,
+        end: date,
+        interval: str = "1min",
+    ) -> pd.DataFrame:
+        raise NotImplementedError
+
+    async def get_latest_price(self, symbol: str) -> pd.DataFrame:
+        raise NotImplementedError
+
+    async def health_check(self) -> pd.DataFrame:
+        raise NotImplementedError
 
 
 def test_compare_daily_prices_produces_matched_rows() -> None:
@@ -235,3 +271,73 @@ def test_compare_daily_prices_returns_empty_frame_for_empty_inputs() -> None:
         "volume_diff",
         "match_status",
     ]
+
+
+def test_compare_provider_daily_prices_calls_both_providers() -> None:
+    left_frame = _daily_frame(
+        symbol="MSFT",
+        provider="polygon",
+        timestamps=["2026-01-01"],
+        closes=[10.0],
+        volumes=[100],
+    )
+    right_frame = _daily_frame(
+        symbol="MSFT",
+        provider="twelvedata",
+        timestamps=["2026-01-01"],
+        closes=[9.0],
+        volumes=[80],
+    )
+    left_provider = _FakeProvider(left_frame)
+    right_provider = _FakeProvider(right_frame)
+
+    frame = asyncio.run(
+        compare_provider_daily_prices(
+            left_provider,
+            right_provider,
+            "MSFT",
+            "2026-01-01",
+            "2026-01-02",
+        )
+    )
+
+    assert left_provider.calls == [
+        ("MSFT", date(2026, 1, 1), date(2026, 1, 2))
+    ]
+    assert right_provider.calls == [
+        ("MSFT", date(2026, 1, 1), date(2026, 1, 2))
+    ]
+    assert list(frame["match_status"]) == ["matched"]
+
+
+def test_compare_provider_daily_prices_propagates_provider_errors() -> None:
+    class _FailingProvider(_FakeProvider):
+        async def get_daily_prices(
+            self,
+            symbol: str,
+            start: date | str,
+            end: date | str,
+        ) -> pd.DataFrame:
+            raise RuntimeError("boom")
+
+    left_provider = _FailingProvider(pd.DataFrame())
+    right_provider = _FakeProvider(
+        _daily_frame(
+            symbol="MSFT",
+            provider="twelvedata",
+            timestamps=["2026-01-01"],
+            closes=[9.0],
+            volumes=[80],
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        asyncio.run(
+            compare_provider_daily_prices(
+                left_provider,
+                right_provider,
+                "MSFT",
+                "2026-01-01",
+                "2026-01-02",
+            )
+        )

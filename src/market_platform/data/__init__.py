@@ -1,6 +1,9 @@
 """Data access package."""
 
-from market_platform.data.comparison import compare_daily_prices
+from market_platform.data.comparison import (
+    compare_daily_prices,
+    compare_provider_daily_prices,
+)
 from market_platform.data.exceptions import (
     AuthenticationError,
     ConfigurationError,
@@ -46,6 +49,7 @@ __all__ = [
     "create_default_registry",
     "create_http_client",
     "compare_daily_prices",
+    "compare_provider_daily_prices",
     "get_provider",
     "normalize_date_like",
     "normalize_health_check_frame",
