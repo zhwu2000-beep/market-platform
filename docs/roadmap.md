@@ -21,3 +21,9 @@
 - Twelve Data daily prices
 - default registry registration
 - provider switching through `get_provider()`
+
+## v0.5.0 Completed Work
+- provider comparison ADR
+- daily price DataFrame comparison
+- provider-level daily price comparison
+- no fallback yet

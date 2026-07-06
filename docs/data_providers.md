@@ -43,6 +43,17 @@ Both providers currently support `get_daily_prices()`. Polygon also supports
 `get_latest_price()` and `get_intraday_prices()`. Twelve Data intraday and
 latest price methods are still not implemented.
 
+## Provider Comparison
+
+`compare_daily_prices()` compares two already-normalized daily OHLCV
+DataFrames. `compare_provider_daily_prices()` fetches daily prices from two
+provider instances and then compares the normalized results.
+
+The comparison output includes matched timestamps, `left_only` timestamps,
+`right_only` timestamps, `close_diff`, `close_diff_pct`, and `volume_diff`.
+This is comparison only, not fallback. It does not choose the better provider
+automatically.
+
 ## Provider Responsibilities
 
 Concrete providers are responsible for a narrow boundary:
