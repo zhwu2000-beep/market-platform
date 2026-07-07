@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Protocol, cast
+
+import pandas as pd
 
 from market_platform.data.exceptions import DataProviderError
 from market_platform.data.factory import create_default_market_data_service
@@ -40,6 +44,17 @@ def build_parser() -> argparse.ArgumentParser:
     fetch_parser.add_argument("--symbol", required=True, help="Ticker symbol.")
     fetch_parser.add_argument("--start", required=True, help="Start date, YYYY-MM-DD.")
     fetch_parser.add_argument("--end", required=True, help="End date, YYYY-MM-DD.")
+    fetch_parser.add_argument(
+        "--format",
+        choices=["table", "json", "csv"],
+        default="table",
+        help="Output format.",
+    )
+    fetch_parser.add_argument(
+        "--output",
+        default=None,
+        help="Write formatted output to a file instead of stdout.",
+    )
     fetch_parser.add_argument(
         "--provider",
         choices=["polygon", "twelvedata", "twelve_data"],
@@ -90,9 +105,48 @@ def _handle_data_fetch(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    if frame.empty:
-        print("No rows returned.")
+    rendered_output = _render_daily_prices(frame, args.format)
+    if args.output is not None:
+        _write_output(Path(args.output), rendered_output)
+        print(f"Wrote {len(frame)} rows to {args.output} as {args.format}.")
         return 0
 
-    print(frame.to_string(index=False))
+    print(rendered_output, end="" if rendered_output.endswith("\n") else "\n")
     return 0
+
+
+def _render_daily_prices(frame: pd.DataFrame, output_format: str) -> str:
+    if output_format == "table":
+        if frame.empty:
+            return "No data returned.\n"
+        return f"{frame.to_string(index=False)}\n"
+    if output_format == "json":
+        return _render_json(frame)
+    if output_format == "csv":
+        return _render_csv(frame)
+    raise ValueError(f"Unsupported output format: {output_format}")
+
+
+def _render_json(frame: pd.DataFrame) -> str:
+    records = frame.to_dict(orient="records")
+    return json.dumps(records, default=_json_default, ensure_ascii=False) + "\n"
+
+
+def _render_csv(frame: pd.DataFrame) -> str:
+    serializable_frame = frame.copy()
+    if "timestamp" in serializable_frame.columns:
+        serializable_frame["timestamp"] = serializable_frame["timestamp"].map(
+            _json_default
+        )
+    return serializable_frame.to_csv(index=False)
+
+
+def _write_output(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def _json_default(value: object) -> object:
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    return str(value)
