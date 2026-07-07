@@ -43,6 +43,13 @@ Both providers currently support `get_daily_prices()`. Polygon also supports
 `get_latest_price()` and `get_intraday_prices()`. Twelve Data intraday and
 latest price methods are still not implemented.
 
+## Routing
+
+`MarketDataService.get_daily_prices(symbol, start, end)` uses configured
+provider order and fallback when `provider` is not specified. Passing
+`provider="polygon"` or `provider="twelvedata"` selects that provider only and
+disables fallback for that call.
+
 ## Provider Comparison
 
 `compare_daily_prices()` compares two already-normalized daily OHLCV

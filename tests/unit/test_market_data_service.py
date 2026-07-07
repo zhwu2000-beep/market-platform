@@ -6,9 +6,11 @@ from datetime import UTC, date
 import pandas as pd
 import pytest
 
+from market_platform.data.capabilities import DataCapability
 from market_platform.data.comparison import compare_daily_prices
 from market_platform.data.exceptions import (
     AuthenticationError,
+    ConfigurationError,
     DataProviderError,
     NetworkError,
     RateLimitError,
@@ -224,6 +226,125 @@ def test_fallback_after_empty_dataframe() -> None:
     assert frame.equals(second_frame)
     assert len(first.calls) == 1
     assert len(second.calls) == 1
+
+
+def test_incapable_provider_is_skipped() -> None:
+    first = _FakeProvider(name="legacy")
+    second_frame = _daily_frame(symbol="MSFT", provider="twelvedata", close=11.0)
+    second = _FakeProvider(name="twelvedata", frame=second_frame)
+    service = MarketDataService(
+        ProviderSelectionPolicy(
+            candidates=[
+                ProviderCandidate(
+                    name="legacy",
+                    provider=first,
+                    priority=1,
+                    capabilities=frozenset[DataCapability](),
+                ),
+                ProviderCandidate(
+                    name="twelvedata",
+                    provider=second,
+                    priority=2,
+                ),
+            ]
+        )
+    )
+
+    frame = asyncio.run(service.get_daily_prices("MSFT", "2026-01-01", "2026-01-02"))
+
+    assert frame.equals(second_frame)
+    assert len(first.calls) == 0
+    assert len(second.calls) == 1
+
+
+def test_explicit_provider_selection_uses_only_requested_provider() -> None:
+    first = _FakeProvider(
+        name="polygon",
+        frame=_daily_frame(symbol="MSFT", provider="polygon", close=10.0),
+    )
+    second = _FakeProvider(
+        name="twelvedata",
+        frame=_daily_frame(symbol="MSFT", provider="twelvedata", close=11.0),
+    )
+    service = MarketDataService(
+        ProviderSelectionPolicy(
+            candidates=[
+                ProviderCandidate(name="polygon", provider=first, priority=1),
+                ProviderCandidate(name="twelvedata", provider=second, priority=2),
+            ],
+            provider_order=["twelvedata", "polygon"],
+        )
+    )
+
+    frame = asyncio.run(
+        service.get_daily_prices(
+            "MSFT",
+            "2026-01-01",
+            "2026-01-02",
+            provider="polygon",
+        )
+    )
+
+    assert list(frame["provider"]) == ["polygon"]
+    assert len(first.calls) == 1
+    assert second.calls == []
+
+
+def test_explicit_incapable_provider_raises_clear_error() -> None:
+    first = _FakeProvider(name="legacy")
+    service = MarketDataService(
+        ProviderSelectionPolicy(
+            candidates=[
+                ProviderCandidate(
+                    name="legacy",
+                    provider=first,
+                    priority=1,
+                    capabilities=frozenset[DataCapability](),
+                ),
+            ]
+        )
+    )
+
+    with pytest.raises(ConfigurationError, match="does not support daily_prices"):
+        asyncio.run(
+            service.get_daily_prices(
+                "MSFT",
+                "2026-01-01",
+                "2026-01-02",
+                provider="legacy",
+            )
+        )
+
+    assert first.calls == []
+
+
+def test_no_capable_provider_available_raises_clear_error() -> None:
+    first = _FakeProvider(name="legacy")
+    second = _FakeProvider(name="archive")
+    service = MarketDataService(
+        ProviderSelectionPolicy(
+            candidates=[
+                ProviderCandidate(
+                    name="legacy",
+                    provider=first,
+                    priority=1,
+                    capabilities=frozenset[DataCapability](),
+                ),
+                ProviderCandidate(
+                    name="archive",
+                    provider=second,
+                    priority=2,
+                    capabilities=frozenset[DataCapability](),
+                ),
+            ]
+        )
+    )
+
+    with pytest.raises(DataProviderError, match="no providers available"):
+        asyncio.run(service.get_daily_prices("MSFT", "2026-01-01", "2026-01-02"))
+
+    assert first.calls == []
+    assert second.calls == []
 
 
 def test_authentication_error_does_not_fallback_by_default() -> None:
