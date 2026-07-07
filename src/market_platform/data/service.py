@@ -6,6 +6,7 @@ from datetime import date
 
 import pandas as pd
 
+from market_platform.data.capabilities import DataCapability
 from market_platform.data.exceptions import (
     AuthenticationError,
     DataProviderError,
@@ -38,7 +39,9 @@ class MarketDataService:
         end_date = _coerce_date_like(end)
         attempts: list[str] = []
 
-        for candidate in self._policy.ordered_providers():
+        for candidate in self._policy.ordered_providers(
+            capability=DataCapability.DAILY_PRICES
+        ):
             provider_name = candidate.name
             try:
                 frame = await candidate.provider.get_daily_prices(

@@ -1,5 +1,11 @@
 """Data access package."""
 
+from market_platform.data.capabilities import (
+    DEFAULT_PROVIDER_CAPABILITIES,
+    DataCapability,
+    get_configured_provider_order,
+    get_provider_capabilities,
+)
 from market_platform.data.comparison import (
     compare_daily_prices,
     compare_provider_daily_prices,
@@ -44,6 +50,8 @@ __all__ = [
     "DataProviderRegistry",
     "HTTPClient",
     "HttpClientConfig",
+    "DEFAULT_PROVIDER_CAPABILITIES",
+    "DataCapability",
     "MarketDataService",
     "NetworkError",
     "ProviderNotFoundError",
@@ -51,10 +59,12 @@ __all__ = [
     "ProviderRegistry",
     "ProviderSelectionPolicy",
     "RateLimitError",
+    "get_configured_provider_order",
     "create_default_registry",
     "create_http_client",
     "compare_daily_prices",
     "compare_provider_daily_prices",
+    "get_provider_capabilities",
     "get_provider",
     "normalize_date_like",
     "normalize_health_check_frame",

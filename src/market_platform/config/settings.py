@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     environment: Environment = "dev"
     log_level: str = "INFO"
     default_data_provider: DataProviderName = "polygon"
+    data_provider_order: str = Field(
+        default="",
+        validation_alias="MARKET_PLATFORM_DATA_PROVIDER_ORDER",
+    )
 
     polygon_api_key: str = ""
     twelve_data_api_key: str = ""
