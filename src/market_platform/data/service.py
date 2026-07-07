@@ -6,14 +6,19 @@ from datetime import date
 
 import pandas as pd
 
-from market_platform.data.capabilities import DataCapability
+from market_platform.data.capabilities import (
+    DataCapability,
+    normalize_provider_name,
+    provider_supports_capability,
+)
 from market_platform.data.exceptions import (
     AuthenticationError,
+    ConfigurationError,
     DataProviderError,
     NetworkError,
     RateLimitError,
 )
-from market_platform.data.selection import ProviderSelectionPolicy
+from market_platform.data.selection import ProviderCandidate, ProviderSelectionPolicy
 
 
 class MarketDataService:
@@ -32,17 +37,29 @@ class MarketDataService:
         symbol: str,
         start: date | str,
         end: date | str,
+        provider: str | None = None,
     ) -> pd.DataFrame:
-        """Return the first successful daily price frame from the policy."""
+        """Return daily prices using explicit or configured provider routing."""
 
         start_date = _coerce_date_like(start)
         end_date = _coerce_date_like(end)
         attempts: list[str] = []
 
-        for candidate in self._policy.ordered_providers(
-            capability=DataCapability.DAILY_PRICES
-        ):
+        if provider is not None:
+            candidates = [self._resolve_explicit_candidate(provider)]
+        else:
+            candidates = self._policy.ordered_providers(
+                capability=DataCapability.DAILY_PRICES
+            )
+
+        for candidate in candidates:
             provider_name = candidate.name
+            if not _candidate_supports_daily_prices(candidate):
+                attempts.append(
+                    f"{provider_name}: does not support daily_prices capability"
+                )
+                continue
+
             try:
                 frame = await candidate.provider.get_daily_prices(
                     symbol,
@@ -51,37 +68,77 @@ class MarketDataService:
                 )
             except AuthenticationError as exc:
                 attempts.append(f"{provider_name}: authentication error: {exc}")
-                if self._fallback_on_auth_error:
+                if provider is None and self._fallback_on_auth_error:
                     continue
+                if provider is not None:
+                    break
                 raise
             except NetworkError as exc:
                 attempts.append(f"{provider_name}: network error: {exc}")
+                if provider is not None:
+                    break
                 continue
             except RateLimitError as exc:
                 attempts.append(f"{provider_name}: rate limit error: {exc}")
+                if provider is not None:
+                    break
                 continue
             except DataProviderError as exc:
                 attempts.append(f"{provider_name}: data provider error: {exc}")
+                if provider is not None:
+                    break
                 continue
 
             if not isinstance(frame, pd.DataFrame):
                 attempts.append(
                     f"{provider_name}: invalid response type {type(frame).__name__}"
                 )
+                if provider is not None:
+                    break
                 continue
             if frame.empty:
                 attempts.append(f"{provider_name}: empty response")
+                if provider is not None:
+                    break
                 continue
             return frame
 
         attempts_text = "; ".join(attempts) if attempts else "no providers available"
+        if provider is not None:
+            raise DataProviderError(
+                "Unable to retrieve daily prices for "
+                f"{symbol!r} from provider {provider!r}. Attempts: {attempts_text}"
+            )
+
         raise DataProviderError(
             "Unable to retrieve daily prices for "
             f"{symbol!r} from available providers. Attempts: {attempts_text}"
         )
+
+    def _resolve_explicit_candidate(self, provider: str) -> ProviderCandidate:
+        provider_name = normalize_provider_name(provider)
+
+        for candidate in self._policy.candidates:
+            if normalize_provider_name(candidate.name) != provider_name:
+                continue
+            if not candidate.enabled:
+                raise ConfigurationError(f"Provider is disabled: {provider_name}")
+            if not _candidate_supports_daily_prices(candidate):
+                raise ConfigurationError(
+                    f"Provider does not support daily_prices: {provider_name}"
+                )
+            return candidate
+
+        raise ConfigurationError(f"Unknown provider: {provider_name}")
 
 
 def _coerce_date_like(value: date | str) -> date:
     if isinstance(value, date):
         return value
     return pd.Timestamp(value).date()
+
+
+def _candidate_supports_daily_prices(candidate: ProviderCandidate) -> bool:
+    if candidate.capabilities is not None:
+        return DataCapability.DAILY_PRICES in candidate.capabilities
+    return provider_supports_capability(candidate.name, DataCapability.DAILY_PRICES)
