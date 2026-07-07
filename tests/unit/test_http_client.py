@@ -62,10 +62,13 @@ def test_request_headers_override_defaults() -> None:
         config=HttpClientConfig(default_headers={"X-Provider": "default"}),
     )
 
-    assert client.get(
-        "https://example.test/prices",
-        headers={"X-Provider": "override"},
-    ) == []
+    assert (
+        client.get(
+            "https://example.test/prices",
+            headers={"X-Provider": "override"},
+        )
+        == []
+    )
     assert captured_headers["x-provider"] == "override"
 
 
@@ -166,7 +169,21 @@ def test_request_logging(caplog: pytest.LogCaptureFixture) -> None:
     client = _client(lambda request: httpx.Response(200, json={"ok": True}))
 
     with caplog.at_level(logging.INFO, logger="market_platform.data.http"):
-        client.get("https://example.test/prices")
+        client.get(
+            "https://example.test/prices?apiKey=secret-key&symbol=MSFT",
+            params={
+                "apikey": "secret-key-2",
+                "token": "token-value",
+                "access_token": "access-token-value",
+                "authorization": "Bearer secret",
+            },
+        )
 
     assert "provider_http_request" in caplog.text
     assert "method=GET" in caplog.text
+    assert "secret-key" not in caplog.text
+    assert "secret-key-2" not in caplog.text
+    assert "token-value" not in caplog.text
+    assert "access-token-value" not in caplog.text
+    assert "Bearer secret" not in caplog.text
+    assert "[REDACTED]" in caplog.text

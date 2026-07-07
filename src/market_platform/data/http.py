@@ -4,6 +4,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
 
@@ -23,6 +24,13 @@ type SleepFn = Callable[[float], None]
 
 DEFAULT_USER_AGENT = "market-platform/0.1.0"
 RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
+SENSITIVE_QUERY_PARAM_NAMES = {
+    "apikey",
+    "authorization",
+    "access_token",
+    "key",
+    "token",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,9 +91,10 @@ class HTTPClient:
         for attempt in range(1, attempts + 1):
             try:
                 self._logger.info(
-                    "provider_http_request method=%s url=%s attempt=%s",
+                    "provider_http_request method=%s url=%s params=%s attempt=%s",
                     method,
-                    url,
+                    self._redact_url(url),
+                    self._redact_params(params),
                     attempt,
                 )
                 response = self._client.request(
@@ -171,6 +180,31 @@ class HTTPClient:
         except ValueError as exc:
             raise DataProviderError("HTTP response did not contain valid JSON") from exc
         return parsed
+
+    def _redact_url(self, url: str) -> str:
+        parts = urlsplit(url)
+        if not parts.query:
+            return url
+
+        query_pairs = parse_qsl(parts.query, keep_blank_values=True)
+        redacted_query = urlencode(
+            [(key, self._redact_query_value(key, value)) for key, value in query_pairs]
+        )
+        return urlunsplit(
+            (parts.scheme, parts.netloc, parts.path, redacted_query, parts.fragment)
+        )
+
+    def _redact_params(self, params: Mapping[str, Any] | None) -> dict[str, Any] | None:
+        if params is None:
+            return None
+        return {
+            key: self._redact_query_value(key, value) for key, value in params.items()
+        }
+
+    def _redact_query_value(self, key: str, value: Any) -> Any:
+        if key.strip().lower() in SENSITIVE_QUERY_PARAM_NAMES:
+            return "[REDACTED]"
+        return value
 
 
 def create_http_client() -> HTTPClient:
