@@ -7,6 +7,7 @@ import asyncio
 import json
 import sys
 from collections.abc import Sequence
+from datetime import date, datetime
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -42,8 +43,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Fetch daily market prices.",
     )
     fetch_parser.add_argument("--symbol", required=True, help="Ticker symbol.")
-    fetch_parser.add_argument("--start", required=True, help="Start date, YYYY-MM-DD.")
-    fetch_parser.add_argument("--end", required=True, help="End date, YYYY-MM-DD.")
+    fetch_parser.add_argument(
+        "--start",
+        type=_parse_iso_date,
+        required=True,
+        help="Start date, YYYY-MM-DD.",
+    )
+    fetch_parser.add_argument(
+        "--end",
+        type=_parse_iso_date,
+        required=True,
+        help="End date, YYYY-MM-DD.",
+    )
     fetch_parser.add_argument(
         "--format",
         choices=["table", "json", "csv"],
@@ -89,12 +100,20 @@ def main(argv: Sequence[str] | None = None) -> None:
 
 def _handle_data_fetch(args: argparse.Namespace) -> int:
     logger = get_logger(__name__)
+    symbol = args.symbol.strip().upper()
+    if args.start > args.end:
+        print(
+            "error: start date must be earlier than or equal to end date.",
+            file=sys.stderr,
+        )
+        return 2
+
     service = create_default_market_data_service()
 
     try:
         frame = asyncio.run(
             service.get_daily_prices(
-                symbol=args.symbol,
+                symbol=symbol,
                 start=args.start,
                 end=args.end,
                 provider=args.provider,
@@ -150,3 +169,12 @@ def _json_default(value: object) -> object:
     if isinstance(value, pd.Timestamp):
         return value.isoformat()
     return str(value)
+
+
+def _parse_iso_date(value: str) -> date:
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"invalid date {value!r}; expected format YYYY-MM-DD"
+        ) from exc
