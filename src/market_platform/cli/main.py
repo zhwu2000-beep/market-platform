@@ -13,7 +13,11 @@ from typing import Protocol, cast
 
 import pandas as pd
 
-from market_platform.data.exceptions import DataProviderError
+from market_platform.data.diagnostics import (
+    build_provider_diagnostics_report,
+    render_provider_diagnostics_report,
+)
+from market_platform.data.exceptions import ConfigurationError, DataProviderError
 from market_platform.data.factory import create_default_market_data_service
 from market_platform.logging import configure_logging, get_logger
 
@@ -74,6 +78,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     fetch_parser.set_defaults(handler=_handle_data_fetch)
 
+    providers_parser = data_subparsers.add_parser(
+        "providers",
+        help="Show provider diagnostics.",
+    )
+    providers_parser.set_defaults(handler=_handle_data_providers)
+
     return parser
 
 
@@ -130,6 +140,21 @@ def _handle_data_fetch(args: argparse.Namespace) -> int:
         print(f"Wrote {len(frame)} rows to {args.output} as {args.format}.")
         return 0
 
+    print(rendered_output, end="" if rendered_output.endswith("\n") else "\n")
+    return 0
+
+
+def _handle_data_providers(_: argparse.Namespace) -> int:
+    logger = get_logger(__name__)
+
+    try:
+        report = build_provider_diagnostics_report()
+    except ConfigurationError as exc:
+        logger.error("Failed to build provider diagnostics: %s", exc)
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    rendered_output = render_provider_diagnostics_report(report)
     print(rendered_output, end="" if rendered_output.endswith("\n") else "\n")
     return 0
 
