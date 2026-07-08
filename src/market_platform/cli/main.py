@@ -110,6 +110,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Explicit provider to check. Defaults to configured provider order.",
     )
     health_parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress informational output from provider health checks.",
+    )
+    health_parser.add_argument(
+        "--log-level",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        default=None,
+        help="Set the provider health logging level.",
+    )
+    health_parser.add_argument(
         "--fail-on",
         choices=["never", "failed", "degraded", "unknown"],
         default="never",
@@ -130,6 +141,7 @@ def run(argv: Sequence[str] | None = None) -> int:
     raw_argv = sys.argv[1:] if argv is None else argv
     normalized_argv = _normalize_data_providers_health_argv(raw_argv)
     args = parser.parse_args(normalized_argv)
+    _configure_logging_for_args(args)
 
     handler = getattr(args, "handler", None)
     if handler is None:
@@ -142,7 +154,6 @@ def run(argv: Sequence[str] | None = None) -> int:
 def main(argv: Sequence[str] | None = None) -> None:
     """Run the command line interface."""
 
-    configure_logging()
     raise SystemExit(run(argv))
 
 
@@ -353,7 +364,14 @@ def _normalize_data_providers_health_argv(
     except ValueError:
         return argv
 
-    move_options = {"--format", "--output", "--provider", "--fail-on"}
+    move_options = {
+        "--format": True,
+        "--output": True,
+        "--provider": True,
+        "--fail-on": True,
+        "--log-level": True,
+        "--quiet": False,
+    }
     moved_tokens: list[str] = []
     retained_tokens = tokens[: providers_index + 1]
     index = providers_index + 1
@@ -365,9 +383,11 @@ def _normalize_data_providers_health_argv(
             continue
 
         moved_tokens.append(token)
-        if index + 1 < len(tokens):
+        if move_options[token] and index + 1 < len(tokens):
             moved_tokens.append(tokens[index + 1])
-        index += 2
+            index += 2
+            continue
+        index += 1
 
     if not moved_tokens:
         return argv
@@ -394,3 +414,19 @@ def _provider_health_exit_code(status: str, fail_on: str) -> int:
         return int(normalized_status in {"unknown", "degraded", "failed"})
 
     raise ValueError(f"Unsupported fail-on policy: {fail_on}")
+
+
+def _configure_logging_for_args(args: argparse.Namespace) -> None:
+    if getattr(args, "data_command", None) == "providers" and getattr(
+        args,
+        "providers_command",
+        None,
+    ) == "health":
+        if getattr(args, "quiet", False):
+            configure_logging("ERROR")
+            return
+        log_level = getattr(args, "log_level", None)
+        configure_logging(log_level or "WARNING")
+        return
+
+    configure_logging()

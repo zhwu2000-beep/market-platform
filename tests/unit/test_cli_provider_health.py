@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import sys
 from dataclasses import dataclass
@@ -10,6 +11,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+import market_platform.logging as market_logging
 from market_platform.cli import main as cli_main
 from market_platform.config import Settings
 from market_platform.data import health
@@ -85,6 +87,31 @@ def _stub_health_report(
     )
 
 
+def _stub_logging_health_report(
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+) -> None:
+    monkeypatch.setattr(
+        market_logging,
+        "get_settings",
+        lambda: Settings.model_construct(log_level="INFO"),
+    )
+
+    def _build_provider_health_report(provider: str | None = None) -> (
+        health.ProviderHealthReport
+    ):
+        logging.getLogger("market_platform.tests.health").info(
+            "provider health info log"
+        )
+        return _health_report(status)
+
+    monkeypatch.setattr(
+        cli_main,
+        "build_provider_health_report",
+        _build_provider_health_report,
+    )
+
+
 def test_data_providers_health_command_outputs_json(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -127,6 +154,23 @@ def test_data_providers_health_command_outputs_json(
     assert "TWELVE-SECRET-456" not in captured.out
 
 
+def test_data_providers_health_command_outputs_clean_json_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _stub_logging_health_report(monkeypatch, "ok")
+
+    exit_code = cli_main.run(["data", "providers", "health", "--format", "json"])
+    captured = capsys.readouterr()
+
+    payload = json.loads(captured.out)
+
+    assert exit_code == 0
+    assert payload["status"] == "ok"
+    assert "provider health info log" not in captured.out
+    assert "provider health info log" not in captured.err
+
+
 @pytest.mark.parametrize("status", ["degraded", "failed", "unknown"])
 def test_data_providers_health_command_default_fail_on_never_keeps_exit_code_zero(
     monkeypatch: pytest.MonkeyPatch,
@@ -140,6 +184,81 @@ def test_data_providers_health_command_default_fail_on_never_keeps_exit_code_zer
 
     assert exit_code == 0
     assert f"Overall status: {status}" in captured.out
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["data", "providers", "--quiet", "health", "--format", "json"],
+        ["data", "providers", "health", "--quiet", "--format", "json"],
+    ],
+)
+def test_data_providers_health_command_quiet_suppresses_info_logs(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    argv: list[str],
+) -> None:
+    _stub_logging_health_report(monkeypatch, "ok")
+
+    exit_code = cli_main.run(argv)
+    captured = capsys.readouterr()
+
+    payload = json.loads(captured.out)
+
+    assert exit_code == 0
+    assert payload["status"] == "ok"
+    assert "provider health info log" not in captured.err
+    assert "provider health info log" not in captured.out
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["data", "providers", "--log-level", "INFO", "health", "--format", "json"],
+        ["data", "providers", "health", "--log-level", "INFO", "--format", "json"],
+    ],
+)
+def test_data_providers_health_command_log_level_info_shows_info_logs(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    argv: list[str],
+) -> None:
+    _stub_logging_health_report(monkeypatch, "ok")
+
+    exit_code = cli_main.run(argv)
+    captured = capsys.readouterr()
+
+    payload = json.loads(captured.out)
+
+    assert exit_code == 0
+    assert payload["status"] == "ok"
+    assert "provider health info log" in captured.err
+    assert "provider health info log" not in captured.out
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["data", "providers", "--log-level", "ERROR", "health", "--format", "json"],
+        ["data", "providers", "health", "--log-level", "ERROR", "--format", "json"],
+    ],
+)
+def test_data_providers_health_command_log_level_error_suppresses_info_logs(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    argv: list[str],
+) -> None:
+    _stub_logging_health_report(monkeypatch, "ok")
+
+    exit_code = cli_main.run(argv)
+    captured = capsys.readouterr()
+
+    payload = json.loads(captured.out)
+
+    assert exit_code == 0
+    assert payload["status"] == "ok"
+    assert "provider health info log" not in captured.err
+    assert "provider health info log" not in captured.out
 
 
 def test_data_providers_health_command_fail_on_before_health(
@@ -207,6 +326,20 @@ def test_data_providers_health_command_rejects_invalid_fail_on_value(
 ) -> None:
     with pytest.raises(SystemExit) as exc_info:
         cli_main.run(["data", "providers", "health", "--fail-on", "sometimes"])
+
+    captured = capsys.readouterr()
+
+    assert exc_info.value.code == 2
+    assert "invalid choice" in captured.err
+
+
+def test_data_providers_health_command_rejects_invalid_log_level_value(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        cli_main.run(
+            ["data", "providers", "health", "--log-level", "sometimes"]
+        )
 
     captured = capsys.readouterr()
 
@@ -327,6 +460,46 @@ def test_data_providers_health_command_writes_file_with_output_before_health(
         payload = json.loads(output_path.read_text(encoding="utf-8"))
         assert payload["status"] == "ok"
         assert "Wrote provider health report" in captured.out
+    finally:
+        shutil.rmtree(output_root, ignore_errors=True)
+
+
+def test_data_providers_health_command_writes_clean_json_file_with_logs(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _stub_logging_health_report(monkeypatch, "ok")
+
+    output_root = Path(".test-cli-health-output")
+    output_path = output_root / "nested" / "reports" / "health-clean.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "market-platform",
+            "data",
+            "providers",
+            "--output",
+            str(output_path),
+            "--format",
+            "json",
+            "--log-level",
+            "INFO",
+            "health",
+        ],
+    )
+
+    try:
+        exit_code = cli_main.run()
+        captured = capsys.readouterr()
+
+        assert exit_code == 0
+        assert output_path.exists()
+        payload = json.loads(output_path.read_text(encoding="utf-8"))
+        assert payload["status"] == "ok"
+        assert "Wrote provider health report" in captured.out
+        assert "provider health info log" not in captured.out
+        assert "provider health info log" in captured.err
     finally:
         shutil.rmtree(output_root, ignore_errors=True)
 
