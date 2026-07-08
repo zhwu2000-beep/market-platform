@@ -70,6 +70,21 @@ def _settings(order: str) -> Settings:
     )
 
 
+def _health_report(status: str) -> health.ProviderHealthReport:
+    return health.ProviderHealthReport(status=status, providers=())
+
+
+def _stub_health_report(
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+) -> None:
+    monkeypatch.setattr(
+        cli_main,
+        "build_provider_health_report",
+        lambda provider=None: _health_report(status),
+    )
+
+
 def test_data_providers_health_command_outputs_json(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -110,6 +125,93 @@ def test_data_providers_health_command_outputs_json(
     assert "Traceback" not in captured.err
     assert "POLYGON-SECRET-123" not in captured.out
     assert "TWELVE-SECRET-456" not in captured.out
+
+
+@pytest.mark.parametrize("status", ["degraded", "failed", "unknown"])
+def test_data_providers_health_command_default_fail_on_never_keeps_exit_code_zero(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    status: str,
+) -> None:
+    _stub_health_report(monkeypatch, status)
+
+    exit_code = cli_main.run(["data", "providers", "health"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert f"Overall status: {status}" in captured.out
+
+
+def test_data_providers_health_command_fail_on_before_health(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _stub_health_report(monkeypatch, "degraded")
+
+    exit_code = cli_main.run(
+        ["data", "providers", "--fail-on", "degraded", "health"]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "Overall status: degraded" in captured.out
+
+
+def test_data_providers_health_command_fail_on_after_health(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _stub_health_report(monkeypatch, "degraded")
+
+    exit_code = cli_main.run(
+        ["data", "providers", "health", "--fail-on", "degraded"]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "Overall status: degraded" in captured.out
+
+
+@pytest.mark.parametrize(
+    ("fail_on", "status", "expected_exit_code"),
+    [
+        ("failed", "failed", 1),
+        ("failed", "degraded", 0),
+        ("degraded", "degraded", 1),
+        ("degraded", "failed", 1),
+        ("unknown", "unknown", 1),
+        ("unknown", "degraded", 1),
+        ("unknown", "failed", 1),
+        ("unknown", "ok", 0),
+    ],
+)
+def test_data_providers_health_command_fail_on_thresholds(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    fail_on: str,
+    status: str,
+    expected_exit_code: int,
+) -> None:
+    _stub_health_report(monkeypatch, status)
+
+    exit_code = cli_main.run(
+        ["data", "providers", "health", "--fail-on", fail_on]
+    )
+    capsys.readouterr()
+
+    assert exit_code == expected_exit_code
+
+
+def test_data_providers_health_command_rejects_invalid_fail_on_value(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        cli_main.run(["data", "providers", "health", "--fail-on", "sometimes"])
+
+    captured = capsys.readouterr()
+
+    assert exc_info.value.code == 2
+    assert "invalid choice" in captured.err
 
 
 def test_data_providers_health_command_outputs_json_when_format_precedes_health(
@@ -233,12 +335,7 @@ def test_data_providers_health_command_writes_file_with_real_cli_argv(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    registry = _registry(
-        _FakeProvider(name="polygon", health_result=True),
-    )
-    monkeypatch.setattr(health, "create_default_registry", lambda: registry)
-    settings = _settings("polygon")
-    monkeypatch.setattr(health, "get_settings", lambda: settings)
+    _stub_health_report(monkeypatch, "degraded")
 
     output_root = Path(".test-cli-health-output")
     output_path = output_root / "nested" / "reports" / "health-parent.json"
@@ -253,6 +350,8 @@ def test_data_providers_health_command_writes_file_with_real_cli_argv(
             str(output_path),
             "--format",
             "json",
+            "--fail-on",
+            "degraded",
             "health",
         ],
     )
@@ -261,12 +360,12 @@ def test_data_providers_health_command_writes_file_with_real_cli_argv(
         exit_code = cli_main.run()
         captured = capsys.readouterr()
 
-        assert exit_code == 0
+        assert exit_code == 1
         assert output_path.exists()
         payload = json.loads(output_path.read_text(encoding="utf-8"))
-        assert payload["status"] == "ok"
+        assert payload["status"] == "degraded"
         assert "Wrote provider health report" in captured.out
-        assert "{\"status\": \"ok\"" not in captured.out
+        assert "{\"status\":" not in captured.out
     finally:
         shutil.rmtree(output_root, ignore_errors=True)
 
