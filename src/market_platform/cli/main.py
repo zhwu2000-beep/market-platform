@@ -96,7 +96,12 @@ def build_parser() -> argparse.ArgumentParser:
     health_parser = providers_subparsers.add_parser(
         "health",
         help="Run provider health checks.",
-        parents=[_build_output_options_parser(["table", "json"])],
+        parents=[
+            _build_output_options_parser(
+                ["table", "json"],
+                default=argparse.SUPPRESS,
+            )
+        ],
     )
     health_parser.add_argument(
         "--provider",
@@ -113,7 +118,9 @@ def run(argv: Sequence[str] | None = None) -> int:
     """Run the CLI and return an exit code."""
 
     parser = build_parser()
-    args = parser.parse_args(argv)
+    raw_argv = sys.argv[1:] if argv is None else argv
+    normalized_argv = _normalize_data_providers_health_argv(raw_argv)
+    args = parser.parse_args(normalized_argv)
 
     handler = getattr(args, "handler", None)
     if handler is None:
@@ -188,6 +195,8 @@ def _handle_data_providers(args: argparse.Namespace) -> int:
 
 def _handle_data_provider_health(args: argparse.Namespace) -> int:
     logger = get_logger(__name__)
+    output_format = getattr(args, "format", "table")
+    output_path = getattr(args, "output", None)
 
     try:
         report = build_provider_health_report(args.provider)
@@ -196,10 +205,12 @@ def _handle_data_provider_health(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    rendered_output = _render_provider_health_report(report, args.format)
-    if args.output is not None:
-        _write_output(Path(args.output), rendered_output)
-        print(f"Wrote provider health report to {args.output} as {args.format}.")
+    rendered_output = _render_provider_health_report(report, output_format)
+    if output_path is not None:
+        _write_output(Path(output_path), rendered_output)
+        print(
+            f"Wrote provider health report to {output_path} as {output_format}."
+        )
         return 0
 
     print(rendered_output, end="" if rendered_output.endswith("\n") else "\n")
@@ -296,12 +307,14 @@ def _parse_iso_date(value: str) -> date:
 
 def _build_output_options_parser(
     formats: list[str],
+    *,
+    default: object = "table",
 ) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument(
         "--format",
         choices=formats,
-        default="table",
+        default=default,
         help="Output format.",
     )
     parser.add_argument(
@@ -314,3 +327,44 @@ def _build_output_options_parser(
 
 def _normalize_provider_name_arg(value: str) -> str:
     return normalize_provider_name(value)
+
+
+def _normalize_data_providers_health_argv(
+    argv: Sequence[str] | None,
+) -> Sequence[str] | None:
+    if argv is None:
+        return None
+
+    tokens = list(argv)
+    try:
+        data_index = tokens.index("data")
+        providers_index = tokens.index("providers", data_index + 1)
+        health_index = tokens.index("health", providers_index + 1)
+    except ValueError:
+        return argv
+
+    move_options = {"--format", "--output", "--provider"}
+    moved_tokens: list[str] = []
+    retained_tokens = tokens[: providers_index + 1]
+    index = providers_index + 1
+    while index < health_index:
+        token = tokens[index]
+        if token not in move_options:
+            retained_tokens.append(token)
+            index += 1
+            continue
+
+        moved_tokens.append(token)
+        if index + 1 < len(tokens):
+            moved_tokens.append(tokens[index + 1])
+        index += 2
+
+    if not moved_tokens:
+        return argv
+
+    return [
+        *retained_tokens,
+        tokens[health_index],
+        *tokens[health_index + 1 :],
+        *moved_tokens,
+    ]

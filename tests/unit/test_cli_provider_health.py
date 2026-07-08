@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import sys
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -111,6 +112,27 @@ def test_data_providers_health_command_outputs_json(
     assert "TWELVE-SECRET-456" not in captured.out
 
 
+def test_data_providers_health_command_outputs_json_when_format_precedes_health(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    registry = _registry(
+        _FakeProvider(name="polygon", health_result=True),
+    )
+    monkeypatch.setattr(health, "create_default_registry", lambda: registry)
+    settings = _settings("polygon")
+    monkeypatch.setattr(health, "get_settings", lambda: settings)
+
+    exit_code = cli_main.run(["data", "providers", "--format", "json", "health"])
+    captured = capsys.readouterr()
+
+    payload = json.loads(captured.out)
+
+    assert exit_code == 0
+    assert payload["status"] == "ok"
+    assert payload["providers"][0]["provider"] == "polygon"
+
+
 def test_data_providers_health_command_table_includes_provider_and_status(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -131,6 +153,122 @@ def test_data_providers_health_command_table_includes_provider_and_status(
     assert "twelvedata" in captured.out
     assert "status" in captured.out
     assert "healthy" in captured.out
+
+
+def test_data_providers_health_command_writes_file_with_output_after_health(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    registry = _registry(
+        _FakeProvider(name="polygon", health_result=True),
+    )
+    monkeypatch.setattr(health, "create_default_registry", lambda: registry)
+    settings = _settings("polygon")
+    monkeypatch.setattr(health, "get_settings", lambda: settings)
+
+    output_root = Path(".test-cli-health-output")
+    output_path = output_root / "nested" / "reports" / "health.json"
+
+    try:
+        exit_code = cli_main.run(
+            [
+                "data",
+                "providers",
+                "health",
+                "--format",
+                "json",
+                "--output",
+                str(output_path),
+            ]
+        )
+        captured = capsys.readouterr()
+
+        assert exit_code == 0
+        assert output_path.exists()
+        payload = json.loads(output_path.read_text(encoding="utf-8"))
+        assert payload["status"] == "ok"
+        assert "Wrote provider health report" in captured.out
+    finally:
+        shutil.rmtree(output_root, ignore_errors=True)
+
+
+def test_data_providers_health_command_writes_file_with_output_before_health(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    registry = _registry(
+        _FakeProvider(name="polygon", health_result=True),
+    )
+    monkeypatch.setattr(health, "create_default_registry", lambda: registry)
+    settings = _settings("polygon")
+    monkeypatch.setattr(health, "get_settings", lambda: settings)
+
+    output_root = Path(".test-cli-health-output")
+    output_path = output_root / "nested" / "reports" / "health.json"
+
+    try:
+        exit_code = cli_main.run(
+            [
+                "data",
+                "providers",
+                "--output",
+                str(output_path),
+                "--format",
+                "json",
+                "health",
+            ]
+        )
+        captured = capsys.readouterr()
+
+        assert exit_code == 0
+        assert output_path.exists()
+        payload = json.loads(output_path.read_text(encoding="utf-8"))
+        assert payload["status"] == "ok"
+        assert "Wrote provider health report" in captured.out
+    finally:
+        shutil.rmtree(output_root, ignore_errors=True)
+
+
+def test_data_providers_health_command_writes_file_with_real_cli_argv(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    registry = _registry(
+        _FakeProvider(name="polygon", health_result=True),
+    )
+    monkeypatch.setattr(health, "create_default_registry", lambda: registry)
+    settings = _settings("polygon")
+    monkeypatch.setattr(health, "get_settings", lambda: settings)
+
+    output_root = Path(".test-cli-health-output")
+    output_path = output_root / "nested" / "reports" / "health-parent.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "market-platform",
+            "data",
+            "providers",
+            "--output",
+            str(output_path),
+            "--format",
+            "json",
+            "health",
+        ],
+    )
+
+    try:
+        exit_code = cli_main.run()
+        captured = capsys.readouterr()
+
+        assert exit_code == 0
+        assert output_path.exists()
+        payload = json.loads(output_path.read_text(encoding="utf-8"))
+        assert payload["status"] == "ok"
+        assert "Wrote provider health report" in captured.out
+        assert "{\"status\": \"ok\"" not in captured.out
+    finally:
+        shutil.rmtree(output_root, ignore_errors=True)
 
 
 def test_data_providers_health_command_explicit_provider_only_checks_one(
@@ -201,39 +339,3 @@ def test_data_providers_health_command_unknown_provider_fails_cleanly(
     assert exit_code == 1
     assert "Unknown provider" in captured.err
     assert "Traceback" not in captured.err
-
-
-def test_data_providers_health_command_writes_file_and_creates_parent_dirs(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    registry = _registry(
-        _FakeProvider(name="polygon", health_result=True),
-    )
-    monkeypatch.setattr(health, "create_default_registry", lambda: registry)
-    monkeypatch.setattr(health, "get_settings", lambda: _settings("polygon"))
-
-    output_root = Path(".test-cli-health-output")
-    output_path = output_root / "nested" / "reports" / "health.json"
-
-    try:
-        exit_code = cli_main.run(
-            [
-                "data",
-                "providers",
-                "health",
-                "--format",
-                "json",
-                "--output",
-                str(output_path),
-            ]
-        )
-        captured = capsys.readouterr()
-
-        assert exit_code == 0
-        assert output_path.exists()
-        payload = json.loads(output_path.read_text(encoding="utf-8"))
-        assert payload["status"] == "ok"
-        assert "Wrote provider health report" in captured.out
-    finally:
-        shutil.rmtree(output_root, ignore_errors=True)
