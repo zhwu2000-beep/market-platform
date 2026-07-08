@@ -109,6 +109,15 @@ def build_parser() -> argparse.ArgumentParser:
         type=_normalize_provider_name_arg,
         help="Explicit provider to check. Defaults to configured provider order.",
     )
+    health_parser.add_argument(
+        "--fail-on",
+        choices=["never", "failed", "degraded", "unknown"],
+        default="never",
+        help=(
+            "Exit with a non-zero status when the overall health report reaches "
+            "the selected severity."
+        ),
+    )
     health_parser.set_defaults(handler=_handle_data_provider_health)
 
     return parser
@@ -197,6 +206,7 @@ def _handle_data_provider_health(args: argparse.Namespace) -> int:
     logger = get_logger(__name__)
     output_format = getattr(args, "format", "table")
     output_path = getattr(args, "output", None)
+    fail_on = getattr(args, "fail_on", "never")
 
     try:
         report = build_provider_health_report(args.provider)
@@ -211,10 +221,10 @@ def _handle_data_provider_health(args: argparse.Namespace) -> int:
         print(
             f"Wrote provider health report to {output_path} as {output_format}."
         )
-        return 0
+        return _provider_health_exit_code(report.status, fail_on)
 
     print(rendered_output, end="" if rendered_output.endswith("\n") else "\n")
-    return 0
+    return _provider_health_exit_code(report.status, fail_on)
 
 
 def _render_provider_diagnostics_report(
@@ -343,7 +353,7 @@ def _normalize_data_providers_health_argv(
     except ValueError:
         return argv
 
-    move_options = {"--format", "--output", "--provider"}
+    move_options = {"--format", "--output", "--provider", "--fail-on"}
     moved_tokens: list[str] = []
     retained_tokens = tokens[: providers_index + 1]
     index = providers_index + 1
@@ -368,3 +378,19 @@ def _normalize_data_providers_health_argv(
         *tokens[health_index + 1 :],
         *moved_tokens,
     ]
+
+
+def _provider_health_exit_code(status: str, fail_on: str) -> int:
+    normalized_status = status.strip().lower()
+    normalized_fail_on = fail_on.strip().lower()
+
+    if normalized_fail_on == "never":
+        return 0
+    if normalized_fail_on == "failed":
+        return int(normalized_status == "failed")
+    if normalized_fail_on == "degraded":
+        return int(normalized_status in {"degraded", "failed"})
+    if normalized_fail_on == "unknown":
+        return int(normalized_status in {"unknown", "degraded", "failed"})
+
+    raise ValueError(f"Unsupported fail-on policy: {fail_on}")
