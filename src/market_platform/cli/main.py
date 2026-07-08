@@ -14,6 +14,7 @@ from typing import Protocol, cast
 import pandas as pd
 
 from market_platform.data.diagnostics import (
+    ProviderDiagnosticsReport,
     build_provider_diagnostics_report,
     render_provider_diagnostics_report,
 )
@@ -82,6 +83,17 @@ def build_parser() -> argparse.ArgumentParser:
         "providers",
         help="Show provider diagnostics.",
     )
+    providers_parser.add_argument(
+        "--format",
+        choices=["table", "json"],
+        default="table",
+        help="Output format.",
+    )
+    providers_parser.add_argument(
+        "--output",
+        default=None,
+        help="Write formatted output to a file instead of stdout.",
+    )
     providers_parser.set_defaults(handler=_handle_data_providers)
 
     return parser
@@ -144,7 +156,7 @@ def _handle_data_fetch(args: argparse.Namespace) -> int:
     return 0
 
 
-def _handle_data_providers(_: argparse.Namespace) -> int:
+def _handle_data_providers(args: argparse.Namespace) -> int:
     logger = get_logger(__name__)
 
     try:
@@ -154,9 +166,41 @@ def _handle_data_providers(_: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    rendered_output = render_provider_diagnostics_report(report)
+    rendered_output = _render_provider_diagnostics_report(report, args.format)
+    if args.output is not None:
+        _write_output(Path(args.output), rendered_output)
+        print(f"Wrote provider diagnostics to {args.output} as {args.format}.")
+        return 0
+
     print(rendered_output, end="" if rendered_output.endswith("\n") else "\n")
     return 0
+
+
+def _render_provider_diagnostics_report(
+    report: ProviderDiagnosticsReport,
+    output_format: str,
+) -> str:
+    if output_format == "table":
+        return render_provider_diagnostics_report(report)
+    if output_format == "json":
+        return _render_provider_diagnostics_json(report)
+    raise ValueError(f"Unsupported output format: {output_format}")
+
+
+def _render_provider_diagnostics_json(report: ProviderDiagnosticsReport) -> str:
+    payload = {
+        "configured_provider_order": list(report.configured_provider_order),
+        "known_provider_names": list(report.known_provider_names),
+        "providers": [
+            {
+                "name": provider.name,
+                "configured": provider.configured,
+                "capabilities": list(provider.capabilities),
+            }
+            for provider in report.providers
+        ],
+    }
+    return json.dumps(payload, ensure_ascii=False) + "\n"
 
 
 def _render_daily_prices(frame: pd.DataFrame, output_format: str) -> str:
