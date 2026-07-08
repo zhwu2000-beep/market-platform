@@ -2,6 +2,7 @@
 
 import logging
 
+from rich.console import Console
 from rich.logging import RichHandler
 
 from market_platform.config import get_settings
@@ -15,7 +16,12 @@ def configure_logging() -> None:
         level=settings.log_level,
         format="%(message)s",
         datefmt="[%X]",
-        handlers=[RichHandler(rich_tracebacks=True)],
+        handlers=[
+            RichHandler(
+                console=Console(stderr=True),
+                rich_tracebacks=True,
+            )
+        ],
     )
 
 
