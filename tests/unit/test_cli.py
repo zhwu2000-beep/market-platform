@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -13,13 +14,13 @@ from market_platform.cli import main as cli_main
 @dataclass
 class _FakeService:
     frame: pd.DataFrame
-    calls: list[tuple[str, str, str, str | None]]
+    calls: list[tuple[str, date, date, str | None]]
 
     async def get_daily_prices(
         self,
         symbol: str,
-        start: str,
-        end: str,
+        start: date,
+        end: date,
         provider: str | None = None,
     ) -> pd.DataFrame:
         self.calls.append((symbol, start, end, provider))
@@ -59,7 +60,7 @@ def test_default_table_format_still_works(
             "data",
             "fetch",
             "--symbol",
-            "MSFT",
+            "msft",
             "--start",
             "2026-01-01",
             "--end",
@@ -72,7 +73,14 @@ def test_default_table_format_still_works(
     assert exit_code == 0
     assert "MSFT" in captured.out
     assert "polygon" in captured.out
-    assert service.calls == [("MSFT", "2026-01-01", "2026-01-02", None)]
+    assert service.calls == [
+        (
+            "MSFT",
+            date(2026, 1, 1),
+            date(2026, 1, 2),
+            None,
+        )
+    ]
 
 
 def test_json_format_produces_valid_json(
@@ -152,6 +160,85 @@ def test_csv_format_produces_csv_output(
     assert "MSFT,2026-01-01T00:00:00+00:00,100.0,101.0,99.0,100.5,1000,polygon" in (
         captured.out
     )
+
+
+@pytest.mark.parametrize(
+    ("flag", "value", "expected"),
+    [
+        (
+            "--start",
+            "2026-13-01",
+            "argument --start: invalid date '2026-13-01'; expected format YYYY-MM-DD",
+        ),
+        (
+            "--end",
+            "abc",
+            "argument --end: invalid date 'abc'; expected format YYYY-MM-DD",
+        ),
+    ],
+)
+def test_invalid_date_inputs_exit_cleanly(
+    flag: str,
+    value: str,
+    expected: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        cli_main.run(
+            [
+                "data",
+                "fetch",
+                "--symbol",
+                "MSFT",
+                "--start",
+                "2026-01-01" if flag == "--end" else value,
+                "--end",
+                "2026-01-02" if flag == "--start" else value,
+            ]
+        )
+
+    captured = capsys.readouterr()
+
+    assert excinfo.value.code == 2
+    assert expected in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_start_after_end_fails_before_service_call(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    created = False
+
+    def _create_service() -> _FakeService:
+        nonlocal created
+        created = True
+        return _FakeService(frame=_frame(), calls=[])
+
+    monkeypatch.setattr(
+        cli_main,
+        "create_default_market_data_service",
+        _create_service,
+    )
+
+    exit_code = cli_main.run(
+        [
+            "data",
+            "fetch",
+            "--symbol",
+            "MSFT",
+            "--start",
+            "2026-01-03",
+            "--end",
+            "2026-01-02",
+        ]
+    )
+
+    captured = capsys.readouterr()
+
+    assert exit_code == 2
+    assert not created
+    assert "start date must be earlier than or equal to end date" in captured.err
 
 
 def test_csv_format_with_output_writes_file(
