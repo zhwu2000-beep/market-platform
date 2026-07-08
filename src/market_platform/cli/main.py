@@ -13,6 +13,7 @@ from typing import Protocol, cast
 
 import pandas as pd
 
+from market_platform.data.capabilities import normalize_provider_name
 from market_platform.data.diagnostics import (
     ProviderDiagnosticsReport,
     build_provider_diagnostics_report,
@@ -20,6 +21,11 @@ from market_platform.data.diagnostics import (
 )
 from market_platform.data.exceptions import ConfigurationError, DataProviderError
 from market_platform.data.factory import create_default_market_data_service
+from market_platform.data.health import (
+    ProviderHealthReport,
+    build_provider_health_report,
+    render_provider_health_report,
+)
 from market_platform.logging import configure_logging, get_logger
 
 
@@ -82,19 +88,23 @@ def build_parser() -> argparse.ArgumentParser:
     providers_parser = data_subparsers.add_parser(
         "providers",
         help="Show provider diagnostics.",
-    )
-    providers_parser.add_argument(
-        "--format",
-        choices=["table", "json"],
-        default="table",
-        help="Output format.",
-    )
-    providers_parser.add_argument(
-        "--output",
-        default=None,
-        help="Write formatted output to a file instead of stdout.",
+        parents=[_build_output_options_parser(["table", "json"])],
     )
     providers_parser.set_defaults(handler=_handle_data_providers)
+
+    providers_subparsers = providers_parser.add_subparsers(dest="providers_command")
+    health_parser = providers_subparsers.add_parser(
+        "health",
+        help="Run provider health checks.",
+        parents=[_build_output_options_parser(["table", "json"])],
+    )
+    health_parser.add_argument(
+        "--provider",
+        default=None,
+        type=_normalize_provider_name_arg,
+        help="Explicit provider to check. Defaults to configured provider order.",
+    )
+    health_parser.set_defaults(handler=_handle_data_provider_health)
 
     return parser
 
@@ -176,6 +186,26 @@ def _handle_data_providers(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_data_provider_health(args: argparse.Namespace) -> int:
+    logger = get_logger(__name__)
+
+    try:
+        report = build_provider_health_report(args.provider)
+    except ConfigurationError as exc:
+        logger.error("Failed to build provider health report: %s", exc)
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    rendered_output = _render_provider_health_report(report, args.format)
+    if args.output is not None:
+        _write_output(Path(args.output), rendered_output)
+        print(f"Wrote provider health report to {args.output} as {args.format}.")
+        return 0
+
+    print(rendered_output, end="" if rendered_output.endswith("\n") else "\n")
+    return 0
+
+
 def _render_provider_diagnostics_report(
     report: ProviderDiagnosticsReport,
     output_format: str,
@@ -201,6 +231,21 @@ def _render_provider_diagnostics_json(report: ProviderDiagnosticsReport) -> str:
         ],
     }
     return json.dumps(payload, ensure_ascii=False) + "\n"
+
+
+def _render_provider_health_report(
+    report: ProviderHealthReport,
+    output_format: str,
+) -> str:
+    if output_format == "table":
+        return render_provider_health_report(report)
+    if output_format == "json":
+        return _render_provider_health_json(report)
+    raise ValueError(f"Unsupported output format: {output_format}")
+
+
+def _render_provider_health_json(report: ProviderHealthReport) -> str:
+    return json.dumps(report.to_payload(), ensure_ascii=False) + "\n"
 
 
 def _render_daily_prices(frame: pd.DataFrame, output_format: str) -> str:
@@ -247,3 +292,25 @@ def _parse_iso_date(value: str) -> date:
         raise argparse.ArgumentTypeError(
             f"invalid date {value!r}; expected format YYYY-MM-DD"
         ) from exc
+
+
+def _build_output_options_parser(
+    formats: list[str],
+) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument(
+        "--format",
+        choices=formats,
+        default="table",
+        help="Output format.",
+    )
+    parser.add_argument(
+        "--output",
+        default=None,
+        help="Write formatted output to a file instead of stdout.",
+    )
+    return parser
+
+
+def _normalize_provider_name_arg(value: str) -> str:
+    return normalize_provider_name(value)
