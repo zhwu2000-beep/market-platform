@@ -318,3 +318,68 @@ def test_output_creates_parent_directories(
     assert output_path.parent.exists()
     assert json.loads(output_path.read_text(encoding="utf-8"))[0]["symbol"] == "MSFT"
     assert "Wrote 1 rows" in captured.out
+
+
+def test_data_providers_default_table_format_still_works(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    exit_code = cli_main.run(["data", "providers"])
+
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Provider diagnostics" in captured.out
+    assert "Configured provider order:" in captured.out
+    assert "Known providers:" in captured.out
+
+
+def test_data_providers_json_format_produces_valid_json(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    exit_code = cli_main.run(["data", "providers", "--format", "json"])
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 0
+    assert sorted(payload) == [
+        "configured_provider_order",
+        "known_provider_names",
+        "providers",
+    ]
+    assert isinstance(payload["configured_provider_order"], list)
+    assert isinstance(payload["known_provider_names"], list)
+    assert isinstance(payload["providers"], list)
+    assert payload["providers"]
+    assert {
+        "name",
+        "configured",
+        "capabilities",
+    } <= set(payload["providers"][0])
+
+
+def test_data_providers_json_output_writes_file(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    output_path = tmp_path / "reports" / "providers.json"
+
+    exit_code = cli_main.run(
+        [
+            "data",
+            "providers",
+            "--format",
+            "json",
+            "--output",
+            str(output_path),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert output_path.exists()
+    assert output_path.parent.exists()
+    assert isinstance(payload["providers"], list)
+    assert "Wrote provider diagnostics" in captured.out
