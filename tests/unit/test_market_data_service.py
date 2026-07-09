@@ -203,6 +203,26 @@ def test_first_successful_latest_price_provider_is_returned() -> None:
     assert second.calls == []
 
 
+def test_first_successful_latest_price_twelve_data_provider_is_returned() -> None:
+    first = _FakeProvider(name="polygon", error=NetworkError("offline"))
+    second_frame = _latest_frame(symbol="MSFT", provider="twelvedata", price=11.0)
+    second = _FakeProvider(name="twelvedata", frame=second_frame)
+    service = MarketDataService(
+        ProviderSelectionPolicy(
+            candidates=[
+                ProviderCandidate(name="polygon", provider=first, priority=1),
+                ProviderCandidate(name="twelvedata", provider=second, priority=2),
+            ]
+        )
+    )
+
+    frame = asyncio.run(service.get_latest_price("MSFT"))
+
+    assert frame.equals(second_frame)
+    assert len(first.calls) == 1
+    assert len(second.calls) == 1
+
+
 def test_first_successful_intraday_provider_is_returned() -> None:
     first_frame = _intraday_frame(symbol="MSFT", provider="twelvedata", close=10.0)
     first = _FakeProvider(name="twelvedata", frame=first_frame)
@@ -474,6 +494,38 @@ def test_explicit_latest_provider_selection_uses_only_requested_provider() -> No
     assert list(frame["provider"]) == ["polygon"]
     assert len(first.calls) == 1
     assert second.calls == []
+
+
+def test_explicit_latest_twelve_data_provider_selection_uses_only_requested_provider(
+) -> None:
+    first = _FakeProvider(
+        name="polygon",
+        frame=_latest_frame(symbol="MSFT", provider="polygon", price=10.0),
+    )
+    second = _FakeProvider(
+        name="twelvedata",
+        frame=_latest_frame(symbol="MSFT", provider="twelvedata", price=11.0),
+    )
+    service = MarketDataService(
+        ProviderSelectionPolicy(
+            candidates=[
+                ProviderCandidate(name="polygon", provider=first, priority=1),
+                ProviderCandidate(name="twelvedata", provider=second, priority=2),
+            ],
+            provider_order=["twelvedata", "polygon"],
+        )
+    )
+
+    frame = asyncio.run(
+        service.get_latest_price(
+            "MSFT",
+            provider="twelve_data",
+        )
+    )
+
+    assert list(frame["provider"]) == ["twelvedata"]
+    assert len(first.calls) == 0
+    assert len(second.calls) == 1
 
 
 def test_explicit_intraday_incapable_provider_raises_clear_error() -> None:

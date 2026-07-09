@@ -23,8 +23,8 @@ def test_twelve_data_reports_only_implemented_capabilities() -> None:
 
     assert DataCapability.DAILY_PRICES in capabilities
     assert DataCapability.INTRADAY_PRICES in capabilities
+    assert DataCapability.LATEST_PRICE in capabilities
     assert DataCapability.HEALTH_CHECK in capabilities
-    assert DataCapability.LATEST_PRICE not in capabilities
 
 
 def test_unknown_provider_capabilities_raise_configuration_error() -> None:
