@@ -13,6 +13,11 @@ from typing import Protocol, cast
 
 import pandas as pd
 
+from market_platform.data.cache import (
+    DEFAULT_MARKET_DATA_CACHE_DIR,
+    MarketDataCache,
+    MarketDataCacheKey,
+)
 from market_platform.data.capabilities import normalize_provider_name
 from market_platform.data.diagnostics import (
     ProviderDiagnosticsReport,
@@ -83,6 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Explicit provider. Defaults to configured provider fallback order.",
     )
+    _add_cache_options(fetch_parser)
     fetch_parser.set_defaults(handler=_handle_data_fetch)
 
     latest_parser = data_subparsers.add_parser(
@@ -97,6 +103,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Explicit provider. Defaults to configured provider fallback order.",
     )
+    _add_cache_options(latest_parser)
     latest_parser.set_defaults(handler=_handle_data_latest)
 
     intraday_parser = data_subparsers.add_parser(
@@ -117,6 +124,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Explicit provider. Defaults to configured provider fallback order.",
     )
+    _add_cache_options(intraday_parser)
     intraday_parser.set_defaults(handler=_handle_data_intraday)
 
     providers_parser = data_subparsers.add_parser(
@@ -175,6 +183,8 @@ def run(argv: Sequence[str] | None = None) -> int:
     raw_argv = sys.argv[1:] if argv is None else argv
     normalized_argv = _normalize_data_providers_health_argv(raw_argv)
     args = parser.parse_args(normalized_argv)
+    if getattr(args, "refresh", False) and not getattr(args, "cache", False):
+        parser.error("--refresh requires --cache")
     _configure_logging_for_args(args)
 
     handler = getattr(args, "handler", None)
@@ -201,21 +211,36 @@ def _handle_data_fetch(args: argparse.Namespace) -> int:
         )
         return 2
 
-    service = create_default_market_data_service()
-
-    try:
-        frame = asyncio.run(
-            service.get_daily_prices(
-                symbol=symbol,
-                start=args.start,
-                end=args.end,
-                provider=args.provider,
+    cache = _create_market_data_cache()
+    cache_key = MarketDataCacheKey.for_daily(
+        symbol=symbol,
+        provider=args.provider,
+        start=args.start.isoformat(),
+        end=args.end.isoformat(),
+    )
+    frame = _load_cached_market_data_frame(
+        cache=cache,
+        cache_key=cache_key,
+        cache_enabled=args.cache,
+        refresh=args.refresh,
+    )
+    if frame is None:
+        service = create_default_market_data_service()
+        try:
+            frame = asyncio.run(
+                service.get_daily_prices(
+                    symbol=symbol,
+                    start=args.start,
+                    end=args.end,
+                    provider=args.provider,
+                )
             )
-        )
-    except DataProviderError as exc:
-        logger.error("Failed to fetch daily prices: %s", exc)
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+        except DataProviderError as exc:
+            logger.error("Failed to fetch daily prices: %s", exc)
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        if args.cache:
+            _save_market_data_frame(cache=cache, cache_key=cache_key, frame=frame)
 
     rendered_output = _render_daily_prices(frame, args.format)
     if args.output is not None:
@@ -233,23 +258,33 @@ def _handle_data_latest(args: argparse.Namespace) -> int:
     output_format = getattr(args, "format", "table")
     output_path = getattr(args, "output", None)
 
-    service = create_default_market_data_service()
-
-    try:
-        frame = asyncio.run(
-            service.get_latest_price(
-                symbol=symbol,
-                provider=args.provider,
+    cache = _create_market_data_cache()
+    cache_key = MarketDataCacheKey.for_latest(symbol=symbol, provider=args.provider)
+    frame = _load_cached_market_data_frame(
+        cache=cache,
+        cache_key=cache_key,
+        cache_enabled=args.cache,
+        refresh=args.refresh,
+    )
+    if frame is None:
+        service = create_default_market_data_service()
+        try:
+            frame = asyncio.run(
+                service.get_latest_price(
+                    symbol=symbol,
+                    provider=args.provider,
+                )
             )
-        )
-    except ConfigurationError as exc:
-        logger.error("Failed to fetch latest price: %s", exc)
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-    except DataProviderError as exc:
-        logger.error("Failed to fetch latest price: %s", exc)
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+        except ConfigurationError as exc:
+            logger.error("Failed to fetch latest price: %s", exc)
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        except DataProviderError as exc:
+            logger.error("Failed to fetch latest price: %s", exc)
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        if args.cache:
+            _save_market_data_frame(cache=cache, cache_key=cache_key, frame=frame)
 
     rendered_output = _render_daily_prices(frame, output_format)
     if output_path is not None:
@@ -267,24 +302,38 @@ def _handle_data_intraday(args: argparse.Namespace) -> int:
     output_format = getattr(args, "format", "table")
     output_path = getattr(args, "output", None)
 
-    service = create_default_market_data_service()
-
-    try:
-        frame = asyncio.run(
-            service.get_intraday_prices(
-                symbol=symbol,
-                provider=args.provider,
-                interval=args.interval,
+    cache = _create_market_data_cache()
+    cache_key = MarketDataCacheKey.for_intraday(
+        symbol=symbol,
+        provider=args.provider,
+        interval=args.interval,
+    )
+    frame = _load_cached_market_data_frame(
+        cache=cache,
+        cache_key=cache_key,
+        cache_enabled=args.cache,
+        refresh=args.refresh,
+    )
+    if frame is None:
+        service = create_default_market_data_service()
+        try:
+            frame = asyncio.run(
+                service.get_intraday_prices(
+                    symbol=symbol,
+                    provider=args.provider,
+                    interval=args.interval,
+                )
             )
-        )
-    except ConfigurationError as exc:
-        logger.error("Failed to fetch intraday prices: %s", exc)
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-    except DataProviderError as exc:
-        logger.error("Failed to fetch intraday prices: %s", exc)
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+        except ConfigurationError as exc:
+            logger.error("Failed to fetch intraday prices: %s", exc)
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        except DataProviderError as exc:
+            logger.error("Failed to fetch intraday prices: %s", exc)
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        if args.cache:
+            _save_market_data_frame(cache=cache, cache_key=cache_key, frame=frame)
 
     rendered_output = _render_daily_prices(frame, output_format)
     if output_path is not None:
@@ -447,6 +496,50 @@ def _build_output_options_parser(
         help="Write formatted output to a file instead of stdout.",
     )
     return parser
+
+
+def _add_cache_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--cache",
+        action="store_true",
+        help="Use the local market data cache.",
+    )
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Refresh the local market data cache before output.",
+    )
+
+
+def _create_market_data_cache() -> MarketDataCache:
+    return MarketDataCache(DEFAULT_MARKET_DATA_CACHE_DIR)
+
+
+def _load_cached_market_data_frame(
+    *,
+    cache: MarketDataCache,
+    cache_key: MarketDataCacheKey,
+    cache_enabled: bool,
+    refresh: bool,
+) -> pd.DataFrame | None:
+    if not cache_enabled or refresh:
+        return None
+
+    try:
+        if cache.exists(cache_key):
+            return cache.load(cache_key)
+    except DataProviderError as exc:
+        get_logger(__name__).warning("Ignoring cache entry: %s", exc)
+    return None
+
+
+def _save_market_data_frame(
+    *,
+    cache: MarketDataCache,
+    cache_key: MarketDataCacheKey,
+    frame: pd.DataFrame,
+) -> None:
+    cache.save(cache_key, frame)
 
 
 def _normalize_provider_name_arg(value: str) -> str:

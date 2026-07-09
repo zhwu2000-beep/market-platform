@@ -147,3 +147,15 @@ market-platform data intraday --symbol AAPL --provider twelve_data --format csv 
 
 v0.19.0 only enables Twelve Data intraday. Polygon intraday is not enabled
 yet.
+
+## Local Cache
+
+`--cache` enables an opt-in local file cache for `data fetch`, `data latest`,
+and `data intraday`. Cache files live under `.market-platform/cache/` and are
+stored as CSV so they stay easy to inspect.
+
+Use `--refresh` together with `--cache` to overwrite an existing cache entry.
+Without `--cache`, commands keep their current provider-first behavior.
+
+The cache is useful for repeated lookups, but cached latest prices can become
+stale. Use `--refresh` when you need a fresh quote.
