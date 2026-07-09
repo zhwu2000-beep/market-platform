@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 
 from market_platform.cli import main as cli_main
+from market_platform.data.cache import MarketDataCache, MarketDataCacheKey
 from market_platform.data.capabilities import DataCapability
 from market_platform.data.provider import DataProvider
 from market_platform.data.selection import ProviderCandidate, ProviderSelectionPolicy
@@ -335,6 +336,189 @@ def test_latest_csv_format_with_output_writes_file(
     )
     assert "Wrote 1 row" in captured.out
     assert service.calls == [("MSFT", None)]
+
+
+def test_fetch_cache_miss_saves_fetched_data(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    service = _FakeService(frame=_frame(), calls=[])
+    cache_dir = tmp_path / ".market-platform" / "cache"
+    monkeypatch.setattr(
+        cli_main,
+        "create_default_market_data_service",
+        lambda: service,
+    )
+    monkeypatch.setattr(
+        cli_main,
+        "DEFAULT_MARKET_DATA_CACHE_DIR",
+        cache_dir,
+    )
+
+    exit_code = cli_main.run(
+        [
+            "data",
+            "fetch",
+            "--symbol",
+            "MSFT",
+            "--start",
+            "2026-01-01",
+            "--end",
+            "2026-01-02",
+            "--cache",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    cache = MarketDataCache(cache_dir)
+    cache_key = MarketDataCacheKey.for_daily(
+        symbol="MSFT",
+        provider=None,
+        start="2026-01-01",
+        end="2026-01-02",
+    )
+
+    assert exit_code == 0
+    assert "MSFT" in captured.out
+    assert service.calls == [("MSFT", date(2026, 1, 1), date(2026, 1, 2), None)]
+    assert cache.exists(cache_key)
+    assert cache.load(cache_key).equals(_frame())
+
+
+def test_latest_cache_hit_avoids_service_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    service = _LatestFakeService(frame=_latest_frame(), calls=[])
+    cache_dir = tmp_path / ".market-platform" / "cache"
+    monkeypatch.setattr(
+        cli_main,
+        "create_default_market_data_service",
+        lambda: service,
+    )
+    monkeypatch.setattr(
+        cli_main,
+        "DEFAULT_MARKET_DATA_CACHE_DIR",
+        cache_dir,
+    )
+
+    cache = MarketDataCache(cache_dir)
+    cache_key = MarketDataCacheKey.for_latest(symbol="MSFT", provider=None)
+    cache.save(cache_key, _latest_frame())
+
+    exit_code = cli_main.run(
+        [
+            "data",
+            "latest",
+            "--symbol",
+            "MSFT",
+            "--cache",
+            "--format",
+            "json",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 0
+    assert payload[0]["provider"] == "polygon"
+    assert service.calls == []
+    assert cache.load(cache_key).equals(_latest_frame())
+
+
+def test_intraday_cache_refresh_overwrites_existing_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    service = _IntradayFakeService(frame=_intraday_frame(), calls=[])
+    cache_dir = tmp_path / ".market-platform" / "cache"
+    monkeypatch.setattr(
+        cli_main,
+        "create_default_market_data_service",
+        lambda: service,
+    )
+    monkeypatch.setattr(
+        cli_main,
+        "DEFAULT_MARKET_DATA_CACHE_DIR",
+        cache_dir,
+    )
+
+    cache = MarketDataCache(cache_dir)
+    cache_key = MarketDataCacheKey.for_intraday(
+        symbol="AAPL",
+        provider=None,
+        interval="5min",
+    )
+    cache.save(
+        cache_key,
+        pd.DataFrame(
+            [
+                {
+                    "symbol": "AAPL",
+                    "timestamp": pd.Timestamp("2026-01-01T09:30:00Z"),
+                    "open": 1.0,
+                    "high": 1.5,
+                    "low": 0.5,
+                    "close": 1.25,
+                    "volume": 10,
+                    "provider": "old",
+                }
+            ]
+        ),
+    )
+
+    exit_code = cli_main.run(
+        [
+            "data",
+            "intraday",
+            "--symbol",
+            "AAPL",
+            "--interval",
+            "5min",
+            "--cache",
+            "--refresh",
+            "--format",
+            "csv",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    refreshed = cache.load(cache_key)
+
+    assert exit_code == 0
+    assert "AAPL" in captured.out
+    assert len(service.calls) == 1
+    expected = _intraday_frame().sort_values(
+        "timestamp",
+        ascending=True,
+        kind="stable",
+    ).reset_index(drop=True)
+    assert refreshed.reset_index(drop=True).equals(expected)
+
+
+def test_refresh_without_cache_fails_cleanly(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        cli_main.run(
+            [
+                "data",
+                "latest",
+                "--symbol",
+                "MSFT",
+                "--refresh",
+            ]
+        )
+
+    captured = capsys.readouterr()
+
+    assert excinfo.value.code == 2
+    assert "--refresh requires --cache" in captured.err
+    assert "Traceback" not in captured.err
 
 
 def test_latest_explicit_twelve_data_provider_passes_through(
