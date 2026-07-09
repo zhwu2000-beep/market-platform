@@ -13,6 +13,13 @@ from market_platform.data.provider import DataProvider, normalize_date_like
 
 TWELVE_DATA_BASE_URL = "https://api.twelvedata.com"
 TWELVE_DATA_PROVIDER_NAME = "twelvedata"
+_INTRADAY_INTERVALS: dict[str, str] = {
+    "1min": "1min",
+    "5min": "5min",
+    "15min": "15min",
+    "30min": "30min",
+    "1h": "1h",
+}
 
 
 class TwelveDataProvider(DataProvider):
@@ -85,9 +92,27 @@ class TwelveDataProvider(DataProvider):
         end: datetime,
         interval: str = "1min",
     ) -> pd.DataFrame:
-        """Placeholder for future intraday price support."""
+        """Return Twelve Data intraday prices as a standardized DataFrame."""
 
-        raise NotImplementedError
+        api_key = self._require_api_key()
+        api_interval = self._normalize_intraday_interval(interval)
+        payload = self._request(
+            "/time_series",
+            params={
+                "symbol": symbol.upper(),
+                "interval": api_interval,
+                "start_date": self._datetime_to_query_value(start),
+                "end_date": self._datetime_to_query_value(end),
+                "apikey": api_key,
+            },
+        )
+        return self._historical_payload_to_frame(
+            symbol=symbol,
+            payload=payload,
+            missing_field_message=(
+                "Twelve Data intraday value missing field: {field}"
+            ),
+        )
 
     async def get_latest_price(self, symbol: str) -> pd.DataFrame:
         """Placeholder for future latest price support."""
@@ -116,8 +141,21 @@ class TwelveDataProvider(DataProvider):
         return self._http_client.get(f"{self._base_url}{path}", params=params)
 
     def _daily_payload_to_frame(self, symbol: str, payload: JsonValue) -> pd.DataFrame:
+        return self._historical_payload_to_frame(
+            symbol=symbol,
+            payload=payload,
+            missing_field_message="Twelve Data daily value missing field: {field}",
+        )
+
+    def _historical_payload_to_frame(
+        self,
+        *,
+        symbol: str,
+        payload: JsonValue,
+        missing_field_message: str,
+    ) -> pd.DataFrame:
         if not isinstance(payload, dict):
-            raise DataProviderError("Twelve Data daily response must be an object")
+            raise DataProviderError("Twelve Data response must be an object")
 
         status = payload.get("status", "ok")
         if isinstance(status, str) and status.lower() in {"error", "fail"}:
@@ -128,7 +166,7 @@ class TwelveDataProvider(DataProvider):
         if values is None:
             values = []
         if not isinstance(values, list):
-            raise DataProviderError("Twelve Data daily values must be a list")
+            raise DataProviderError("Twelve Data values must be a list")
         if not values:
             empty_frame = pd.DataFrame(columns=PRICE_COLUMNS)
             empty_frame = normalize_price_frame(empty_frame)
@@ -137,11 +175,9 @@ class TwelveDataProvider(DataProvider):
         rows: list[dict[str, object]] = []
         for item in values:
             if not isinstance(item, dict):
-                raise DataProviderError("Twelve Data daily value must be an object")
+                raise DataProviderError("Twelve Data value must be an object")
             if "datetime" not in item:
-                raise DataProviderError(
-                    "Twelve Data daily value missing field: datetime"
-                )
+                raise DataProviderError(missing_field_message.format(field="datetime"))
 
             volume_value: object | None = item.get("volume")
             if volume_value in {"", None}:
@@ -170,7 +206,7 @@ class TwelveDataProvider(DataProvider):
                 )
             except KeyError as exc:
                 raise DataProviderError(
-                    f"Twelve Data daily value missing field: {exc.args[0]}"
+                    missing_field_message.format(field=exc.args[0])
                 ) from exc
 
         frame = pd.DataFrame(rows, columns=PRICE_COLUMNS)
@@ -206,3 +242,20 @@ class TwelveDataProvider(DataProvider):
             ]
         )
         return frame.loc[:, ["provider", "status", "message"]]
+
+    def _normalize_intraday_interval(self, interval: str) -> str:
+        normalized_interval = interval.strip().lower()
+        try:
+            return _INTRADAY_INTERVALS[normalized_interval]
+        except KeyError as exc:
+            raise ValueError(
+                "Unsupported interval. Use one of: 1min, 5min, 15min, 30min, 1h"
+            ) from exc
+
+    def _datetime_to_query_value(self, value: datetime) -> str:
+        timestamp = pd.Timestamp(value)
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.tz_localize("UTC")
+        else:
+            timestamp = timestamp.tz_convert("UTC")
+        return timestamp.isoformat()

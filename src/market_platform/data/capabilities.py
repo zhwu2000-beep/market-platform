@@ -28,7 +28,6 @@ DEFAULT_PROVIDER_CAPABILITIES: dict[str, frozenset[DataCapability]] = {
     "polygon": frozenset(
         {
             DataCapability.DAILY_PRICES,
-            DataCapability.INTRADAY_PRICES,
             DataCapability.LATEST_PRICE,
             DataCapability.HEALTH_CHECK,
         }
@@ -36,6 +35,7 @@ DEFAULT_PROVIDER_CAPABILITIES: dict[str, frozenset[DataCapability]] = {
     "twelvedata": frozenset(
         {
             DataCapability.DAILY_PRICES,
+            DataCapability.INTRADAY_PRICES,
             DataCapability.HEALTH_CHECK,
         }
     ),

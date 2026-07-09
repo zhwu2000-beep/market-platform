@@ -120,3 +120,29 @@ market-platform data latest --symbol MSFT
 market-platform data latest --symbol MSFT --provider polygon --format json
 market-platform data latest --symbol MSFT --format csv --output reports/msft.csv
 ```
+
+## Data Intraday
+
+Use `market-platform data intraday --symbol AAPL` to fetch recent intraday
+prices for a symbol.
+
+In v0.19.0 the command uses a default recent window and does not expose
+`--start` or `--end`.
+
+Supported options:
+
+- `--interval` with `1min`, `5min`, `15min`, `30min`, or `1h`
+- `--provider` to choose a specific provider
+- `--format table|json|csv` to control the output format
+- `--output` to write the formatted result to a file
+
+Examples:
+
+```bash
+market-platform data intraday --symbol AAPL
+market-platform data intraday --symbol AAPL --interval 5min --format json
+market-platform data intraday --symbol AAPL --provider twelve_data --format csv --output reports/aapl-intraday.csv
+```
+
+v0.19.0 only enables Twelve Data intraday. Polygon intraday is not enabled
+yet.

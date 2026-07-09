@@ -99,6 +99,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     latest_parser.set_defaults(handler=_handle_data_latest)
 
+    intraday_parser = data_subparsers.add_parser(
+        "intraday",
+        help="Fetch intraday market prices.",
+        parents=[_build_output_options_parser(["table", "json", "csv"])],
+    )
+    intraday_parser.add_argument("--symbol", required=True, help="Ticker symbol.")
+    intraday_parser.add_argument(
+        "--interval",
+        choices=["1min", "5min", "15min", "30min", "1h"],
+        default="1min",
+        help="Intraday interval.",
+    )
+    intraday_parser.add_argument(
+        "--provider",
+        choices=["polygon", "twelvedata", "twelve_data"],
+        default=None,
+        help="Explicit provider. Defaults to configured provider fallback order.",
+    )
+    intraday_parser.set_defaults(handler=_handle_data_intraday)
+
     providers_parser = data_subparsers.add_parser(
         "providers",
         help="Show provider diagnostics.",
@@ -231,6 +251,41 @@ def _handle_data_latest(args: argparse.Namespace) -> int:
     if output_path is not None:
         _write_output(Path(output_path), rendered_output)
         print(f"Wrote 1 row to {output_path} as {output_format}.")
+        return 0
+
+    print(rendered_output, end="" if rendered_output.endswith("\n") else "\n")
+    return 0
+
+
+def _handle_data_intraday(args: argparse.Namespace) -> int:
+    logger = get_logger(__name__)
+    symbol = args.symbol.strip().upper()
+    output_format = getattr(args, "format", "table")
+    output_path = getattr(args, "output", None)
+
+    service = create_default_market_data_service()
+
+    try:
+        frame = asyncio.run(
+            service.get_intraday_prices(
+                symbol=symbol,
+                provider=args.provider,
+                interval=args.interval,
+            )
+        )
+    except ConfigurationError as exc:
+        logger.error("Failed to fetch intraday prices: %s", exc)
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except DataProviderError as exc:
+        logger.error("Failed to fetch intraday prices: %s", exc)
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    rendered_output = _render_daily_prices(frame, output_format)
+    if output_path is not None:
+        _write_output(Path(output_path), rendered_output)
+        print(f"Wrote {len(frame)} rows to {output_path} as {output_format}.")
         return 0
 
     print(rendered_output, end="" if rendered_output.endswith("\n") else "\n")

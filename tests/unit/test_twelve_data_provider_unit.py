@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 
 import httpx
 import pandas as pd
@@ -108,23 +108,292 @@ def test_twelve_data_provider_health_check_rejects_malformed_response(
         asyncio.run(provider.health_check())
 
 
-def test_twelve_data_provider_methods_raise_not_implemented(
+def test_twelve_data_provider_latest_price_still_not_implemented(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("TWELVE_DATA_API_KEY", raising=False)
     provider = TwelveDataProvider()
 
     with pytest.raises(NotImplementedError):
+        asyncio.run(provider.get_latest_price("MSFT"))
+
+
+def test_twelve_data_provider_intraday_prices_are_normalized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TWELVE_DATA_API_KEY", "test-key")
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["symbol"] = request.url.params["symbol"]
+        captured["interval"] = request.url.params["interval"]
+        captured["start_date"] = request.url.params["start_date"]
+        captured["end_date"] = request.url.params["end_date"]
+        captured["apiKey"] = request.url.params["apikey"]
+        return httpx.Response(
+            200,
+            json={
+                "status": "ok",
+                "values": [
+                    {
+                        "datetime": "2026-01-01T09:31:00-05:00",
+                        "open": "2.0",
+                        "high": "3.0",
+                        "low": "1.5",
+                        "close": "2.5",
+                        "volume": "200",
+                    },
+                    {
+                        "datetime": "2026-01-01T09:30:00-05:00",
+                        "open": "1.0",
+                        "high": "2.0",
+                        "low": "0.5",
+                        "close": "1.5",
+                        "volume": "100",
+                    },
+                ],
+            },
+        )
+
+    provider = TwelveDataProvider(
+        http_client=HTTPClient(
+            client=httpx.Client(transport=httpx.MockTransport(handler))
+        )
+    )
+
+    frame = asyncio.run(
+        provider.get_intraday_prices(
+            "msft",
+            datetime(2026, 1, 1, 9, 0, tzinfo=UTC),
+            datetime(2026, 1, 1, 10, 0, tzinfo=UTC),
+            interval="5min",
+        )
+    )
+
+    assert "/time_series" in captured["url"]
+    assert captured["symbol"] == "MSFT"
+    assert captured["interval"] == "5min"
+    assert captured["start_date"] == "2026-01-01T09:00:00+00:00"
+    assert captured["end_date"] == "2026-01-01T10:00:00+00:00"
+    assert captured["apiKey"] == "test-key"
+    assert list(frame.columns) == [
+        "symbol",
+        "timestamp",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "provider",
+    ]
+    assert list(frame["symbol"]) == ["MSFT", "MSFT"]
+    assert list(frame["provider"]) == ["twelvedata", "twelvedata"]
+    assert list(frame["timestamp"]) == [
+        pd.Timestamp("2026-01-01T14:30:00Z"),
+        pd.Timestamp("2026-01-01T14:31:00Z"),
+    ]
+
+
+@pytest.mark.parametrize("interval", ["1min", "5min", "15min", "30min", "1h"])
+def test_twelve_data_provider_intraday_prices_accepts_supported_intervals(
+    monkeypatch: pytest.MonkeyPatch,
+    interval: str,
+) -> None:
+    monkeypatch.setenv("TWELVE_DATA_API_KEY", "test-key")
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["interval"] = request.url.params["interval"]
+        return httpx.Response(200, json={"status": "ok", "values": []})
+
+    provider = TwelveDataProvider(
+        http_client=HTTPClient(
+            client=httpx.Client(transport=httpx.MockTransport(handler))
+        )
+    )
+
+    frame = asyncio.run(
+        provider.get_intraday_prices(
+            "MSFT",
+            datetime(2026, 1, 1, 9, 0, tzinfo=UTC),
+            datetime(2026, 1, 1, 10, 0, tzinfo=UTC),
+            interval=interval,
+        )
+    )
+
+    assert captured["interval"] == interval
+    assert list(frame.columns) == [
+        "symbol",
+        "timestamp",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "provider",
+    ]
+    assert frame.empty
+
+
+def test_twelve_data_provider_intraday_prices_rejects_unsupported_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TWELVE_DATA_API_KEY", "test-key")
+    provider = TwelveDataProvider(
+        http_client=HTTPClient(
+            client=httpx.Client(
+                transport=httpx.MockTransport(
+                    lambda request: httpx.Response(200, json={"status": "ok"})
+                )
+            )
+        )
+    )
+
+    with pytest.raises(ValueError, match="Unsupported interval"):
         asyncio.run(
             provider.get_intraday_prices(
                 "MSFT",
-                datetime(2026, 1, 1, 0, 0),
-                datetime(2026, 1, 2, 0, 0),
+                datetime(2026, 1, 1, 9, 0, tzinfo=UTC),
+                datetime(2026, 1, 1, 10, 0, tzinfo=UTC),
+                interval="2min",
             )
         )
 
-    with pytest.raises(NotImplementedError):
-        asyncio.run(provider.get_latest_price("MSFT"))
+
+def test_twelve_data_provider_intraday_prices_returns_empty_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TWELVE_DATA_API_KEY", "test-key")
+    provider = TwelveDataProvider(
+        http_client=HTTPClient(
+            client=httpx.Client(
+                transport=httpx.MockTransport(
+                    lambda request: httpx.Response(
+                        200,
+                        json={"status": "ok", "values": []},
+                    )
+                )
+            )
+        )
+    )
+
+    frame = asyncio.run(
+        provider.get_intraday_prices(
+            "MSFT",
+            datetime(2026, 1, 1, 9, 0, tzinfo=UTC),
+            datetime(2026, 1, 1, 10, 0, tzinfo=UTC),
+            interval="1min",
+        )
+    )
+
+    assert list(frame.columns) == [
+        "symbol",
+        "timestamp",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "provider",
+    ]
+    assert frame.empty
+
+
+def test_twelve_data_provider_intraday_prices_rejects_malformed_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TWELVE_DATA_API_KEY", "test-key")
+    provider = TwelveDataProvider(
+        http_client=HTTPClient(
+            client=httpx.Client(
+                transport=httpx.MockTransport(
+                    lambda request: httpx.Response(
+                        200,
+                        json={"status": "ok", "values": "bad"},
+                    )
+                )
+            )
+        )
+    )
+
+    with pytest.raises(DataProviderError, match="must be a list"):
+        asyncio.run(
+            provider.get_intraday_prices(
+                "MSFT",
+                datetime(2026, 1, 1, 9, 0, tzinfo=UTC),
+                datetime(2026, 1, 1, 10, 0, tzinfo=UTC),
+                interval="1min",
+            )
+        )
+
+
+def test_twelve_data_provider_intraday_prices_rejects_provider_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TWELVE_DATA_API_KEY", "test-key")
+    provider = TwelveDataProvider(
+        http_client=HTTPClient(
+            client=httpx.Client(
+                transport=httpx.MockTransport(
+                    lambda request: httpx.Response(
+                        200,
+                        json={"status": "error", "message": "bad request"},
+                    )
+                )
+            )
+        )
+    )
+
+    with pytest.raises(DataProviderError, match="bad request"):
+        asyncio.run(
+            provider.get_intraday_prices(
+                "MSFT",
+                datetime(2026, 1, 1, 9, 0, tzinfo=UTC),
+                datetime(2026, 1, 1, 10, 0, tzinfo=UTC),
+                interval="1min",
+            )
+        )
+
+
+def test_twelve_data_provider_intraday_prices_rejects_missing_volume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TWELVE_DATA_API_KEY", "test-key")
+    provider = TwelveDataProvider(
+        http_client=HTTPClient(
+            client=httpx.Client(
+                transport=httpx.MockTransport(
+                    lambda request: httpx.Response(
+                        200,
+                        json={
+                            "status": "ok",
+                            "values": [
+                                {
+                                    "datetime": "2026-01-01T09:30:00-05:00",
+                                    "open": "1.0",
+                                    "high": "2.0",
+                                    "low": "0.5",
+                                    "close": "1.5",
+                                }
+                            ],
+                        },
+                    )
+                )
+            )
+        )
+    )
+
+    frame = asyncio.run(
+        provider.get_intraday_prices(
+            "MSFT",
+            datetime(2026, 1, 1, 9, 0, tzinfo=UTC),
+            datetime(2026, 1, 1, 10, 0, tzinfo=UTC),
+            interval="1min",
+        )
+    )
+
+    assert pd.isna(frame.at[0, "volume"])
 
 
 def test_twelve_data_provider_daily_prices_are_normalized(
