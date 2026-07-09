@@ -159,3 +159,5 @@ Without `--cache`, commands keep their current provider-first behavior.
 
 The cache is useful for repeated lookups, but cached latest prices can become
 stale. Use `--refresh` when you need a fresh quote.
+
+See `docs/smoke.md` for the release smoke workflow and cleanup commands.

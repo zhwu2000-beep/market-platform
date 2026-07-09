@@ -1,18 +1,24 @@
 """Real provider smoke tests.
 
 These tests touch external provider APIs and are skipped unless credentials
-are configured.
+are explicitly enabled and credentials are configured.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 
 import pytest
 
 from market_platform.config import get_settings
 from market_platform.data.factory import create_default_market_data_service
 from market_platform.data.models import PRICE_COLUMNS
+
+pytestmark = pytest.mark.skipif(
+    os.environ.get("MARKET_PLATFORM_RUN_INTEGRATION_SMOKE") != "1",
+    reason="integration smoke is opt-in; set MARKET_PLATFORM_RUN_INTEGRATION_SMOKE=1",
+)
 
 
 @pytest.mark.integration
