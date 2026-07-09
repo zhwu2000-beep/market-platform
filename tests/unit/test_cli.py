@@ -9,6 +9,10 @@ import pandas as pd
 import pytest
 
 from market_platform.cli import main as cli_main
+from market_platform.data.capabilities import DataCapability
+from market_platform.data.provider import DataProvider
+from market_platform.data.selection import ProviderCandidate, ProviderSelectionPolicy
+from market_platform.data.service import MarketDataService
 
 
 @dataclass
@@ -41,6 +45,21 @@ class _LatestFakeService:
         return self.frame
 
 
+@dataclass
+class _IntradayFakeService:
+    frame: pd.DataFrame
+    calls: list[tuple[str, str | None, str]]
+
+    async def get_intraday_prices(
+        self,
+        symbol: str,
+        provider: str | None = None,
+        interval: str = "1min",
+    ) -> pd.DataFrame:
+        self.calls.append((symbol, provider, interval))
+        return self.frame
+
+
 def _frame() -> pd.DataFrame:
     return pd.DataFrame(
         [
@@ -67,6 +86,33 @@ def _latest_frame() -> pd.DataFrame:
                 "price": 100.5,
                 "provider": "polygon",
             }
+        ]
+    )
+
+
+def _intraday_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "symbol": "AAPL",
+                "timestamp": pd.Timestamp("2026-01-01T09:31:00Z"),
+                "open": 101.0,
+                "high": 102.0,
+                "low": 100.0,
+                "close": 101.5,
+                "volume": 1000,
+                "provider": "twelvedata",
+            },
+            {
+                "symbol": "AAPL",
+                "timestamp": pd.Timestamp("2026-01-01T09:30:00Z"),
+                "open": 100.0,
+                "high": 101.0,
+                "low": 99.5,
+                "close": 100.5,
+                "volume": 900,
+                "provider": "twelvedata",
+            },
         ]
     )
 
@@ -289,6 +335,233 @@ def test_latest_csv_format_with_output_writes_file(
     )
     assert "Wrote 1 row" in captured.out
     assert service.calls == [("MSFT", None)]
+
+
+def test_intraday_table_format_still_works(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    service = _IntradayFakeService(frame=_intraday_frame(), calls=[])
+    monkeypatch.setattr(
+        cli_main,
+        "create_default_market_data_service",
+        lambda: service,
+    )
+
+    exit_code = cli_main.run(
+        [
+            "data",
+            "intraday",
+            "--symbol",
+            "aapl",
+        ]
+    )
+
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "AAPL" in captured.out
+    assert "twelvedata" in captured.out
+    assert service.calls == [("AAPL", None, "1min")]
+
+
+def test_intraday_json_format_produces_valid_json(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    service = _IntradayFakeService(frame=_intraday_frame(), calls=[])
+    monkeypatch.setattr(
+        cli_main,
+        "create_default_market_data_service",
+        lambda: service,
+    )
+
+    exit_code = cli_main.run(
+        [
+            "data",
+            "intraday",
+            "--symbol",
+            "AAPL",
+            "--format",
+            "json",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 0
+    assert payload[0]["symbol"] == "AAPL"
+    assert payload[0]["provider"] == "twelvedata"
+    assert service.calls == [("AAPL", None, "1min")]
+
+
+def test_intraday_csv_format_with_output_writes_file(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    service = _IntradayFakeService(frame=_intraday_frame(), calls=[])
+    output_path = tmp_path / "data" / "aapl-intraday.csv"
+    monkeypatch.setattr(
+        cli_main,
+        "create_default_market_data_service",
+        lambda: service,
+    )
+
+    exit_code = cli_main.run(
+        [
+            "data",
+            "intraday",
+            "--symbol",
+            "AAPL",
+            "--format",
+            "csv",
+            "--output",
+            str(output_path),
+        ]
+    )
+
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert output_path.exists()
+    assert output_path.read_text(encoding="utf-8").startswith(
+        "symbol,timestamp,open,high,low,close,volume,provider"
+    )
+    assert "Wrote 2 rows" in captured.out
+    assert service.calls == [("AAPL", None, "1min")]
+
+
+def test_intraday_interval_is_passed_through(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    service = _IntradayFakeService(frame=_intraday_frame(), calls=[])
+    monkeypatch.setattr(
+        cli_main,
+        "create_default_market_data_service",
+        lambda: service,
+    )
+
+    exit_code = cli_main.run(
+        [
+            "data",
+            "intraday",
+            "--symbol",
+            "AAPL",
+            "--interval",
+            "5min",
+        ]
+    )
+
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "AAPL" in captured.out
+    assert service.calls == [("AAPL", None, "5min")]
+
+
+def test_intraday_explicit_twelve_data_provider_passes_through(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    service = _IntradayFakeService(frame=_intraday_frame(), calls=[])
+    monkeypatch.setattr(
+        cli_main,
+        "create_default_market_data_service",
+        lambda: service,
+    )
+
+    exit_code = cli_main.run(
+        [
+            "data",
+            "intraday",
+            "--symbol",
+            "AAPL",
+            "--provider",
+            "twelve_data",
+        ]
+    )
+
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "AAPL" in captured.out
+    assert service.calls == [("AAPL", "twelve_data", "1min")]
+
+
+class _MissingIntradayProvider(DataProvider):
+    name = "legacy"
+
+    async def get_daily_prices(
+        self,
+        symbol: str,
+        start: date,
+        end: date,
+    ) -> pd.DataFrame:
+        return pd.DataFrame()
+
+    async def get_intraday_prices(
+        self,
+        symbol: str,
+        start: pd.Timestamp,
+        end: pd.Timestamp,
+        interval: str = "1min",
+    ) -> pd.DataFrame:
+        return pd.DataFrame()
+
+    async def get_latest_price(self, symbol: str) -> pd.DataFrame:
+        return pd.DataFrame()
+
+    async def health_check(self) -> pd.DataFrame:
+        return pd.DataFrame()
+
+
+def test_intraday_unsupported_provider_capability_errors_cleanly(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    service = MarketDataService(
+        ProviderSelectionPolicy(
+            candidates=[
+                ProviderCandidate(
+                    name="polygon",
+                    provider=_MissingIntradayProvider(),
+                    priority=1,
+                    capabilities=frozenset[DataCapability](),
+                ),
+                ProviderCandidate(
+                    name="twelvedata",
+                    provider=_MissingIntradayProvider(),
+                    priority=2,
+                    capabilities=frozenset[DataCapability](),
+                ),
+            ]
+        )
+    )
+    monkeypatch.setattr(
+        cli_main,
+        "create_default_market_data_service",
+        lambda: service,
+    )
+
+    exit_code = cli_main.run(
+        [
+            "data",
+            "intraday",
+            "--symbol",
+            "AAPL",
+            "--provider",
+            "polygon",
+        ]
+    )
+
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "does not support intraday_prices" in captured.err
+    assert "Traceback" not in captured.err
 
 
 @pytest.mark.parametrize(
