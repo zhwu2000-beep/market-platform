@@ -40,8 +40,8 @@ implement the shared `DataProvider` interface, and provider names are
 normalized before lookup.
 
 Both providers currently support `get_daily_prices()`. Polygon also supports
-`get_latest_price()` and `get_intraday_prices()`. Twelve Data intraday and
-latest price methods are still not implemented.
+`get_latest_price()` and `get_intraday_prices()`. Twelve Data now supports
+`get_latest_price()` and `get_intraday_prices()`.
 
 ## Routing
 
@@ -118,6 +118,7 @@ Examples:
 ```bash
 market-platform data latest --symbol MSFT
 market-platform data latest --symbol MSFT --provider polygon --format json
+market-platform data latest --symbol MSFT --provider twelve_data --format json
 market-platform data latest --symbol MSFT --format csv --output reports/msft.csv
 ```
 

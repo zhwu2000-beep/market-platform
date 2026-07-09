@@ -1,14 +1,19 @@
 """Twelve Data provider skeleton."""
 
 import os
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import cast
 
 import pandas as pd
 
 from market_platform.data.exceptions import ConfigurationError, DataProviderError
 from market_platform.data.http import HTTPClient, JsonValue
-from market_platform.data.models import PRICE_COLUMNS, normalize_price_frame
+from market_platform.data.models import (
+    LATEST_PRICE_COLUMNS,
+    PRICE_COLUMNS,
+    normalize_latest_price_frame,
+    normalize_price_frame,
+)
 from market_platform.data.provider import DataProvider, normalize_date_like
 
 TWELVE_DATA_BASE_URL = "https://api.twelvedata.com"
@@ -115,9 +120,17 @@ class TwelveDataProvider(DataProvider):
         )
 
     async def get_latest_price(self, symbol: str) -> pd.DataFrame:
-        """Placeholder for future latest price support."""
+        """Return Twelve Data latest price as a standardized DataFrame."""
 
-        raise NotImplementedError
+        api_key = self._require_api_key()
+        payload = self._request(
+            "/price",
+            params={
+                "symbol": symbol.upper(),
+                "apikey": api_key,
+            },
+        )
+        return self._latest_payload_to_frame(symbol=symbol, payload=payload)
 
     async def health_check(self) -> pd.DataFrame:
         """Return a lightweight health check result for Twelve Data."""
@@ -146,6 +159,57 @@ class TwelveDataProvider(DataProvider):
             payload=payload,
             missing_field_message="Twelve Data daily value missing field: {field}",
         )
+
+    def _latest_payload_to_frame(self, symbol: str, payload: JsonValue) -> pd.DataFrame:
+        if not isinstance(payload, dict):
+            raise DataProviderError("Twelve Data latest response must be an object")
+
+        status = payload.get("status", "ok")
+        if isinstance(status, str) and status.lower() in {"error", "fail"}:
+            message = payload.get("message") or payload.get("code") or "request failed"
+            raise DataProviderError(str(message))
+
+        timestamp_value: object | None = (
+            payload.get("datetime") or payload.get("timestamp")
+        )
+        if timestamp_value is None:
+            date_value = payload.get("date")
+            time_value = payload.get("time")
+            if date_value is not None and time_value is not None:
+                timestamp_value = f"{date_value}T{time_value}"
+            else:
+                timestamp_value = date_value
+        if timestamp_value is None:
+            timestamp_value = datetime.now(UTC)
+
+        price_value = payload.get("price")
+        if price_value in {"", None}:
+            price_value = payload.get("close")
+        if price_value in {"", None}:
+            price_value = payload.get("value")
+        if price_value in {"", None}:
+            price_value = payload.get("last")
+        if price_value in {"", None}:
+            raise DataProviderError(
+                "Twelve Data latest price response missing field: price"
+            )
+
+        latest_frame = pd.DataFrame(
+            [
+                {
+                    "symbol": symbol.upper(),
+                    "timestamp": pd.to_datetime(
+                        cast(str | datetime | date | int | float, timestamp_value),
+                        utc=True,
+                    ),
+                    "price": price_value,
+                    "provider": self.name,
+                }
+            ],
+            columns=LATEST_PRICE_COLUMNS,
+        )
+        latest_frame = normalize_latest_price_frame(latest_frame)
+        return latest_frame.reset_index(drop=True)
 
     def _historical_payload_to_frame(
         self,

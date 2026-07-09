@@ -7,6 +7,7 @@ import httpx
 import pandas as pd
 import pytest
 
+import market_platform.data.providers.twelvedata as twelvedata_module
 from market_platform.data.exceptions import ConfigurationError, DataProviderError
 from market_platform.data.http import HTTPClient
 from market_platform.data.providers.twelvedata import (
@@ -108,14 +109,98 @@ def test_twelve_data_provider_health_check_rejects_malformed_response(
         asyncio.run(provider.health_check())
 
 
-def test_twelve_data_provider_latest_price_still_not_implemented(
+def test_twelve_data_provider_latest_price_requires_api_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("TWELVE_DATA_API_KEY", raising=False)
-    provider = TwelveDataProvider()
+    provider = TwelveDataProvider(
+        http_client=HTTPClient(
+            client=httpx.Client(
+                transport=httpx.MockTransport(
+                    lambda request: httpx.Response(
+                        200,
+                        json={"price": "100.5", "datetime": "2026-01-01T00:00:00Z"},
+                    )
+                )
+            )
+        )
+    )
 
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(
+        ConfigurationError,
+        match="TWELVE_DATA_API_KEY is not configured",
+    ):
         asyncio.run(provider.get_latest_price("MSFT"))
+
+
+def test_twelve_data_provider_latest_price_is_normalized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TWELVE_DATA_API_KEY", "test-key")
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["symbol"] = request.url.params["symbol"]
+        captured["apiKey"] = request.url.params["apikey"]
+        return httpx.Response(
+            200,
+            json={
+                "status": "ok",
+                "price": "100.5",
+                "datetime": "2026-01-01T09:30:00-05:00",
+            },
+        )
+
+    provider = TwelveDataProvider(
+        http_client=HTTPClient(
+            client=httpx.Client(transport=httpx.MockTransport(handler))
+        )
+    )
+
+    frame = asyncio.run(provider.get_latest_price("msft"))
+
+    assert "/price" in captured["url"]
+    assert captured["symbol"] == "MSFT"
+    assert captured["apiKey"] == "test-key"
+    assert list(frame.columns) == ["symbol", "timestamp", "price", "provider"]
+    assert list(frame["symbol"]) == ["MSFT"]
+    assert list(frame["provider"]) == ["twelvedata"]
+    assert list(frame["timestamp"]) == [pd.Timestamp("2026-01-01T14:30:00Z")]
+    assert list(frame["price"]) == ["100.5"]
+
+
+def test_twelve_data_provider_latest_price_defaults_to_fetch_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TWELVE_DATA_API_KEY", "test-key")
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz: object | None = None) -> datetime:
+            return datetime(2026, 1, 1, 14, 30, tzinfo=UTC)
+
+    monkeypatch.setattr(twelvedata_module, "datetime", FixedDatetime)
+
+    provider = TwelveDataProvider(
+        http_client=HTTPClient(
+            client=httpx.Client(
+                transport=httpx.MockTransport(
+                    lambda request: httpx.Response(
+                        200,
+                        json={
+                            "status": "ok",
+                            "price": "100.5",
+                        },
+                    )
+                )
+            )
+        )
+    )
+
+    frame = asyncio.run(provider.get_latest_price("MSFT"))
+
+    assert list(frame["timestamp"]) == [pd.Timestamp("2026-01-01T14:30:00Z")]
 
 
 def test_twelve_data_provider_intraday_prices_are_normalized(

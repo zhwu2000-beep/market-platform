@@ -337,6 +337,35 @@ def test_latest_csv_format_with_output_writes_file(
     assert service.calls == [("MSFT", None)]
 
 
+def test_latest_explicit_twelve_data_provider_passes_through(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    service = _LatestFakeService(frame=_latest_frame(), calls=[])
+    monkeypatch.setattr(
+        cli_main,
+        "create_default_market_data_service",
+        lambda: service,
+    )
+
+    exit_code = cli_main.run(
+        [
+            "data",
+            "latest",
+            "--symbol",
+            "msft",
+            "--provider",
+            "twelve_data",
+        ]
+    )
+
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "MSFT" in captured.out
+    assert service.calls == [("MSFT", "twelve_data")]
+
+
 def test_intraday_table_format_still_works(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

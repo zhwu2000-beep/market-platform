@@ -242,6 +242,10 @@ def _handle_data_latest(args: argparse.Namespace) -> int:
                 provider=args.provider,
             )
         )
+    except ConfigurationError as exc:
+        logger.error("Failed to fetch latest price: %s", exc)
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     except DataProviderError as exc:
         logger.error("Failed to fetch latest price: %s", exc)
         print(f"error: {exc}", file=sys.stderr)

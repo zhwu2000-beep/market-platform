@@ -35,6 +35,7 @@ DEFAULT_PROVIDER_CAPABILITIES: dict[str, frozenset[DataCapability]] = {
     "twelvedata": frozenset(
         {
             DataCapability.DAILY_PRICES,
+            DataCapability.LATEST_PRICE,
             DataCapability.INTRADAY_PRICES,
             DataCapability.HEALTH_CHECK,
         }
