@@ -85,6 +85,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     fetch_parser.set_defaults(handler=_handle_data_fetch)
 
+    latest_parser = data_subparsers.add_parser(
+        "latest",
+        help="Fetch the latest market price.",
+        parents=[_build_output_options_parser(["table", "json", "csv"])],
+    )
+    latest_parser.add_argument("--symbol", required=True, help="Ticker symbol.")
+    latest_parser.add_argument(
+        "--provider",
+        choices=["polygon", "twelvedata", "twelve_data"],
+        default=None,
+        help="Explicit provider. Defaults to configured provider fallback order.",
+    )
+    latest_parser.set_defaults(handler=_handle_data_latest)
+
     providers_parser = data_subparsers.add_parser(
         "providers",
         help="Show provider diagnostics.",
@@ -187,6 +201,36 @@ def _handle_data_fetch(args: argparse.Namespace) -> int:
     if args.output is not None:
         _write_output(Path(args.output), rendered_output)
         print(f"Wrote {len(frame)} rows to {args.output} as {args.format}.")
+        return 0
+
+    print(rendered_output, end="" if rendered_output.endswith("\n") else "\n")
+    return 0
+
+
+def _handle_data_latest(args: argparse.Namespace) -> int:
+    logger = get_logger(__name__)
+    symbol = args.symbol.strip().upper()
+    output_format = getattr(args, "format", "table")
+    output_path = getattr(args, "output", None)
+
+    service = create_default_market_data_service()
+
+    try:
+        frame = asyncio.run(
+            service.get_latest_price(
+                symbol=symbol,
+                provider=args.provider,
+            )
+        )
+    except DataProviderError as exc:
+        logger.error("Failed to fetch latest price: %s", exc)
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    rendered_output = _render_daily_prices(frame, output_format)
+    if output_path is not None:
+        _write_output(Path(output_path), rendered_output)
+        print(f"Wrote 1 row to {output_path} as {output_format}.")
         return 0
 
     print(rendered_output, end="" if rendered_output.endswith("\n") else "\n")

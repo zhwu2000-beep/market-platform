@@ -27,6 +27,20 @@ class _FakeService:
         return self.frame
 
 
+@dataclass
+class _LatestFakeService:
+    frame: pd.DataFrame
+    calls: list[tuple[str, str | None]]
+
+    async def get_latest_price(
+        self,
+        symbol: str,
+        provider: str | None = None,
+    ) -> pd.DataFrame:
+        self.calls.append((symbol, provider))
+        return self.frame
+
+
 def _frame() -> pd.DataFrame:
     return pd.DataFrame(
         [
@@ -38,6 +52,19 @@ def _frame() -> pd.DataFrame:
                 "low": 99.0,
                 "close": 100.5,
                 "volume": 1000,
+                "provider": "polygon",
+            }
+        ]
+    )
+
+
+def _latest_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "symbol": "MSFT",
+                "timestamp": pd.Timestamp("2026-01-01T00:00:00Z"),
+                "price": 100.5,
                 "provider": "polygon",
             }
         ]
@@ -160,6 +187,108 @@ def test_csv_format_produces_csv_output(
     assert "MSFT,2026-01-01T00:00:00+00:00,100.0,101.0,99.0,100.5,1000,polygon" in (
         captured.out
     )
+
+
+def test_latest_table_format_still_works(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    service = _LatestFakeService(frame=_latest_frame(), calls=[])
+    monkeypatch.setattr(
+        cli_main,
+        "create_default_market_data_service",
+        lambda: service,
+    )
+
+    exit_code = cli_main.run(
+        [
+            "data",
+            "latest",
+            "--symbol",
+            "msft",
+        ]
+    )
+
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "MSFT" in captured.out
+    assert "100.5" in captured.out
+    assert service.calls == [("MSFT", None)]
+
+
+def test_latest_json_format_produces_valid_json(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    service = _LatestFakeService(frame=_latest_frame(), calls=[])
+    monkeypatch.setattr(
+        cli_main,
+        "create_default_market_data_service",
+        lambda: service,
+    )
+
+    exit_code = cli_main.run(
+        [
+            "data",
+            "latest",
+            "--symbol",
+            "MSFT",
+            "--format",
+            "json",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 0
+    assert payload == [
+        {
+            "symbol": "MSFT",
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "price": 100.5,
+            "provider": "polygon",
+        }
+    ]
+    assert service.calls == [("MSFT", None)]
+
+
+def test_latest_csv_format_with_output_writes_file(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    service = _LatestFakeService(frame=_latest_frame(), calls=[])
+    output_path = tmp_path / "data" / "msft_latest.csv"
+    monkeypatch.setattr(
+        cli_main,
+        "create_default_market_data_service",
+        lambda: service,
+    )
+
+    exit_code = cli_main.run(
+        [
+            "data",
+            "latest",
+            "--symbol",
+            "MSFT",
+            "--format",
+            "csv",
+            "--output",
+            str(output_path),
+        ]
+    )
+
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert output_path.exists()
+    assert output_path.read_text(encoding="utf-8").startswith(
+        "symbol,timestamp,price,provider"
+    )
+    assert "Wrote 1 row" in captured.out
+    assert service.calls == [("MSFT", None)]
 
 
 @pytest.mark.parametrize(

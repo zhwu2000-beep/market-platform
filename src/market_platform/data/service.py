@@ -46,7 +46,12 @@ class MarketDataService:
         attempts: list[str] = []
 
         if provider is not None:
-            candidates = [self._resolve_explicit_candidate(provider)]
+            candidates = [
+                self._resolve_explicit_candidate(
+                    provider,
+                    DataCapability.DAILY_PRICES,
+                )
+            ]
         else:
             candidates = self._policy.ordered_providers(
                 capability=DataCapability.DAILY_PRICES
@@ -115,7 +120,91 @@ class MarketDataService:
             f"{symbol!r} from available providers. Attempts: {attempts_text}"
         )
 
-    def _resolve_explicit_candidate(self, provider: str) -> ProviderCandidate:
+    async def get_latest_price(
+        self,
+        symbol: str,
+        provider: str | None = None,
+    ) -> pd.DataFrame:
+        """Return the latest price using explicit or configured provider routing."""
+
+        attempts: list[str] = []
+
+        if provider is not None:
+            candidates = [
+                self._resolve_explicit_candidate(
+                    provider,
+                    DataCapability.LATEST_PRICE,
+                )
+            ]
+        else:
+            candidates = self._policy.ordered_providers(
+                capability=DataCapability.LATEST_PRICE
+            )
+
+        for candidate in candidates:
+            provider_name = candidate.name
+            if not _candidate_supports_latest_price(candidate):
+                attempts.append(
+                    f"{provider_name}: does not support latest_price capability"
+                )
+                continue
+
+            try:
+                frame = await candidate.provider.get_latest_price(symbol)
+            except AuthenticationError as exc:
+                attempts.append(f"{provider_name}: authentication error: {exc}")
+                if provider is not None:
+                    break
+                if self._fallback_on_auth_error:
+                    continue
+                raise
+            except NetworkError as exc:
+                attempts.append(f"{provider_name}: network error: {exc}")
+                if provider is not None:
+                    break
+                continue
+            except RateLimitError as exc:
+                attempts.append(f"{provider_name}: rate limit error: {exc}")
+                if provider is not None:
+                    break
+                continue
+            except DataProviderError as exc:
+                attempts.append(f"{provider_name}: data provider error: {exc}")
+                if provider is not None:
+                    break
+                continue
+
+            if not isinstance(frame, pd.DataFrame):
+                attempts.append(
+                    f"{provider_name}: invalid response type {type(frame).__name__}"
+                )
+                if provider is not None:
+                    break
+                continue
+            if frame.empty:
+                attempts.append(f"{provider_name}: empty response")
+                if provider is not None:
+                    break
+                continue
+            return frame
+
+        attempts_text = "; ".join(attempts) if attempts else "no providers available"
+        if provider is not None:
+            raise DataProviderError(
+                "Unable to retrieve latest price for "
+                f"{symbol!r} from provider {provider!r}. Attempts: {attempts_text}"
+            )
+
+        raise DataProviderError(
+            "Unable to retrieve latest price for "
+            f"{symbol!r} from available providers. Attempts: {attempts_text}"
+        )
+
+    def _resolve_explicit_candidate(
+        self,
+        provider: str,
+        capability: DataCapability,
+    ) -> ProviderCandidate:
         provider_name = normalize_provider_name(provider)
 
         for candidate in self._policy.candidates:
@@ -123,9 +212,9 @@ class MarketDataService:
                 continue
             if not candidate.enabled:
                 raise ConfigurationError(f"Provider is disabled: {provider_name}")
-            if not _candidate_supports_daily_prices(candidate):
+            if not _candidate_supports_capability(candidate, capability):
                 raise ConfigurationError(
-                    f"Provider does not support daily_prices: {provider_name}"
+                    f"Provider does not support {capability}: {provider_name}"
                 )
             return candidate
 
@@ -139,6 +228,17 @@ def _coerce_date_like(value: date | str) -> date:
 
 
 def _candidate_supports_daily_prices(candidate: ProviderCandidate) -> bool:
+    return _candidate_supports_capability(candidate, DataCapability.DAILY_PRICES)
+
+
+def _candidate_supports_latest_price(candidate: ProviderCandidate) -> bool:
+    return _candidate_supports_capability(candidate, DataCapability.LATEST_PRICE)
+
+
+def _candidate_supports_capability(
+    candidate: ProviderCandidate,
+    capability: DataCapability,
+) -> bool:
     if candidate.capabilities is not None:
-        return DataCapability.DAILY_PRICES in candidate.capabilities
-    return provider_supports_capability(candidate.name, DataCapability.DAILY_PRICES)
+        return capability in candidate.capabilities
+    return provider_supports_capability(candidate.name, capability)
