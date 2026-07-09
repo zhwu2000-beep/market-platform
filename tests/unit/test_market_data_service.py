@@ -36,6 +36,17 @@ def _daily_frame(*, symbol: str, provider: str, close: float) -> pd.DataFrame:
     )
 
 
+def _latest_frame(*, symbol: str, provider: str, price: float) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "symbol": [symbol],
+            "timestamp": [pd.Timestamp("2026-01-01", tz=UTC)],
+            "price": [price],
+            "provider": [provider],
+        }
+    )
+
+
 def _empty_frame() -> pd.DataFrame:
     return pd.DataFrame(columns=PRICE_COLUMNS)
 
@@ -51,7 +62,7 @@ class _FakeProvider(DataProvider):
         self.name = name
         self._frame = _empty_frame() if frame is None else frame
         self._error = error
-        self.calls: list[tuple[str, date, date]] = []
+        self.calls: list[object] = []
 
     async def get_daily_prices(
         self,
@@ -74,7 +85,10 @@ class _FakeProvider(DataProvider):
         raise NotImplementedError
 
     async def get_latest_price(self, symbol: str) -> pd.DataFrame:
-        raise NotImplementedError
+        self.calls.append(("latest", symbol))
+        if self._error is not None:
+            raise self._error
+        return self._frame
 
     async def health_check(self) -> pd.DataFrame:
         raise NotImplementedError
@@ -148,6 +162,29 @@ def test_first_successful_provider_is_returned_without_calling_later_providers()
     assert second.calls == []
 
 
+def test_first_successful_latest_price_provider_is_returned() -> None:
+    first_frame = _latest_frame(symbol="MSFT", provider="polygon", price=10.0)
+    first = _FakeProvider(name="polygon", frame=first_frame)
+    second = _FakeProvider(
+        name="twelvedata",
+        error=RuntimeError("should not be called"),
+    )
+    service = MarketDataService(
+        ProviderSelectionPolicy(
+            candidates=[
+                ProviderCandidate(name="polygon", provider=first, priority=1),
+                ProviderCandidate(name="twelvedata", provider=second, priority=2),
+            ]
+        )
+    )
+
+    frame = asyncio.run(service.get_latest_price("MSFT"))
+
+    assert frame.equals(first_frame)
+    assert len(first.calls) == 1
+    assert second.calls == []
+
+
 def test_fallback_after_network_error() -> None:
     first = _FakeProvider(name="polygon", error=NetworkError("offline"))
     second_frame = _daily_frame(symbol="MSFT", provider="twelvedata", close=11.0)
@@ -162,6 +199,26 @@ def test_fallback_after_network_error() -> None:
     )
 
     frame = asyncio.run(service.get_daily_prices("MSFT", "2026-01-01", "2026-01-02"))
+
+    assert frame.equals(second_frame)
+    assert len(first.calls) == 1
+    assert len(second.calls) == 1
+
+
+def test_fallback_after_network_error_for_latest_price() -> None:
+    first = _FakeProvider(name="polygon", error=NetworkError("offline"))
+    second_frame = _latest_frame(symbol="MSFT", provider="polygon", price=11.0)
+    second = _FakeProvider(name="polygon", frame=second_frame)
+    service = MarketDataService(
+        ProviderSelectionPolicy(
+            candidates=[
+                ProviderCandidate(name="polygon", provider=first, priority=1),
+                ProviderCandidate(name="archive", provider=second, priority=2),
+            ]
+        )
+    )
+
+    frame = asyncio.run(service.get_latest_price("MSFT"))
 
     assert frame.equals(second_frame)
     assert len(first.calls) == 1
@@ -290,6 +347,37 @@ def test_explicit_provider_selection_uses_only_requested_provider() -> None:
     assert second.calls == []
 
 
+def test_explicit_latest_provider_selection_uses_only_requested_provider() -> None:
+    first = _FakeProvider(
+        name="polygon",
+        frame=_latest_frame(symbol="MSFT", provider="polygon", price=10.0),
+    )
+    second = _FakeProvider(
+        name="twelvedata",
+        frame=_latest_frame(symbol="MSFT", provider="twelvedata", price=11.0),
+    )
+    service = MarketDataService(
+        ProviderSelectionPolicy(
+            candidates=[
+                ProviderCandidate(name="polygon", provider=first, priority=1),
+                ProviderCandidate(name="twelvedata", provider=second, priority=2),
+            ],
+            provider_order=["twelvedata", "polygon"],
+        )
+    )
+
+    frame = asyncio.run(
+        service.get_latest_price(
+            "MSFT",
+            provider="polygon",
+        )
+    )
+
+    assert list(frame["provider"]) == ["polygon"]
+    assert len(first.calls) == 1
+    assert second.calls == []
+
+
 def test_explicit_incapable_provider_raises_clear_error() -> None:
     first = _FakeProvider(name="legacy")
     service = MarketDataService(
@@ -311,6 +399,32 @@ def test_explicit_incapable_provider_raises_clear_error() -> None:
                 "MSFT",
                 "2026-01-01",
                 "2026-01-02",
+                provider="legacy",
+            )
+        )
+
+    assert first.calls == []
+
+
+def test_explicit_latest_incapable_provider_raises_clear_error() -> None:
+    first = _FakeProvider(name="legacy")
+    service = MarketDataService(
+        ProviderSelectionPolicy(
+            candidates=[
+                ProviderCandidate(
+                    name="legacy",
+                    provider=first,
+                    priority=1,
+                    capabilities=frozenset[DataCapability](),
+                ),
+            ]
+        )
+    )
+
+    with pytest.raises(ConfigurationError, match="does not support latest_price"):
+        asyncio.run(
+            service.get_latest_price(
+                "MSFT",
                 provider="legacy",
             )
         )
@@ -342,6 +456,35 @@ def test_no_capable_provider_available_raises_clear_error() -> None:
 
     with pytest.raises(DataProviderError, match="no providers available"):
         asyncio.run(service.get_daily_prices("MSFT", "2026-01-01", "2026-01-02"))
+
+    assert first.calls == []
+    assert second.calls == []
+
+
+def test_no_latest_capable_provider_available_raises_clear_error() -> None:
+    first = _FakeProvider(name="legacy")
+    second = _FakeProvider(name="archive")
+    service = MarketDataService(
+        ProviderSelectionPolicy(
+            candidates=[
+                ProviderCandidate(
+                    name="legacy",
+                    provider=first,
+                    priority=1,
+                    capabilities=frozenset[DataCapability](),
+                ),
+                ProviderCandidate(
+                    name="archive",
+                    provider=second,
+                    priority=2,
+                    capabilities=frozenset[DataCapability](),
+                ),
+            ]
+        )
+    )
+
+    with pytest.raises(DataProviderError, match="no providers available"):
+        asyncio.run(service.get_latest_price("MSFT"))
 
     assert first.calls == []
     assert second.calls == []

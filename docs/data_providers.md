@@ -101,3 +101,22 @@ set both `POLYGON_API_KEY` and `RUN_POLYGON_INTEGRATION=1`.
 close OHLC response and should not be treated as real-time last trade data.
 The standardized output schema is `symbol`, `timestamp`, `price`, and
 `provider`.
+
+## Data Latest
+
+Use `market-platform data latest --symbol MSFT` to fetch the latest price for
+a symbol.
+
+Supported options:
+
+- `--provider` to choose a specific provider
+- `--format table|json|csv` to control the output format
+- `--output` to write the formatted result to a file
+
+Examples:
+
+```bash
+market-platform data latest --symbol MSFT
+market-platform data latest --symbol MSFT --provider polygon --format json
+market-platform data latest --symbol MSFT --format csv --output reports/msft.csv
+```
