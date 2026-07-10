@@ -7,6 +7,7 @@ from market_platform.signals.calculators import (
     calculate_realized_volatility,
     calculate_trend,
 )
+from market_platform.signals.composite import calculate_composite_signal
 from market_platform.signals.models import MarketSignal, MarketSignalSnapshot
 from market_platform.signals.relative_strength import (
     align_asset_and_benchmark_prices,
@@ -18,6 +19,7 @@ __all__ = [
     "align_asset_and_benchmark_prices",
     "MarketSignal",
     "MarketSignalSnapshot",
+    "calculate_composite_signal",
     "calculate_current_drawdown",
     "calculate_distance_from_moving_average",
     "calculate_market_signals",
