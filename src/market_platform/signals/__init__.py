@@ -7,6 +7,12 @@ from market_platform.signals.calculators import (
     calculate_realized_volatility,
     calculate_trend,
 )
+from market_platform.signals.classification import (
+    SignalClassification,
+    SignalClassificationLevel,
+    SignalClassificationThresholds,
+    classify_composite_signal,
+)
 from market_platform.signals.composite import calculate_composite_signal
 from market_platform.signals.models import MarketSignal, MarketSignalSnapshot
 from market_platform.signals.relative_strength import (
@@ -16,6 +22,9 @@ from market_platform.signals.relative_strength import (
 from market_platform.signals.service import calculate_market_signals
 
 __all__ = [
+    "SignalClassification",
+    "SignalClassificationLevel",
+    "SignalClassificationThresholds",
     "align_asset_and_benchmark_prices",
     "MarketSignal",
     "MarketSignalSnapshot",
@@ -27,4 +36,5 @@ __all__ = [
     "calculate_relative_strength",
     "calculate_realized_volatility",
     "calculate_trend",
+    "classify_composite_signal",
 ]
