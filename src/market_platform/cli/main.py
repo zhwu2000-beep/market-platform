@@ -5,9 +5,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import sys
 from collections.abc import Sequence
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -32,6 +33,11 @@ from market_platform.data.health import (
     render_provider_health_report,
 )
 from market_platform.logging import configure_logging, get_logger
+from market_platform.signals.batch import (
+    SignalClassificationSnapshot,
+    classify_composite_signals,
+)
+from market_platform.signals.models import MarketSignal
 
 
 class CommandHandler(Protocol):
@@ -172,6 +178,27 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     health_parser.set_defaults(handler=_handle_data_provider_health)
+
+    signals_parser = subparsers.add_parser(
+        "signals",
+        help="Signal classification commands.",
+    )
+    signals_subparsers = signals_parser.add_subparsers(dest="signals_command")
+    classify_parser = signals_subparsers.add_parser(
+        "classify",
+        help="Classify explicit composite scores.",
+        parents=[_build_output_options_parser(["table", "json"])],
+    )
+    classify_parser.add_argument(
+        "--signal",
+        action="append",
+        required=True,
+        metavar="SYMBOL=SCORE",
+        type=_parse_signal_argument,
+        help="Explicit composite score to classify.",
+    )
+    classify_parser.set_defaults(handler=_handle_signals_classify)
+
 
     return parser
 
@@ -390,6 +417,87 @@ def _handle_data_provider_health(args: argparse.Namespace) -> int:
     return _provider_health_exit_code(report.status, fail_on)
 
 
+
+def _handle_signals_classify(args: argparse.Namespace) -> int:
+    timestamp = datetime.now(UTC)
+    signals = [
+        MarketSignal(
+            symbol=symbol,
+            name="composite_score",
+            value=score,
+            timestamp=timestamp,
+            parameters={"source": "cli.signals.classify"},
+        )
+        for symbol, score in args.signal
+    ]
+    snapshot = classify_composite_signals(signals)
+    rendered_output = _render_signal_classifications(snapshot, args.format)
+    if args.output is not None:
+        _write_output(Path(args.output), rendered_output)
+        print(
+            f"Wrote {len(snapshot.classifications)} rows to {args.output} "
+            f"as {args.format}."
+        )
+        return 0
+
+    print(rendered_output, end="" if rendered_output.endswith("\n") else "\n")
+    return 0
+
+
+def _render_signal_classifications(
+    snapshot: SignalClassificationSnapshot,
+    output_format: str,
+) -> str:
+    if output_format == "table":
+        return _render_signal_classifications_table(snapshot)
+    if output_format == "json":
+        return _render_signal_classifications_json(snapshot)
+    raise ValueError(f"Unsupported output format: {output_format}")
+
+
+def _render_signal_classifications_table(
+    snapshot: SignalClassificationSnapshot,
+) -> str:
+    frame = pd.DataFrame(
+        [
+            {
+                "symbol": classification.symbol,
+                "score": classification.score,
+                "classification": classification.level.value,
+                "timestamp": classification.timestamp.isoformat(),
+            }
+            for classification in snapshot.classifications
+        ]
+    )
+    if frame.empty:
+        return "No data returned.\n"
+    return f"{frame.to_string(index=False)}\n"
+
+
+def _render_signal_classifications_json(
+    snapshot: SignalClassificationSnapshot,
+) -> str:
+    payload = {
+        "thresholds": {
+            "strong_bearish": snapshot.thresholds.strong_bearish,
+            "bearish": snapshot.thresholds.bearish,
+            "bullish": snapshot.thresholds.bullish,
+            "strong_bullish": snapshot.thresholds.strong_bullish,
+        },
+        "classifications": [
+            {
+                "symbol": classification.symbol,
+                "score": classification.score,
+                "classification": classification.level.value,
+                "timestamp": classification.timestamp.isoformat(),
+                "source_signal_name": classification.source_signal_name,
+            }
+            for classification in snapshot.classifications
+        ],
+    }
+    return json.dumps(payload, ensure_ascii=False) + "\n"
+
+
 def _render_provider_diagnostics_report(
     report: ProviderDiagnosticsReport,
     output_format: str,
@@ -477,6 +585,43 @@ def _parse_iso_date(value: str) -> date:
             f"invalid date {value!r}; expected format YYYY-MM-DD"
         ) from exc
 
+def _parse_signal_argument(value: str) -> tuple[str, float]:
+    original_value = value
+    if "=" not in value:
+        raise argparse.ArgumentTypeError(
+            f"invalid --signal {original_value!r}; expected SYMBOL=SCORE"
+        )
+
+    symbol_text, score_text = value.split("=", 1)
+    symbol = symbol_text.strip().upper()
+    score_text = score_text.strip()
+
+    if not symbol:
+        raise argparse.ArgumentTypeError(
+            f"invalid --signal {original_value!r}; symbol must not be empty"
+        )
+    if not score_text:
+        raise argparse.ArgumentTypeError(
+            f"invalid --signal {original_value!r}; score must not be empty"
+        )
+
+    try:
+        score = float(score_text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"invalid --signal {original_value!r}; score must be numeric"
+        ) from exc
+
+    if not math.isfinite(score):
+        raise argparse.ArgumentTypeError(
+            f"invalid --signal {original_value!r}; score must be finite"
+        )
+    if score < -1.0 or score > 1.0:
+        raise argparse.ArgumentTypeError(
+            f"invalid --signal {original_value!r}; score must be within [-1.0, 1.0]"
+        )
+
+    return symbol, score
 
 def _build_output_options_parser(
     formats: list[str],
