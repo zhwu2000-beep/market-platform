@@ -38,6 +38,10 @@ from market_platform.signals.batch import (
     classify_composite_signals,
 )
 from market_platform.signals.models import MarketSignal
+from market_platform.signals.ranking import (
+    SignalClassificationSort,
+    sort_signal_classifications,
+)
 
 
 class CommandHandler(Protocol):
@@ -196,6 +200,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="SYMBOL=SCORE",
         type=_parse_signal_argument,
         help="Explicit composite score to classify.",
+    )
+    classify_parser.add_argument(
+        "--sort",
+        choices=[sort.value for sort in SignalClassificationSort],
+        default=SignalClassificationSort.INPUT.value,
+        help="Sort classifications before rendering.",
     )
     classify_parser.set_defaults(handler=_handle_signals_classify)
 
@@ -431,6 +441,9 @@ def _handle_signals_classify(args: argparse.Namespace) -> int:
         for symbol, score in args.signal
     ]
     snapshot = classify_composite_signals(signals)
+    snapshot = sort_signal_classifications(
+        snapshot, SignalClassificationSort(args.sort)
+    )
     rendered_output = _render_signal_classifications(snapshot, args.format)
     if args.output is not None:
         _write_output(Path(args.output), rendered_output)

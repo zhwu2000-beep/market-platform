@@ -238,3 +238,227 @@ def test_batch_classification_api_is_available_from_package_import() -> None:
 
     assert isinstance(snapshot, SignalClassificationSnapshot)
     assert snapshot.classifications == ()
+
+
+def test_signals_classify_help_shows_sort_argument(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        cli_main.run(["signals", "classify", "--help"])
+
+    captured = capsys.readouterr()
+
+    assert excinfo.value.code == 0
+    assert "--sort" in captured.out
+    assert "score-desc" in captured.out
+    assert "score-asc" in captured.out
+
+
+def test_signals_classify_score_desc_table_output(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    exit_code, stdout, stderr = _run_signals_classify(
+        [
+            "--signal",
+            "MSFT=0.10",
+            "--signal",
+            "AAPL=0.72",
+            "--signal",
+            "GOOG=0.72",
+            "--sort",
+            "score-desc",
+        ],
+        monkeypatch,
+        capsys,
+    )
+
+    assert exit_code == 0
+    assert stdout.index("AAPL") < stdout.index("GOOG") < stdout.index("MSFT")
+    assert stderr == ""
+
+
+def test_signals_classify_score_asc_table_output(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    exit_code, stdout, stderr = _run_signals_classify(
+        [
+            "--signal",
+            "MSFT=0.10",
+            "--signal",
+            "AAPL=0.72",
+            "--signal",
+            "GOOG=0.72",
+            "--sort",
+            "score-asc",
+        ],
+        monkeypatch,
+        capsys,
+    )
+
+    assert exit_code == 0
+    assert stdout.index("MSFT") < stdout.index("AAPL") < stdout.index("GOOG")
+    assert stderr == ""
+
+
+def test_signals_classify_score_desc_json_output(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    exit_code, stdout, stderr = _run_signals_classify(
+        [
+            "--signal",
+            "MSFT=0.10",
+            "--signal",
+            "AAPL=0.72",
+            "--signal",
+            "GOOG=0.72",
+            "--format",
+            "json",
+            "--sort",
+            "score-desc",
+        ],
+        monkeypatch,
+        capsys,
+    )
+
+    payload = json.loads(stdout)
+
+    assert exit_code == 0
+    assert [item["symbol"] for item in payload["classifications"]] == [
+        "AAPL",
+        "GOOG",
+        "MSFT",
+    ]
+    assert stderr == ""
+
+
+def test_signals_classify_score_asc_json_output(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    exit_code, stdout, stderr = _run_signals_classify(
+        [
+            "--signal",
+            "MSFT=0.10",
+            "--signal",
+            "AAPL=0.72",
+            "--signal",
+            "GOOG=0.72",
+            "--format",
+            "json",
+            "--sort",
+            "score-asc",
+        ],
+        monkeypatch,
+        capsys,
+    )
+
+    payload = json.loads(stdout)
+
+    assert exit_code == 0
+    assert [item["symbol"] for item in payload["classifications"]] == [
+        "MSFT",
+        "AAPL",
+        "GOOG",
+    ]
+    assert stderr == ""
+
+
+def test_signals_classify_equal_scores_preserve_input_order(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    exit_code, stdout, stderr = _run_signals_classify(
+        [
+            "--signal",
+            "AAPL=0.50",
+            "--signal",
+            "MSFT=0.50",
+            "--signal",
+            "GOOG=0.20",
+            "--sort",
+            "score-desc",
+            "--format",
+            "json",
+        ],
+        monkeypatch,
+        capsys,
+    )
+
+    payload = json.loads(stdout)
+
+    assert exit_code == 0
+    assert [item["symbol"] for item in payload["classifications"]] == [
+        "AAPL",
+        "MSFT",
+        "GOOG",
+    ]
+    assert stderr == ""
+
+
+def test_signals_classify_rejects_invalid_sort_value_cleanly(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        cli_main.run(
+            [
+                "signals",
+                "classify",
+                "--signal",
+                "AAPL=0.72",
+                "--sort",
+                "unknown",
+                "--output",
+                str(tmp_path / "out.json"),
+            ]
+        )
+
+    captured = capsys.readouterr()
+
+    assert excinfo.value.code == 2
+    assert "invalid choice" in captured.err
+    assert "Traceback" not in captured.err
+    assert not (tmp_path / "out.json").exists()
+
+
+def test_signals_classify_output_file_reflects_requested_order(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    output_path = tmp_path / "nested" / "reports" / "signals.json"
+
+    exit_code, stdout, stderr = _run_signals_classify(
+        [
+            "--signal",
+            "MSFT=0.10",
+            "--signal",
+            "AAPL=0.72",
+            "--signal",
+            "GOOG=0.72",
+            "--sort",
+            "score-desc",
+            "--format",
+            "json",
+            "--output",
+            str(output_path),
+        ],
+        monkeypatch,
+        capsys,
+    )
+
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert [item["symbol"] for item in payload["classifications"]] == [
+        "AAPL",
+        "GOOG",
+        "MSFT",
+    ]
+    assert output_path.exists()
+    assert output_path.parent.exists()
+    assert "Wrote 3 rows" in stdout
+    assert stderr == ""
