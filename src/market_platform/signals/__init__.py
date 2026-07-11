@@ -19,6 +19,10 @@ from market_platform.signals.classification import (
 )
 from market_platform.signals.composite import calculate_composite_signal
 from market_platform.signals.models import MarketSignal, MarketSignalSnapshot
+from market_platform.signals.ranking import (
+    SignalClassificationSort,
+    sort_signal_classifications,
+)
 from market_platform.signals.relative_strength import (
     align_asset_and_benchmark_prices,
     calculate_relative_strength,
@@ -28,8 +32,9 @@ from market_platform.signals.service import calculate_market_signals
 __all__ = [
     "SignalClassification",
     "SignalClassificationLevel",
-    "SignalClassificationThresholds",
+    "SignalClassificationSort",
     "SignalClassificationSnapshot",
+    "SignalClassificationThresholds",
     "align_asset_and_benchmark_prices",
     "MarketSignal",
     "MarketSignalSnapshot",
@@ -43,4 +48,5 @@ __all__ = [
     "calculate_trend",
     "classify_composite_signal",
     "classify_composite_signals",
+    "sort_signal_classifications",
 ]
