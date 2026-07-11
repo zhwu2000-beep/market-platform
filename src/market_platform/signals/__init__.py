@@ -1,5 +1,9 @@
 """Market signal calculation package."""
 
+from market_platform.signals.batch import (
+    SignalClassificationSnapshot,
+    classify_composite_signals,
+)
 from market_platform.signals.calculators import (
     calculate_current_drawdown,
     calculate_distance_from_moving_average,
@@ -25,6 +29,7 @@ __all__ = [
     "SignalClassification",
     "SignalClassificationLevel",
     "SignalClassificationThresholds",
+    "SignalClassificationSnapshot",
     "align_asset_and_benchmark_prices",
     "MarketSignal",
     "MarketSignalSnapshot",
@@ -37,4 +42,5 @@ __all__ = [
     "calculate_realized_volatility",
     "calculate_trend",
     "classify_composite_signal",
+    "classify_composite_signals",
 ]
