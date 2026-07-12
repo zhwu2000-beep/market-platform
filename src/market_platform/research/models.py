@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, fields, is_dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum, StrEnum
 from numbers import Real
 from typing import Any, cast
@@ -378,6 +378,146 @@ class StrategyCandidate(ResearchSerializable):
 
 
 @dataclass(frozen=True, slots=True)
+class ResearchSignalComponent(ResearchSerializable):
+    """Structured interpreted signal component used by the research workflow."""
+
+    name: str
+    raw_value: float | None
+    score: float | None
+    state: str
+    role: str
+    methodology: str
+    parameters: dict[str, object]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "name", _normalize_required_text(self.name, "name"))
+        object.__setattr__(self, "state", _normalize_required_text(self.state, "state"))
+        object.__setattr__(self, "role", _normalize_required_text(self.role, "role"))
+        object.__setattr__(
+            self,
+            "methodology",
+            _normalize_required_text(self.methodology, "methodology"),
+        )
+        if self.raw_value is not None:
+            object.__setattr__(
+                self,
+                "raw_value",
+                _normalize_numeric_value(self.raw_value, "raw_value"),
+            )
+        if self.score is not None:
+            object.__setattr__(
+                self,
+                "score",
+                _require_unit_interval_signed(self.score, "score"),
+            )
+        object.__setattr__(self, "parameters", dict(self.parameters))
+
+
+@dataclass(frozen=True, slots=True)
+class ResearchCompositeAssessment(ResearchSerializable):
+    """Structured composite assessment produced by the research workflow."""
+
+    score: float | None
+    classification: str | None
+    included_signals: tuple[str, ...]
+    missing_signals: tuple[str, ...]
+    configured_weights: dict[str, float]
+    normalized_weights: dict[str, float]
+    component_contributions: dict[str, float]
+    methodology: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "included_signals",
+            _normalize_string_tuple(self.included_signals, "included_signals"),
+        )
+        object.__setattr__(
+            self,
+            "missing_signals",
+            _normalize_string_tuple(self.missing_signals, "missing_signals"),
+        )
+        object.__setattr__(
+            self,
+            "methodology",
+            _normalize_required_text(self.methodology, "methodology"),
+        )
+        object.__setattr__(
+            self,
+            "configured_weights",
+            _normalize_weight_mapping(self.configured_weights, "configured_weights"),
+        )
+        object.__setattr__(
+            self,
+            "normalized_weights",
+            _normalize_weight_mapping(self.normalized_weights, "normalized_weights"),
+        )
+        object.__setattr__(
+            self,
+            "component_contributions",
+            _normalize_contribution_mapping(
+                self.component_contributions,
+                "component_contributions",
+            ),
+        )
+        if self.score is None:
+            if self.classification is not None:
+                raise ValueError("classification must be None when score is None")
+        else:
+            if self.classification is None:
+                raise ValueError(
+                    "classification must be provided when score is present"
+                )
+            object.__setattr__(
+                self, "score", _require_unit_interval_signed(self.score, "score")
+            )
+            object.__setattr__(
+                self,
+                "classification",
+                _normalize_required_text(self.classification, "classification"),
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class ResearchAnalysis(ResearchSerializable):
+    """Structured end-to-end research analysis payload."""
+
+    symbol: str
+    timestamp: datetime
+    components: tuple[ResearchSignalComponent, ...]
+    volatility_state: str | None
+    volatility_value: float | None
+    composite: ResearchCompositeAssessment
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "symbol", _normalize_symbol(self.symbol))
+        object.__setattr__(self, "timestamp", _normalize_timestamp(self.timestamp))
+        object.__setattr__(
+            self,
+            "components",
+            _normalize_model_tuple(
+                self.components,
+                "components",
+                ResearchSignalComponent,
+            ),
+        )
+        if self.volatility_state is not None:
+            object.__setattr__(
+                self,
+                "volatility_state",
+                _normalize_required_text(self.volatility_state, "volatility_state"),
+            )
+        normalized_state, normalized_value = _normalize_analysis_volatility(
+            self.volatility_state,
+            self.volatility_value,
+        )
+        object.__setattr__(self, "volatility_state", normalized_state)
+        object.__setattr__(self, "volatility_value", normalized_value)
+        if not isinstance(self.composite, ResearchCompositeAssessment):
+            raise TypeError("composite must be a ResearchCompositeAssessment")
+
+
+@dataclass(frozen=True, slots=True)
 class ResearchResult(ResearchSerializable):
     """Structured outcome of a research workflow."""
 
@@ -392,6 +532,7 @@ class ResearchResult(ResearchSerializable):
     strategy_candidates: tuple[StrategyCandidate, ...] = ()
     warnings: tuple[ResearchWarning, ...] = ()
     summary: str | None = None
+    analysis: ResearchAnalysis | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.request, ResearchRequest):
@@ -455,6 +596,47 @@ class ResearchResult(ResearchSerializable):
             "warnings",
             _normalize_model_tuple(self.warnings, "warnings", ResearchWarning),
         )
+        if self.analysis is not None and not isinstance(
+            self.analysis, ResearchAnalysis
+        ):
+            raise TypeError("analysis must be a ResearchAnalysis or None")
+
+
+def _normalize_weight_mapping(values: object, field_name: str) -> dict[str, float]:
+    if isinstance(values, (str, bytes, bytearray)) or not isinstance(values, dict):
+        raise TypeError(f"{field_name} must be a dict")
+    normalized: dict[str, float] = {}
+    for key, value in values.items():
+        normalized_key = _normalize_required_text(key, field_name)
+        if normalized_key in normalized:
+            raise ValueError(f"{field_name} keys must be unique")
+        normalized[normalized_key] = _require_non_negative_number(value, field_name)
+    return normalized
+
+
+def _normalize_contribution_mapping(
+    values: object, field_name: str
+) -> dict[str, float]:
+    if not isinstance(values, dict):
+        raise TypeError(f"{field_name} must be a dict")
+    normalized: dict[str, float] = {}
+    for key, value in values.items():
+        normalized_key = _normalize_required_text(key, field_name)
+        if normalized_key in normalized:
+            raise ValueError(f"{field_name} keys must be unique")
+        normalized[normalized_key] = _normalize_numeric_value(value, field_name)
+    return normalized
+
+
+def _require_unit_interval_signed(value: object, field_name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise TypeError(f"{field_name} must be numeric")
+    numeric_value = float(value)
+    if not math.isfinite(numeric_value):
+        raise ValueError(f"{field_name} must be finite")
+    if numeric_value < -1.0 or numeric_value > 1.0:
+        raise ValueError(f"{field_name} must be within [-1.0, 1.0]")
+    return numeric_value
 
 
 def _normalize_symbol(value: object) -> str:
@@ -477,6 +659,64 @@ def _normalize_optional_text(value: object, field_name: str) -> str | None:
     if value is None:
         return None
     return _normalize_required_text(value, field_name)
+
+
+def _normalize_timestamp(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        raise ValueError("timestamp must be timezone-aware")
+    return value.astimezone(UTC)
+
+
+def _normalize_numeric_value(value: object, field_name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise TypeError(f"{field_name} must be numeric")
+    numeric_value = float(value)
+    if not math.isfinite(numeric_value):
+        raise ValueError(f"{field_name} must be finite")
+    return numeric_value
+
+
+def _normalize_non_negative_number(value: object, field_name: str) -> float:
+    numeric_value = _normalize_numeric_value(value, field_name)
+    if numeric_value < 0.0:
+        raise ValueError(f"{field_name} must not be negative")
+    return numeric_value
+
+
+def _normalize_analysis_volatility(
+    volatility_state: str | None,
+    volatility_value: float | None,
+) -> tuple[str | None, float | None]:
+    if volatility_state is None:
+        if volatility_value is not None:
+            raise ValueError(
+                "volatility_value must be None when volatility_state is None"
+            )
+        return None, None
+
+    state = _normalize_required_text(volatility_state, "volatility_state").lower()
+    if state not in {"low", "normal", "high", "unavailable"}:
+        raise ValueError(
+            "volatility_state must be one of: low, normal, high, unavailable"
+        )
+
+    if state == "unavailable":
+        if volatility_value is not None:
+            raise ValueError(
+                "volatility_value must be None when volatility_state is unavailable"
+            )
+        return state, None
+
+    if volatility_value is None:
+        raise ValueError(
+            "volatility_value must be provided when volatility_state is low, "
+            "normal, or high"
+        )
+
+    return state, _normalize_non_negative_number(
+        volatility_value,
+        "volatility_value",
+    )
 
 
 def _normalize_required_text_tuple(
@@ -505,9 +745,7 @@ def _normalize_number_tuple(
     field_name: str,
 ) -> tuple[float, ...]:
     container = _normalize_tuple_container(values, field_name)
-    return tuple(
-        _require_non_negative_number(value, field_name) for value in container
-    )
+    return tuple(_require_non_negative_number(value, field_name) for value in container)
 
 
 def _normalize_model_tuple[ModelT](

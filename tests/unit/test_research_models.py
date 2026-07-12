@@ -13,8 +13,11 @@ from market_platform.research import (
     PriceLevel,
     PriceTarget,
     ProbabilityEstimate,
+    ResearchAnalysis,
+    ResearchCompositeAssessment,
     ResearchRequest,
     ResearchResult,
+    ResearchSignalComponent,
     ResearchStatus,
     ResearchWarning,
     ResearchWorkflow,
@@ -99,7 +102,7 @@ def _result(**overrides: object) -> ResearchResult:
             strength="moderate",
             trend_state="uptrend",
             momentum_state="improving",
-            volatility_state="elevated",
+            volatility_state="high",
             price_structure="higher_highs",
             confidence=0.8,
         ),
@@ -113,6 +116,44 @@ def _result(**overrides: object) -> ResearchResult:
     }
     payload.update(overrides)
     return ResearchResult(**payload)
+
+
+def _analysis(
+    *,
+    volatility_state: str | None,
+    volatility_value: float | None,
+) -> ResearchAnalysis:
+    composite = ResearchCompositeAssessment(
+        score=0.25,
+        classification="bullish",
+        included_signals=("trend",),
+        missing_signals=(),
+        configured_weights={"trend": 1.0},
+        normalized_weights={"trend": 1.0},
+        component_contributions={"trend": 0.25},
+        methodology="baseline_uncalibrated_composite_v1",
+    )
+    return ResearchAnalysis(
+        symbol="msft",
+        timestamp=_FIXED_AS_OF,
+        components=(
+            ResearchSignalComponent(
+                name="trend",
+                raw_value=0.05,
+                score=0.5,
+                state="positive",
+                role="directional",
+                methodology="baseline_uncalibrated_directional_rescaling_v1",
+                parameters={
+                    "scale": 0.10,
+                    "formula": "clamp(raw_value / scale, -1.0, 1.0)",
+                },
+            ),
+        ),
+        volatility_state=volatility_state,
+        volatility_value=volatility_value,
+        composite=composite,
+    )
 
 
 def test_research_request_normalizes_symbol() -> None:
@@ -153,7 +194,7 @@ def test_markerview_text_is_stripped() -> None:
         strength=" moderate ",
         trend_state=" trending ",
         momentum_state=" improving ",
-        volatility_state=" elevated ",
+        volatility_state=" high ",
         price_structure=" higher_highs ",
         confidence=0.5,
     )
@@ -162,8 +203,61 @@ def test_markerview_text_is_stripped() -> None:
     assert view.strength == "moderate"
     assert view.trend_state == "trending"
     assert view.momentum_state == "improving"
-    assert view.volatility_state == "elevated"
+    assert view.volatility_state == "high"
     assert view.price_structure == "higher_highs"
+
+
+@pytest.mark.parametrize(
+    ("volatility_state", "volatility_value", "expected_state", "expected_value"),
+    [
+        (None, None, None, None),
+        ("unavailable", None, "unavailable", None),
+        ("low", 0.1, "low", 0.1),
+        ("normal", 0.2, "normal", 0.2),
+        ("high", 0.3, "high", 0.3),
+    ],
+)
+def test_research_analysis_accepts_valid_volatility_combinations(
+    volatility_state: str | None,
+    volatility_value: float | None,
+    expected_state: str | None,
+    expected_value: float | None,
+) -> None:
+    analysis = _analysis(
+        volatility_state=volatility_state,
+        volatility_value=volatility_value,
+    )
+
+    assert analysis.volatility_state == expected_state
+    assert analysis.volatility_value == expected_value
+
+
+@pytest.mark.parametrize(
+    ("volatility_state", "volatility_value", "expected_exception", "expected_message"),
+    [
+        ("low", None, ValueError, "must be provided"),
+        ("normal", None, ValueError, "must be provided"),
+        ("high", None, ValueError, "must be provided"),
+        ("unavailable", 0.1, ValueError, "must be None"),
+        (None, 0.1, ValueError, "must be None"),
+        ("mystery", 0.1, ValueError, "one of: low, normal, high, unavailable"),
+        ("low", -0.1, ValueError, "must not be negative"),
+        ("low", float("inf"), ValueError, "must be finite"),
+        ("low", True, TypeError, "must be numeric"),
+        (True, 0.1, TypeError, "volatility_state must be a string"),
+    ],
+)
+def test_research_analysis_rejects_invalid_volatility_combinations(
+    volatility_state: object,
+    volatility_value: object,
+    expected_exception: type[Exception],
+    expected_message: str,
+) -> None:
+    with pytest.raises(expected_exception, match=expected_message):
+        _analysis(
+            volatility_state=volatility_state,  # type: ignore[arg-type]
+            volatility_value=volatility_value,  # type: ignore[arg-type]
+        )
 
 
 @pytest.mark.parametrize(

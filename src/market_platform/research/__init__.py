@@ -23,13 +23,16 @@ from market_platform.research.models import (
     PriceLevel,
     PriceTarget,
     ProbabilityEstimate,
+    ResearchAnalysis,
+    ResearchCompositeAssessment,
     ResearchRequest,
     ResearchResult,
+    ResearchSignalComponent,
     ResearchStatus,
     ResearchWarning,
     StrategyCandidate,
 )
-from market_platform.research.workflow import ResearchWorkflow
+from market_platform.research.workflow import DefaultResearchWorkflow, ResearchWorkflow
 
 __all__ = [
     "DIRECTIONAL_CURRENT_DRAWDOWN_SCALE",
@@ -38,14 +41,18 @@ __all__ = [
     "DIRECTIONAL_TREND_SCALE",
     "InterpretedSignal",
     "InterpretedSignalState",
+    "DefaultResearchWorkflow",
     "MarketView",
     "PositionAction",
     "PositionContext",
     "PriceLevel",
     "PriceTarget",
     "ProbabilityEstimate",
+    "ResearchAnalysis",
+    "ResearchCompositeAssessment",
     "ResearchRequest",
     "ResearchResult",
+    "ResearchSignalComponent",
     "ResearchStatus",
     "ResearchWarning",
     "ResearchWorkflow",
