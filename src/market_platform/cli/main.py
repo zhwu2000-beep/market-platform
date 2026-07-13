@@ -33,6 +33,11 @@ from market_platform.data.health import (
     render_provider_health_report,
 )
 from market_platform.logging import configure_logging, get_logger
+from market_platform.research import (
+    DefaultResearchWorkflow,
+    ResearchRequest,
+    ResearchResult,
+)
 from market_platform.signals.batch import (
     SignalClassificationSnapshot,
     classify_composite_signals,
@@ -209,6 +214,42 @@ def build_parser() -> argparse.ArgumentParser:
     )
     classify_parser.set_defaults(handler=_handle_signals_classify)
 
+    research_parser = subparsers.add_parser(
+        "research",
+        help="Research workflow commands.",
+    )
+    research_subparsers = research_parser.add_subparsers(dest="research_command")
+    run_parser = research_subparsers.add_parser(
+        "run",
+        help="Run the end-to-end research workflow.",
+        parents=[_build_output_options_parser(["table", "json"])],
+    )
+    run_parser.add_argument("--symbol", required=True, help="Ticker symbol.")
+    run_parser.add_argument(
+        "--horizon-days",
+        type=_parse_positive_int,
+        default=20,
+        help="Requested research horizon in days.",
+    )
+    run_parser.add_argument(
+        "--provider",
+        default=None,
+        type=_normalize_provider_name_arg,
+        help="Explicit provider. Defaults to configured provider fallback order.",
+    )
+    run_parser.add_argument(
+        "--as-of",
+        type=_parse_iso_date,
+        default=None,
+        help="Research as-of date, YYYY-MM-DD.",
+    )
+    run_parser.add_argument(
+        "--lookback-days",
+        type=_parse_positive_int,
+        default=120,
+        help="Daily lookback window in calendar days.",
+    )
+    run_parser.set_defaults(handler=_handle_research_run)
 
     return parser
 
@@ -427,7 +468,6 @@ def _handle_data_provider_health(args: argparse.Namespace) -> int:
     return _provider_health_exit_code(report.status, fail_on)
 
 
-
 def _handle_signals_classify(args: argparse.Namespace) -> int:
     timestamp = datetime.now(UTC)
     signals = [
@@ -451,6 +491,39 @@ def _handle_signals_classify(args: argparse.Namespace) -> int:
             f"Wrote {len(snapshot.classifications)} rows to {args.output} "
             f"as {args.format}."
         )
+        return 0
+
+    print(rendered_output, end="" if rendered_output.endswith("\n") else "\n")
+    return 0
+
+
+def _handle_research_run(args: argparse.Namespace) -> int:
+    logger = get_logger(__name__)
+    request = ResearchRequest(
+        symbol=args.symbol,
+        horizon_days=args.horizon_days,
+        provider=args.provider,
+        as_of=_as_of_datetime(args.as_of),
+    )
+    service = create_default_market_data_service()
+    workflow = DefaultResearchWorkflow(
+        service,
+        lookback_calendar_days=args.lookback_days,
+    )
+    try:
+        result = asyncio.run(workflow.run(request))
+    except ConfigurationError as exc:
+        logger.error("Failed to run research workflow: %s", exc)
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except DataProviderError as exc:
+        logger.error("Failed to run research workflow: %s", exc)
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    rendered_output = _render_research_result(result, args.format)
+    if args.output is not None:
+        _write_output(Path(args.output), rendered_output)
         return 0
 
     print(rendered_output, end="" if rendered_output.endswith("\n") else "\n")
@@ -509,6 +582,58 @@ def _render_signal_classifications_json(
         ],
     }
     return json.dumps(payload, ensure_ascii=False) + "\n"
+
+
+def _render_research_result(result: ResearchResult, output_format: str) -> str:
+    if output_format == "table":
+        return _render_research_result_table(result)
+    if output_format == "json":
+        return _render_research_result_json(result)
+    raise ValueError(f"Unsupported output format: {output_format}")
+
+
+def _render_research_result_table(result: ResearchResult) -> str:
+    analysis = result.analysis
+    market_view = result.market_view
+    composite = analysis.composite if analysis is not None else None
+    as_of = result.request.as_of
+    if as_of is None and analysis is not None:
+        as_of = analysis.timestamp
+    row = {
+        "Symbol": result.request.symbol,
+        "Status": result.status.value,
+        "Requested Horizon": result.request.horizon_days,
+        "As Of": _format_datetime_for_table(as_of),
+        "Direction": _placeholder_if_none(
+            market_view.direction if market_view is not None else None
+        ),
+        "Strength": _placeholder_if_none(
+            market_view.strength if market_view is not None else None
+        ),
+        "Trend State": _placeholder_if_none(
+            market_view.trend_state if market_view is not None else None
+        ),
+        "Momentum State": _placeholder_if_none(
+            market_view.momentum_state if market_view is not None else None
+        ),
+        "Volatility State": _placeholder_if_none(
+            market_view.volatility_state if market_view is not None else None
+        ),
+        "Composite Score": _placeholder_if_none(
+            composite.score if composite is not None else None
+        ),
+        "Classification": _placeholder_if_none(
+            composite.classification if composite is not None else None
+        ),
+        "Summary": result.summary or "-",
+        "Warnings": _render_warning_summary(result.warnings),
+    }
+    frame = pd.DataFrame([row])
+    return f"{frame.to_string(index=False)}\n"
+
+
+def _render_research_result_json(result: ResearchResult) -> str:
+    return json.dumps(result.to_dict(), ensure_ascii=False) + "\n"
 
 
 def _render_provider_diagnostics_report(
@@ -598,6 +723,52 @@ def _parse_iso_date(value: str) -> date:
             f"invalid date {value!r}; expected format YYYY-MM-DD"
         ) from exc
 
+
+def _parse_positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"invalid integer value {value!r}") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(
+            f"invalid integer value {value!r}; expected a positive integer"
+        )
+    return parsed
+
+
+def _as_of_datetime(value: date | None) -> datetime | None:
+    if value is None:
+        return None
+    return datetime(value.year, value.month, value.day, 23, 59, 59, tzinfo=UTC)
+
+
+def _format_datetime_for_table(value: datetime | None) -> str:
+    if value is None:
+        return "-"
+    return value.isoformat()
+
+
+def _placeholder_if_none(value: object) -> object:
+    if value is None:
+        return "-"
+    return value
+
+
+def _render_warning_summary(warnings: object) -> str:
+    if not isinstance(warnings, tuple):
+        return "-"
+    if not warnings:
+        return "-"
+    summary_items: list[str] = []
+    for warning in warnings:
+        code = getattr(warning, "code", None)
+        message = getattr(warning, "message", None)
+        if code is None or message is None:
+            continue
+        summary_items.append(f"{code}: {message}")
+    return ", ".join(summary_items) if summary_items else "-"
+
+
 def _parse_signal_argument(value: str) -> tuple[str, float]:
     original_value = value
     if "=" not in value:
@@ -635,6 +806,7 @@ def _parse_signal_argument(value: str) -> tuple[str, float]:
         )
 
     return symbol, score
+
 
 def _build_output_options_parser(
     formats: list[str],
@@ -771,11 +943,15 @@ def _provider_health_exit_code(status: str, fail_on: str) -> int:
 
 
 def _configure_logging_for_args(args: argparse.Namespace) -> None:
-    if getattr(args, "data_command", None) == "providers" and getattr(
-        args,
-        "providers_command",
-        None,
-    ) == "health":
+    if (
+        getattr(args, "data_command", None) == "providers"
+        and getattr(
+            args,
+            "providers_command",
+            None,
+        )
+        == "health"
+    ):
         if getattr(args, "quiet", False):
             configure_logging("ERROR")
             return
