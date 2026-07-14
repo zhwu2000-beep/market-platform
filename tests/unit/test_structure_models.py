@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime, timedelta, timezone
@@ -10,6 +10,7 @@ from market_platform.structure import (
     PriceLevelKind,
     PriceStructureConfig,
     PriceZone,
+    PriceZoneObservation,
 )
 
 
@@ -174,3 +175,79 @@ def test_price_zone_rejects_candidates_outside_bounds() -> None:
             candidates=(candidate,),
             source_methods=("swing_pivot",),
         )
+
+
+def test_price_zone_observation_defaults_to_zero_touches_and_is_frozen() -> None:
+    observation = PriceZoneObservation(0, None, None)
+
+    assert observation.touch_count == 0
+    assert observation.first_observed_at is None
+    assert observation.last_observed_at is None
+
+    with pytest.raises(FrozenInstanceError):
+        observation.touch_count = 1  # type: ignore[misc]
+
+
+def test_price_zone_observation_normalizes_aware_datetimes_to_utc() -> None:
+    observation = PriceZoneObservation(
+        2,
+        datetime(2026, 1, 1, 9, tzinfo=timezone(timedelta(hours=8))),
+        datetime(2026, 1, 2, 9, tzinfo=timezone(timedelta(hours=8))),
+    )
+
+    assert observation.touch_count == 2
+    assert observation.first_observed_at == datetime(2026, 1, 1, 1, tzinfo=UTC)
+    assert observation.last_observed_at == datetime(2026, 1, 2, 1, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        (
+            {"touch_count": -1, "first_observed_at": None, "last_observed_at": None},
+            "touch_count must not be negative",
+        ),
+        (
+            {"touch_count": True, "first_observed_at": None, "last_observed_at": None},
+            "touch_count must be an integer",
+        ),
+        (
+            {
+                "touch_count": 0,
+                "first_observed_at": datetime(2026, 1, 1, tzinfo=UTC),
+                "last_observed_at": None,
+            },
+            "must be None when touch_count is 0",
+        ),
+        (
+            {
+                "touch_count": 1,
+                "first_observed_at": None,
+                "last_observed_at": datetime(2026, 1, 1, tzinfo=UTC),
+            },
+            "must be provided when touch_count is greater than 0",
+        ),
+        (
+            {
+                "touch_count": 1,
+                "first_observed_at": datetime(2026, 1, 2, tzinfo=UTC),
+                "last_observed_at": datetime(2026, 1, 1, tzinfo=UTC),
+            },
+            "first_observed_at must be earlier than or equal to last_observed_at",
+        ),
+        (
+            {
+                "touch_count": 1,
+                "first_observed_at": datetime(2026, 1, 1),
+                "last_observed_at": datetime(2026, 1, 1, tzinfo=UTC),
+            },
+            "first_observed_at must be timezone-aware",
+        ),
+    ],
+)
+def test_price_zone_observation_rejects_invalid_combinations(
+    kwargs: dict[str, object],
+    message: str,
+) -> None:
+    with pytest.raises((TypeError, ValueError), match=message):
+        PriceZoneObservation(**kwargs)

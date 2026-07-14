@@ -88,6 +88,46 @@ class PriceZone:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class PriceZoneObservation:
+    """Independent touch statistics for a price zone."""
+
+    touch_count: int
+    first_observed_at: datetime | None
+    last_observed_at: datetime | None
+
+    def __post_init__(self) -> None:
+        touch_count = _require_non_negative_int(self.touch_count, "touch_count")
+        first_observed_at = _normalize_optional_timestamp(
+            self.first_observed_at,
+            "first_observed_at",
+        )
+        last_observed_at = _normalize_optional_timestamp(
+            self.last_observed_at,
+            "last_observed_at",
+        )
+        if touch_count == 0:
+            if first_observed_at is not None or last_observed_at is not None:
+                raise ValueError(
+                    "first_observed_at and last_observed_at must be None when "
+                    "touch_count is 0"
+                )
+        else:
+            if first_observed_at is None or last_observed_at is None:
+                raise ValueError(
+                    "first_observed_at and last_observed_at must be provided when "
+                    "touch_count is greater than 0"
+                )
+            if first_observed_at > last_observed_at:
+                raise ValueError(
+                    "first_observed_at must be earlier than or equal to "
+                    "last_observed_at"
+                )
+        object.__setattr__(self, "touch_count", touch_count)
+        object.__setattr__(self, "first_observed_at", first_observed_at)
+        object.__setattr__(self, "last_observed_at", last_observed_at)
+
+
 def _normalize_required_text(value: object, field_name: str) -> str:
     if isinstance(value, bool) or not isinstance(value, str):
         raise TypeError(f"{field_name} must be a string")
@@ -127,11 +167,32 @@ def _normalize_timestamp(value: object) -> datetime:
     return value.astimezone(UTC)
 
 
+def _normalize_optional_timestamp(
+    value: object,
+    field_name: str,
+) -> datetime | None:
+    if value is None:
+        return None
+    if not isinstance(value, datetime):
+        raise TypeError(f"{field_name} must be a datetime or None")
+    if value.tzinfo is None:
+        raise ValueError(f"{field_name} must be timezone-aware")
+    return value.astimezone(UTC)
+
+
 def _require_positive_int(value: object, field_name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError(f"{field_name} must be an integer")
     if value < 1:
         raise ValueError(f"{field_name} must be at least 1")
+    return value
+
+
+def _require_non_negative_int(value: object, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{field_name} must be an integer")
+    if value < 0:
+        raise ValueError(f"{field_name} must not be negative")
     return value
 
 
