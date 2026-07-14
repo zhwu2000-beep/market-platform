@@ -479,6 +479,45 @@ class ResearchCompositeAssessment(ResearchSerializable):
 
 
 @dataclass(frozen=True, slots=True)
+class ResearchStructureAssessment(ResearchSerializable):
+    """Structured summary of a price structure analysis."""
+
+    status: str
+    as_of: datetime | None
+    current_price: float | None
+    atr: float | None
+    candidate_count: int
+    zone_count: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "status",
+            _normalize_required_text(self.status, "status"),
+        )
+        if self.as_of is not None:
+            if not isinstance(self.as_of, datetime):
+                raise TypeError("as_of must be a datetime or None")
+            object.__setattr__(self, "as_of", _normalize_timestamp(self.as_of))
+        if self.current_price is not None:
+            current_price = _normalize_non_negative_number(
+                self.current_price,
+                "current_price",
+            )
+            if current_price <= 0.0:
+                raise ValueError("current_price must be greater than 0")
+            object.__setattr__(self, "current_price", current_price)
+        if self.atr is not None:
+            object.__setattr__(
+                self,
+                "atr",
+                _normalize_non_negative_number(self.atr, "atr"),
+            )
+        _require_non_negative_int(self.candidate_count, "candidate_count")
+        _require_non_negative_int(self.zone_count, "zone_count")
+
+
+@dataclass(frozen=True, slots=True)
 class ResearchAnalysis(ResearchSerializable):
     """Structured end-to-end research analysis payload."""
 
@@ -488,6 +527,7 @@ class ResearchAnalysis(ResearchSerializable):
     volatility_state: str | None
     volatility_value: float | None
     composite: ResearchCompositeAssessment
+    structure: ResearchStructureAssessment | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "symbol", _normalize_symbol(self.symbol))
@@ -515,6 +555,13 @@ class ResearchAnalysis(ResearchSerializable):
         object.__setattr__(self, "volatility_value", normalized_value)
         if not isinstance(self.composite, ResearchCompositeAssessment):
             raise TypeError("composite must be a ResearchCompositeAssessment")
+        if self.structure is not None and not isinstance(
+            self.structure,
+            ResearchStructureAssessment,
+        ):
+            raise TypeError(
+                "structure must be a ResearchStructureAssessment or None"
+            )
 
 
 @dataclass(frozen=True, slots=True)

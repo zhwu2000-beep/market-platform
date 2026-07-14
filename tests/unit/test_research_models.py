@@ -19,6 +19,7 @@ from market_platform.research import (
     ResearchResult,
     ResearchSignalComponent,
     ResearchStatus,
+    ResearchStructureAssessment,
     ResearchWarning,
     ResearchWorkflow,
     StrategyCandidate,
@@ -230,6 +231,148 @@ def test_research_analysis_accepts_valid_volatility_combinations(
 
     assert analysis.volatility_state == expected_state
     assert analysis.volatility_value == expected_value
+
+
+def test_research_analysis_structure_defaults_to_none() -> None:
+    analysis = _analysis(volatility_state="normal", volatility_value=0.2)
+
+    assert analysis.structure is None
+    assert analysis.to_dict()["structure"] is None
+
+
+def test_research_structure_assessment_normalizes_fields() -> None:
+    assessment = ResearchStructureAssessment(
+        status=" ok ",
+        as_of=_FIXED_AS_OF,
+        current_price=101,
+        atr=2,
+        candidate_count=4,
+        zone_count=2,
+    )
+
+    assert assessment.status == "ok"
+    assert assessment.as_of == _FIXED_AS_OF
+    assert assessment.current_price == 101.0
+    assert assessment.atr == 2.0
+    assert assessment.candidate_count == 4
+    assert assessment.zone_count == 2
+
+
+def test_research_structure_assessment_is_immutable() -> None:
+    assessment = ResearchStructureAssessment(
+        status="ok",
+        as_of=_FIXED_AS_OF,
+        current_price=101.0,
+        atr=2.0,
+        candidate_count=4,
+        zone_count=2,
+    )
+
+    with pytest.raises(FrozenInstanceError):
+        assessment.status = "no_pivots"  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected_exception", "expected_message"),
+    [
+        ({"status": "   "}, ValueError, "status must not be empty"),
+        ({"status": True}, TypeError, "status must be a string"),
+        (
+            {"as_of": datetime(2026, 1, 5, 12, 0)},
+            ValueError,
+            "timestamp must be timezone-aware",
+        ),
+        ({"as_of": "2026-01-05"}, TypeError, "as_of must be a datetime or None"),
+        ({"current_price": 0.0}, ValueError, "must be greater than 0"),
+        ({"current_price": -1.0}, ValueError, "must not be negative"),
+        ({"current_price": True}, TypeError, "must be numeric"),
+        ({"current_price": float("inf")}, ValueError, "must be finite"),
+        ({"atr": -1.0}, ValueError, "atr must not be negative"),
+        ({"atr": True}, TypeError, "atr must be numeric"),
+        ({"atr": float("nan")}, ValueError, "atr must be finite"),
+        ({"candidate_count": -1}, ValueError, "must not be negative"),
+        ({"candidate_count": True}, TypeError, "must be an integer"),
+        ({"zone_count": -1}, ValueError, "must not be negative"),
+        ({"zone_count": 1.5}, TypeError, "must be an integer"),
+    ],
+)
+def test_research_structure_assessment_rejects_invalid_fields(
+    overrides: dict[str, object],
+    expected_exception: type[Exception],
+    expected_message: str,
+) -> None:
+    values: dict[str, object] = {
+        "status": "ok",
+        "as_of": _FIXED_AS_OF,
+        "current_price": 101.0,
+        "atr": 2.0,
+        "candidate_count": 4,
+        "zone_count": 2,
+    }
+    values.update(overrides)
+
+    with pytest.raises(expected_exception, match=expected_message):
+        ResearchStructureAssessment(**values)  # type: ignore[arg-type]
+
+
+def test_research_analysis_rejects_invalid_structure_type() -> None:
+    composite = ResearchCompositeAssessment(
+        score=0.25,
+        classification="bullish",
+        included_signals=("trend",),
+        missing_signals=(),
+        configured_weights={"trend": 1.0},
+        normalized_weights={"trend": 1.0},
+        component_contributions={"trend": 0.25},
+        methodology="baseline_uncalibrated_composite_v1",
+    )
+
+    with pytest.raises(
+        TypeError,
+        match="structure must be a ResearchStructureAssessment or None",
+    ):
+        ResearchAnalysis(
+            symbol="MSFT",
+            timestamp=_FIXED_AS_OF,
+            components=(),
+            volatility_state=None,
+            volatility_value=None,
+            composite=composite,
+            structure="bad",  # type: ignore[arg-type]
+        )
+
+
+def test_research_structure_assessment_json_serialization() -> None:
+    assessment = ResearchStructureAssessment(
+        status="ok",
+        as_of=_FIXED_AS_OF,
+        current_price=101.0,
+        atr=2.0,
+        candidate_count=4,
+        zone_count=2,
+    )
+    analysis = _analysis(volatility_state="normal", volatility_value=0.2)
+    analysis = ResearchAnalysis(
+        symbol=analysis.symbol,
+        timestamp=analysis.timestamp,
+        components=analysis.components,
+        volatility_state=analysis.volatility_state,
+        volatility_value=analysis.volatility_value,
+        composite=analysis.composite,
+        structure=assessment,
+    )
+
+    payload = analysis.to_dict()
+    json.dumps(payload)
+
+    assert payload["structure"] == {
+        "status": "ok",
+        "as_of": _FIXED_AS_OF.isoformat(),
+        "current_price": 101.0,
+        "atr": 2.0,
+        "candidate_count": 4,
+        "zone_count": 2,
+    }
 
 
 @pytest.mark.parametrize(

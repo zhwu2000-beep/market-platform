@@ -29,6 +29,7 @@ from market_platform.research.models import (
     ResearchResult,
     ResearchSignalComponent,
     ResearchStatus,
+    ResearchStructureAssessment,
     ResearchWarning,
     StrategyCandidate,
 )
@@ -54,6 +55,7 @@ __all__ = [
     "ResearchResult",
     "ResearchSignalComponent",
     "ResearchStatus",
+    "ResearchStructureAssessment",
     "ResearchWarning",
     "ResearchWorkflow",
     "SignalInterpretationRule",

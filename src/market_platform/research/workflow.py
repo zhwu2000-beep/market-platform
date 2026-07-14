@@ -25,12 +25,14 @@ from market_platform.research.interpretation import (
 from market_platform.research.models import (
     MarketView,
     PositionContext,
+    PriceLevel,
     ResearchAnalysis,
     ResearchCompositeAssessment,
     ResearchRequest,
     ResearchResult,
     ResearchSignalComponent,
     ResearchStatus,
+    ResearchStructureAssessment,
     ResearchWarning,
 )
 from market_platform.signals import (
@@ -39,6 +41,11 @@ from market_platform.signals import (
 )
 from market_platform.signals.classification import SignalClassification
 from market_platform.signals.models import MarketSignal, MarketSignalSnapshot
+from market_platform.structure.models import (
+    PriceStructureSnapshot,
+    PriceStructureStatus,
+)
+from market_platform.structure.service import PriceStructureService
 
 _DIRECTIONAL_SIGNAL_NAMES = (
     "trend",
@@ -72,6 +79,7 @@ class DefaultResearchWorkflow:
         lookback_calendar_days: int = 120,
         composite_weights: Mapping[str, float] | None = None,
         model_version: str = "research-workflow-v1",
+        price_structure_service: PriceStructureService | None = None,
     ) -> None:
         if isinstance(lookback_calendar_days, bool) or not isinstance(
             lookback_calendar_days,
@@ -86,6 +94,11 @@ class DefaultResearchWorkflow:
             None if composite_weights is None else dict(composite_weights)
         )
         self._model_version = _normalize_required_text(model_version, "model_version")
+        self._price_structure_service = (
+            PriceStructureService()
+            if price_structure_service is None
+            else price_structure_service
+        )
 
     async def run(
         self,
@@ -104,6 +117,9 @@ class DefaultResearchWorkflow:
             provider=request.provider,
         )
         signals_snapshot = calculate_market_signals(prices)
+        structure_snapshot = self._price_structure_service.analyze(prices)
+        structure_assessment = _build_structure_assessment(structure_snapshot)
+        price_levels = _build_price_levels(structure_snapshot)
 
         directional_raw = [
             signal
@@ -167,6 +183,7 @@ class DefaultResearchWorkflow:
             volatility_assessment=volatility_assessment,
             composite=composite,
             classification=classification,
+            structure_assessment=structure_assessment,
         )
         market_view = _build_market_view(
             analysis=analysis,
@@ -175,10 +192,12 @@ class DefaultResearchWorkflow:
         warnings = _build_warnings(
             missing_directional_names=missing_directional_names,
             composite_value=composite.value,
+            structure_status=structure_snapshot.status,
         )
         status = _resolve_status(
             missing_directional_names=missing_directional_names,
             composite_value=composite.value,
+            structure_status=structure_snapshot.status,
         )
         summary = _build_summary(
             symbol=request.symbol,
@@ -191,6 +210,7 @@ class DefaultResearchWorkflow:
             request=request,
             status=status,
             market_view=market_view,
+            price_levels=price_levels,
             warnings=warnings,
             summary=summary,
             model_version=self._model_version,
@@ -255,6 +275,7 @@ def _build_research_analysis(
     volatility_assessment: VolatilityAssessment | None,
     composite: MarketSignal,
     classification: SignalClassification | None,
+    structure_assessment: ResearchStructureAssessment,
 ) -> ResearchAnalysis:
     directional_by_name = {signal.name: signal for signal in interpreted_directional}
     components: list[ResearchSignalComponent] = []
@@ -330,7 +351,68 @@ def _build_research_analysis(
             else None
         ),
         composite=composite_assessment,
+        structure=structure_assessment,
     )
+
+
+def _build_structure_assessment(
+    snapshot: PriceStructureSnapshot,
+) -> ResearchStructureAssessment:
+    if not isinstance(snapshot, PriceStructureSnapshot):
+        raise TypeError("snapshot must be a PriceStructureSnapshot")
+    return ResearchStructureAssessment(
+        status=snapshot.status.value,
+        as_of=snapshot.as_of,
+        current_price=snapshot.current_price,
+        atr=snapshot.atr,
+        candidate_count=len(snapshot.candidates),
+        zone_count=len(snapshot.observed_zones),
+    )
+
+
+def _build_price_levels(
+    snapshot: PriceStructureSnapshot,
+) -> tuple[PriceLevel, ...]:
+    if not isinstance(snapshot, PriceStructureSnapshot):
+        raise TypeError("snapshot must be a PriceStructureSnapshot")
+    if snapshot.status is not PriceStructureStatus.OK:
+        return ()
+
+    levels: list[PriceLevel] = []
+    for observed_zone in snapshot.lower_zones:
+        zone = observed_zone.zone
+        levels.append(
+            PriceLevel(
+                lower=zone.lower_bound,
+                upper=zone.upper_bound,
+                level_type="support",
+                strength=None,
+                sources=zone.source_methods,
+            )
+        )
+    for observed_zone in snapshot.containing_zones:
+        zone = observed_zone.zone
+        levels.append(
+            PriceLevel(
+                lower=zone.lower_bound,
+                upper=zone.upper_bound,
+                level_type="current_zone",
+                strength=None,
+                sources=zone.source_methods,
+            )
+        )
+    for observed_zone in snapshot.upper_zones:
+        zone = observed_zone.zone
+        levels.append(
+            PriceLevel(
+                lower=zone.lower_bound,
+                upper=zone.upper_bound,
+                level_type="resistance",
+                strength=None,
+                sources=zone.source_methods,
+            )
+        )
+    return tuple(levels)
 
 
 def _build_market_view(
@@ -359,6 +441,7 @@ def _build_warnings(
     *,
     missing_directional_names: list[str],
     composite_value: float | None,
+    structure_status: PriceStructureStatus,
 ) -> tuple[ResearchWarning, ...]:
     warnings: list[ResearchWarning] = []
     if missing_directional_names:
@@ -378,6 +461,30 @@ def _build_warnings(
                 ),
             )
         )
+    if structure_status is PriceStructureStatus.INSUFFICIENT_DATA:
+        warnings.append(
+            ResearchWarning(
+                code="price_structure_insufficient_data",
+                message="Price structure unavailable due to insufficient data.",
+            )
+        )
+    elif structure_status is PriceStructureStatus.NO_PIVOTS:
+        warnings.append(
+            ResearchWarning(
+                code="price_structure_no_pivots",
+                message="Price structure unavailable because no pivots were detected.",
+            )
+        )
+    elif structure_status is PriceStructureStatus.VOLATILITY_UNAVAILABLE:
+        warnings.append(
+            ResearchWarning(
+                code="price_structure_volatility_unavailable",
+                message=(
+                    "Price structure unavailable because volatility could not "
+                    "be calculated."
+                ),
+            )
+        )
     return tuple(warnings)
 
 
@@ -385,8 +492,13 @@ def _resolve_status(
     *,
     missing_directional_names: list[str],
     composite_value: float | None,
+    structure_status: PriceStructureStatus,
 ) -> ResearchStatus:
-    if composite_value is None or missing_directional_names:
+    if (
+        composite_value is None
+        or missing_directional_names
+        or structure_status is not PriceStructureStatus.OK
+    ):
         return ResearchStatus.DEGRADED
     return ResearchStatus.OK
 

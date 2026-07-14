@@ -21,6 +21,7 @@ from market_platform.research import (
     ResearchResult,
     ResearchSignalComponent,
     ResearchStatus,
+    ResearchStructureAssessment,
     ResearchWorkflow,
     SignalRole,
     VolatilityAssessment,
@@ -28,6 +29,16 @@ from market_platform.research import (
 )
 from market_platform.research.interpretation import calculate_research_composite_signal
 from market_platform.signals.models import MarketSignal, MarketSignalSnapshot
+from market_platform.structure import (
+    ObservedPriceZone,
+    PriceLevelCandidate,
+    PriceLevelKind,
+    PriceStructureService,
+    PriceStructureSnapshot,
+    PriceStructureStatus,
+    PriceZone,
+    PriceZoneObservation,
+)
 
 _REQUEST_AS_OF = datetime(2026, 1, 5, 1, 0, tzinfo=timezone(timedelta(hours=14)))
 _CLOCK_NOW = datetime(2026, 1, 10, 12, 0, tzinfo=UTC)
@@ -55,6 +66,21 @@ class FakeMarketDataService:
             }
         )
         return self.frame
+
+
+class FakePriceStructureService(PriceStructureService):
+    def __init__(self, snapshot: PriceStructureSnapshot) -> None:
+        self.snapshot = snapshot
+        self.calls: list[pd.DataFrame] = []
+
+    def analyze(
+        self,
+        prices: pd.DataFrame,
+        **kwargs: Any,
+    ) -> PriceStructureSnapshot:
+        del kwargs
+        self.calls.append(prices)
+        return self.snapshot
 
 
 class _FakeWorkflow:
@@ -88,8 +114,137 @@ def _prices_frame() -> pd.DataFrame:
                 datetime(2026, 1, 8, 0, 0, tzinfo=UTC),
                 datetime(2026, 1, 9, 0, 0, tzinfo=UTC),
             ],
+            "high": [101.0, 102.0],
+            "low": [99.0, 100.0],
             "close": [100.0, 101.0],
         }
+    )
+
+
+def _structure_snapshot(status: PriceStructureStatus) -> PriceStructureSnapshot:
+    if status is PriceStructureStatus.INSUFFICIENT_DATA:
+        return PriceStructureSnapshot(status=status)
+    if status is PriceStructureStatus.NO_PIVOTS:
+        return PriceStructureSnapshot(
+            status=status,
+            as_of=_SNAPSHOT_TIMESTAMP,
+            current_price=101.0,
+        )
+
+    candidate = PriceLevelCandidate(
+        price=100.0,
+        kind=PriceLevelKind.SWING_LOW,
+        observed_at=_SNAPSHOT_TIMESTAMP - timedelta(days=1),
+    )
+    if status is PriceStructureStatus.VOLATILITY_UNAVAILABLE:
+        return PriceStructureSnapshot(
+            status=status,
+            as_of=_SNAPSHOT_TIMESTAMP,
+            current_price=101.0,
+            candidates=(candidate,),
+        )
+
+    zone = PriceZone(
+        lower_bound=100.0,
+        upper_bound=100.0,
+        midpoint=100.0,
+        candidates=(candidate,),
+        source_methods=("swing_pivot",),
+    )
+    observed_zone = ObservedPriceZone(
+        zone=zone,
+        observation=PriceZoneObservation(
+            touch_count=1,
+            first_observed_at=_SNAPSHOT_TIMESTAMP - timedelta(days=1),
+            last_observed_at=_SNAPSHOT_TIMESTAMP - timedelta(days=1),
+        ),
+    )
+    return PriceStructureSnapshot(
+        status=status,
+        as_of=_SNAPSHOT_TIMESTAMP,
+        current_price=101.0,
+        atr=2.0,
+        candidates=(candidate,),
+        observed_zones=(observed_zone,),
+    )
+
+
+def _observed_structure_zone(
+    lower_bound: float,
+    upper_bound: float,
+    *,
+    days_ago: int,
+    source_method: str,
+) -> ObservedPriceZone:
+    midpoint = (lower_bound + upper_bound) / 2.0
+    candidate = PriceLevelCandidate(
+        price=midpoint,
+        kind=PriceLevelKind.SWING_LOW,
+        observed_at=_SNAPSHOT_TIMESTAMP - timedelta(days=days_ago),
+        source_method=source_method,
+    )
+    return ObservedPriceZone(
+        zone=PriceZone(
+            lower_bound=lower_bound,
+            upper_bound=upper_bound,
+            midpoint=midpoint,
+            candidates=(candidate,),
+            source_methods=(source_method,),
+        ),
+        observation=PriceZoneObservation(0, None, None),
+    )
+
+
+def _price_level_structure_snapshot() -> PriceStructureSnapshot:
+    observed_zones = (
+        _observed_structure_zone(
+            115.0,
+            120.0,
+            days_ago=1,
+            source_method="far_resistance",
+        ),
+        _observed_structure_zone(
+            80.0,
+            85.0,
+            days_ago=6,
+            source_method="far_support",
+        ),
+        _observed_structure_zone(
+            100.0,
+            102.0,
+            days_ago=3,
+            source_method="current_upper",
+        ),
+        _observed_structure_zone(
+            105.0,
+            110.0,
+            days_ago=2,
+            source_method="near_resistance",
+        ),
+        _observed_structure_zone(
+            98.0,
+            100.0,
+            days_ago=4,
+            source_method="current_lower",
+        ),
+        _observed_structure_zone(
+            90.0,
+            95.0,
+            days_ago=5,
+            source_method="near_support",
+        ),
+    )
+    return PriceStructureSnapshot(
+        status=PriceStructureStatus.OK,
+        as_of=_SNAPSHOT_TIMESTAMP,
+        current_price=100.0,
+        atr=2.0,
+        candidates=tuple(
+            candidate
+            for observed_zone in observed_zones
+            for candidate in observed_zone.zone.candidates
+        ),
+        observed_zones=observed_zones,
     )
 
 
@@ -306,6 +461,138 @@ def test_workflow_uses_explicit_as_of_in_utc(
 
 
 @pytest.mark.parametrize(
+    ("structure_status", "expected_warning_code", "expected_status"),
+    [
+        (PriceStructureStatus.OK, None, ResearchStatus.OK),
+        (
+            PriceStructureStatus.INSUFFICIENT_DATA,
+            "price_structure_insufficient_data",
+            ResearchStatus.DEGRADED,
+        ),
+        (
+            PriceStructureStatus.NO_PIVOTS,
+            "price_structure_no_pivots",
+            ResearchStatus.DEGRADED,
+        ),
+        (
+            PriceStructureStatus.VOLATILITY_UNAVAILABLE,
+            "price_structure_volatility_unavailable",
+            ResearchStatus.DEGRADED,
+        ),
+    ],
+)
+def test_workflow_maps_injected_price_structure_without_affecting_signals(
+    monkeypatch: pytest.MonkeyPatch,
+    structure_status: PriceStructureStatus,
+    expected_warning_code: str | None,
+    expected_status: ResearchStatus,
+) -> None:
+    frame = _prices_frame()
+    market_data_service = FakeMarketDataService(frame)
+    snapshot = _structure_snapshot(structure_status)
+    structure_service = FakePriceStructureService(snapshot)
+    workflow = DefaultResearchWorkflow(
+        market_data_service,
+        price_structure_service=structure_service,
+    )
+    captured = _install_pipeline(
+        monkeypatch,
+        directional_scores=(0.5, 0.5, 0.5, 0.5),
+    )
+
+    result = _run_workflow(workflow, _request())
+
+    assert len(market_data_service.calls) == 1
+    assert len(structure_service.calls) == 1
+    assert structure_service.calls[0] is frame
+    assert captured["prices_frame"] is frame
+    assert [
+        signal.name for signal in captured["directional_inputs"]  # type: ignore[union-attr]
+    ] == [
+        "trend",
+        "momentum",
+        "current_drawdown",
+        "distance_from_moving_average",
+    ]
+
+    assert isinstance(result.analysis, ResearchAnalysis)
+    assert isinstance(result.analysis.structure, ResearchStructureAssessment)
+    assert result.analysis.structure == ResearchStructureAssessment(
+        status=snapshot.status.value,
+        as_of=snapshot.as_of,
+        current_price=snapshot.current_price,
+        atr=snapshot.atr,
+        candidate_count=len(snapshot.candidates),
+        zone_count=len(snapshot.observed_zones),
+    )
+    assert result.analysis.composite.score == pytest.approx(0.5)
+    assert result.market_view is not None
+    assert result.market_view.direction == "bullish"
+    assert result.market_view.strength == "moderate"
+    assert result.market_view.price_structure is None
+    assert result.status is expected_status
+    assert [warning.code for warning in result.warnings] == (
+        [] if expected_warning_code is None else [expected_warning_code]
+    )
+
+
+def test_workflow_maps_price_structure_zones_to_ordered_price_levels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _price_level_structure_snapshot()
+    workflow = DefaultResearchWorkflow(
+        FakeMarketDataService(_prices_frame()),
+        price_structure_service=FakePriceStructureService(snapshot),
+    )
+    _install_pipeline(monkeypatch, directional_scores=(0.5, 0.5, 0.5, 0.5))
+
+    result = _run_workflow(workflow, _request())
+
+    assert [
+        (
+            level.lower,
+            level.upper,
+            level.level_type,
+            level.strength,
+            level.sources,
+        )
+        for level in result.price_levels
+    ] == [
+        (90.0, 95.0, "support", None, ("near_support",)),
+        (80.0, 85.0, "support", None, ("far_support",)),
+        (98.0, 100.0, "current_zone", None, ("current_lower",)),
+        (100.0, 102.0, "current_zone", None, ("current_upper",)),
+        (105.0, 110.0, "resistance", None, ("near_resistance",)),
+        (115.0, 120.0, "resistance", None, ("far_resistance",)),
+    ]
+
+
+@pytest.mark.parametrize(
+    "structure_status",
+    [
+        PriceStructureStatus.INSUFFICIENT_DATA,
+        PriceStructureStatus.NO_PIVOTS,
+        PriceStructureStatus.VOLATILITY_UNAVAILABLE,
+    ],
+)
+def test_workflow_non_ok_structure_produces_no_price_levels(
+    monkeypatch: pytest.MonkeyPatch,
+    structure_status: PriceStructureStatus,
+) -> None:
+    workflow = DefaultResearchWorkflow(
+        FakeMarketDataService(_prices_frame()),
+        price_structure_service=FakePriceStructureService(
+            _structure_snapshot(structure_status)
+        ),
+    )
+    _install_pipeline(monkeypatch, directional_scores=(0.5, 0.5, 0.5, 0.5))
+
+    result = _run_workflow(workflow, _request())
+
+    assert result.price_levels == ()
+
+
+@pytest.mark.parametrize(
     ("score", "expected_direction", "expected_strength"),
     [
         (-0.9, "bearish", "strong"),
@@ -384,7 +671,12 @@ def test_workflow_status_and_warnings_for_missing_directional_data(
 ) -> None:
     frame = _prices_frame()
     service = FakeMarketDataService(frame)
-    workflow = DefaultResearchWorkflow(service)
+    workflow = DefaultResearchWorkflow(
+        service,
+        price_structure_service=FakePriceStructureService(
+            _structure_snapshot(PriceStructureStatus.OK)
+        ),
+    )
     _install_pipeline(monkeypatch, directional_scores=(0.5, None, 0.5, 0.5))
 
     result = _run_workflow(workflow, _request())
@@ -403,7 +695,12 @@ def test_workflow_marks_composite_unavailable_when_all_directional_scores_missin
 ) -> None:
     frame = _prices_frame()
     service = FakeMarketDataService(frame)
-    workflow = DefaultResearchWorkflow(service)
+    workflow = DefaultResearchWorkflow(
+        service,
+        price_structure_service=FakePriceStructureService(
+            _structure_snapshot(PriceStructureStatus.OK)
+        ),
+    )
     _install_pipeline(monkeypatch, directional_scores=(None, None, None, None))
 
     result = _run_workflow(workflow, _request())
@@ -649,7 +946,11 @@ def test_workflow_serialization_is_json_compatible(
 ) -> None:
     frame = _prices_frame()
     service = FakeMarketDataService(frame)
-    workflow = DefaultResearchWorkflow(service)
+    snapshot = _price_level_structure_snapshot()
+    workflow = DefaultResearchWorkflow(
+        service,
+        price_structure_service=FakePriceStructureService(snapshot),
+    )
     _install_pipeline(monkeypatch, directional_scores=(0.5, 0.5, 0.5, 0.5))
 
     result = _run_workflow(workflow, _request())
@@ -663,6 +964,58 @@ def test_workflow_serialization_is_json_compatible(
     assert payload["analysis"]["components"][0]["parameters"]["scale"] == pytest.approx(
         0.10
     )
+    assert payload["analysis"]["structure"] == {
+        "status": "ok",
+        "as_of": _SNAPSHOT_TIMESTAMP.isoformat(),
+        "current_price": 100.0,
+        "atr": 2.0,
+        "candidate_count": 6,
+        "zone_count": 6,
+    }
+    assert payload["price_levels"] == [
+        {
+            "lower": 90.0,
+            "upper": 95.0,
+            "level_type": "support",
+            "strength": None,
+            "sources": ["near_support"],
+        },
+        {
+            "lower": 80.0,
+            "upper": 85.0,
+            "level_type": "support",
+            "strength": None,
+            "sources": ["far_support"],
+        },
+        {
+            "lower": 98.0,
+            "upper": 100.0,
+            "level_type": "current_zone",
+            "strength": None,
+            "sources": ["current_lower"],
+        },
+        {
+            "lower": 100.0,
+            "upper": 102.0,
+            "level_type": "current_zone",
+            "strength": None,
+            "sources": ["current_upper"],
+        },
+        {
+            "lower": 105.0,
+            "upper": 110.0,
+            "level_type": "resistance",
+            "strength": None,
+            "sources": ["near_resistance"],
+        },
+        {
+            "lower": 115.0,
+            "upper": 120.0,
+            "level_type": "resistance",
+            "strength": None,
+            "sources": ["far_resistance"],
+        },
+    ]
 
 
 def test_public_exports_include_workflow_and_analysis_models() -> None:
