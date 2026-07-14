@@ -70,10 +70,15 @@ def _normalize_price_frame(prices: pd.DataFrame) -> pd.DataFrame:
     normalized["low"] = _normalize_numeric_column(normalized["low"], "low")
     normalized["close"] = _normalize_numeric_column(normalized["close"], "close")
 
+    if (normalized["high"] < normalized["low"]).any():
+        raise ValueError("high must be greater than or equal to low")
+
     return normalized.reset_index(drop=True)
 
 
 def _normalize_numeric_column(series: pd.Series, column_name: str) -> pd.Series:
+    if series.map(lambda value: isinstance(value, bool)).any():
+        raise TypeError(f"{column_name} must be numeric")
     numeric = pd.to_numeric(series, errors="coerce")
     if numeric.isna().any():
         raise ValueError(f"Price frame contains invalid {column_name} values")

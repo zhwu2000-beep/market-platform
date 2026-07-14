@@ -120,10 +120,18 @@ def _normalize_price_frame(prices: pd.DataFrame) -> pd.DataFrame:
     normalized["high"] = _normalize_numeric_column(normalized["high"], "high")
     normalized["low"] = _normalize_numeric_column(normalized["low"], "low")
 
-    return normalized.sort_values("timestamp", kind="stable", ignore_index=True)
+    if (normalized["high"] < normalized["low"]).any():
+        raise ValueError("high must be greater than or equal to low")
+
+    normalized = normalized.sort_values("timestamp", kind="stable", ignore_index=True)
+    if normalized["timestamp"].duplicated().any():
+        raise ValueError("Price frame must not contain duplicate timestamps")
+    return normalized
 
 
 def _normalize_numeric_column(series: pd.Series, column_name: str) -> pd.Series:
+    if series.map(lambda value: isinstance(value, bool)).any():
+        raise TypeError(f"{column_name} must be numeric")
     numeric = pd.to_numeric(series, errors="coerce")
     if numeric.isna().any():
         raise ValueError(f"Price frame contains invalid {column_name} values")

@@ -216,3 +216,92 @@ def test_detect_swing_pivots_use_source_column_values() -> None:
     assert low_candidates[0].price == prices.loc[2, "low"]
     assert high_candidates[0].observed_at == prices.loc[2, "timestamp"]
     assert low_candidates[0].observed_at == prices.loc[2, "timestamp"]
+
+
+@pytest.mark.parametrize("column", ["high", "low"])
+def test_detect_swing_pivots_reject_bool_prices(column: str) -> None:
+    prices = _price_frame(
+        timestamps=_timestamps(5),
+        highs=[10.0, 12.0, 15.0, 11.0, 10.0],
+        lows=[9.0, 8.0, 7.0, 8.0, 9.0],
+    )
+    prices[column] = prices[column].astype(object)
+    prices.loc[0, column] = True
+
+    with pytest.raises(TypeError, match=f"{column} must be numeric"):
+        detect_swing_highs(prices, window=1)
+
+
+@pytest.mark.parametrize(
+    ("column", "value", "message"),
+    [
+        ("high", float("nan"), "invalid high values"),
+        ("high", float("inf"), "non-finite high values"),
+        ("high", float("-inf"), "non-finite high values"),
+        ("low", float("nan"), "invalid low values"),
+        ("low", float("inf"), "non-finite low values"),
+        ("low", float("-inf"), "non-finite low values"),
+    ],
+)
+def test_detect_swing_pivots_reject_non_finite_prices(
+    column: str,
+    value: float,
+    message: str,
+) -> None:
+    prices = _price_frame(
+        timestamps=_timestamps(5),
+        highs=[10.0, 12.0, 15.0, 11.0, 10.0],
+        lows=[9.0, 8.0, 7.0, 8.0, 9.0],
+    )
+    prices.loc[0, column] = value
+
+    with pytest.raises(ValueError, match=message):
+        detect_swing_highs(prices, window=1)
+
+
+def test_detect_swing_pivots_reject_high_below_low() -> None:
+    prices = _price_frame(
+        timestamps=_timestamps(5),
+        highs=[10.0, 12.0, 6.0, 11.0, 10.0],
+        lows=[9.0, 8.0, 7.0, 8.0, 9.0],
+    )
+
+    with pytest.raises(ValueError, match="high must be greater than or equal to low"):
+        detect_swing_highs(prices, window=1)
+
+
+def test_detect_swing_pivots_reject_duplicate_timestamps() -> None:
+    timestamps = _timestamps(5)
+    timestamps[2] = timestamps[1]
+    prices = _price_frame(
+        timestamps=timestamps,
+        highs=[10.0, 12.0, 15.0, 11.0, 10.0],
+        lows=[9.0, 8.0, 7.0, 8.0, 9.0],
+    )
+
+    with pytest.raises(ValueError, match="must not contain duplicate timestamps"):
+        detect_swing_highs(prices, window=1)
+
+
+def test_detect_swing_pivots_reject_invalid_timestamps() -> None:
+    prices = _price_frame(
+        timestamps=_timestamps(5),
+        highs=[10.0, 12.0, 15.0, 11.0, 10.0],
+        lows=[9.0, 8.0, 7.0, 8.0, 9.0],
+    )
+    prices.loc[2, "timestamp"] = pd.NaT
+
+    with pytest.raises(ValueError, match="invalid timestamp values"):
+        detect_swing_highs(prices, window=1)
+
+
+def test_detect_swing_pivots_allow_high_equal_to_low() -> None:
+    prices = _price_frame(
+        timestamps=_timestamps(5),
+        highs=[10.0, 12.0, 15.0, 11.0, 10.0],
+        lows=[9.0, 8.0, 15.0, 8.0, 9.0],
+    )
+
+    candidates = detect_swing_highs(prices, window=1)
+
+    assert [candidate.price for candidate in candidates] == [15.0]
