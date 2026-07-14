@@ -221,6 +221,77 @@ class PriceLevel(ResearchSerializable):
 
 
 @dataclass(frozen=True, slots=True)
+class PriceContext(ResearchSerializable):
+    """Current price location relative to nearby research price levels."""
+
+    current_price: float
+    nearest_support: PriceLevel | None
+    nearest_resistance: PriceLevel | None
+    containing_levels: tuple[PriceLevel, ...]
+    distance_to_support: float | None
+    distance_to_support_pct: float | None
+    distance_to_resistance: float | None
+    distance_to_resistance_pct: float | None
+
+    def __post_init__(self) -> None:
+        current_price = _normalize_non_negative_number(
+            self.current_price,
+            "current_price",
+        )
+        if current_price <= 0.0:
+            raise ValueError("current_price must be greater than 0")
+        object.__setattr__(self, "current_price", current_price)
+
+        _validate_price_context_level(
+            self.nearest_support,
+            "nearest_support",
+            "support",
+        )
+        _validate_price_context_level(
+            self.nearest_resistance,
+            "nearest_resistance",
+            "resistance",
+        )
+        containing_levels = _normalize_model_tuple(
+            self.containing_levels,
+            "containing_levels",
+            PriceLevel,
+        )
+        for level in containing_levels:
+            if level.level_type != "current_zone":
+                raise ValueError(
+                    "containing_levels elements must have level_type current_zone"
+                )
+            if not level.lower <= current_price <= level.upper:
+                raise ValueError("containing_levels must contain current_price")
+        object.__setattr__(self, "containing_levels", containing_levels)
+
+        if (
+            self.nearest_support is not None
+            and self.nearest_support.upper > current_price
+        ):
+            raise ValueError("nearest_support must not be above current_price")
+        if (
+            self.nearest_resistance is not None
+            and self.nearest_resistance.lower < current_price
+        ):
+            raise ValueError("nearest_resistance must not be below current_price")
+
+        _normalize_price_context_distances(
+            self,
+            level_field="nearest_support",
+            distance_field="distance_to_support",
+            percentage_field="distance_to_support_pct",
+        )
+        _normalize_price_context_distances(
+            self,
+            level_field="nearest_resistance",
+            distance_field="distance_to_resistance",
+            percentage_field="distance_to_resistance_pct",
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class PositionContext(ResearchSerializable):
     """Position and capital context for a research workflow."""
 
@@ -528,6 +599,7 @@ class ResearchAnalysis(ResearchSerializable):
     volatility_value: float | None
     composite: ResearchCompositeAssessment
     structure: ResearchStructureAssessment | None = None
+    price_context: PriceContext | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "symbol", _normalize_symbol(self.symbol))
@@ -562,6 +634,11 @@ class ResearchAnalysis(ResearchSerializable):
             raise TypeError(
                 "structure must be a ResearchStructureAssessment or None"
             )
+        if self.price_context is not None and not isinstance(
+            self.price_context,
+            PriceContext,
+        ):
+            raise TypeError("price_context must be a PriceContext or None")
 
 
 @dataclass(frozen=True, slots=True)
@@ -647,6 +724,55 @@ class ResearchResult(ResearchSerializable):
             self.analysis, ResearchAnalysis
         ):
             raise TypeError("analysis must be a ResearchAnalysis or None")
+
+
+def _validate_price_context_level(
+    value: object,
+    field_name: str,
+    expected_level_type: str,
+) -> None:
+    if value is None:
+        return
+    if not isinstance(value, PriceLevel):
+        raise TypeError(f"{field_name} must be a PriceLevel or None")
+    if value.level_type != expected_level_type:
+        raise ValueError(
+            f"{field_name} must have level_type {expected_level_type}"
+        )
+
+
+def _normalize_price_context_distances(
+    context: PriceContext,
+    *,
+    level_field: str,
+    distance_field: str,
+    percentage_field: str,
+) -> None:
+    level = getattr(context, level_field)
+    distance = getattr(context, distance_field)
+    percentage = getattr(context, percentage_field)
+    if level is None:
+        if distance is not None or percentage is not None:
+            raise ValueError(
+                f"{distance_field} and {percentage_field} must be None when "
+                f"{level_field} is None"
+            )
+        return
+    if distance is None or percentage is None:
+        raise ValueError(
+            f"{distance_field} and {percentage_field} must be provided when "
+            f"{level_field} is provided"
+        )
+    object.__setattr__(
+        context,
+        distance_field,
+        _normalize_non_negative_number(distance, distance_field),
+    )
+    object.__setattr__(
+        context,
+        percentage_field,
+        _normalize_non_negative_number(percentage, percentage_field),
+    )
 
 
 def _normalize_weight_mapping(values: object, field_name: str) -> dict[str, float]:

@@ -20,6 +20,7 @@ from market_platform.research.models import (
     MarketView,
     PositionAction,
     PositionContext,
+    PriceContext,
     PriceLevel,
     PriceTarget,
     ProbabilityEstimate,
@@ -33,6 +34,7 @@ from market_platform.research.models import (
     ResearchWarning,
     StrategyCandidate,
 )
+from market_platform.research.price_context import build_price_context
 from market_platform.research.workflow import DefaultResearchWorkflow, ResearchWorkflow
 
 __all__ = [
@@ -46,6 +48,7 @@ __all__ = [
     "MarketView",
     "PositionAction",
     "PositionContext",
+    "PriceContext",
     "PriceLevel",
     "PriceTarget",
     "ProbabilityEstimate",
@@ -63,6 +66,7 @@ __all__ = [
     "StrategyCandidate",
     "VolatilityAssessment",
     "VolatilityState",
+    "build_price_context",
     "calculate_research_composite_signal",
     "interpret_directional_signals",
     "interpret_market_signal",

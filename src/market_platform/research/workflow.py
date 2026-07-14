@@ -25,6 +25,7 @@ from market_platform.research.interpretation import (
 from market_platform.research.models import (
     MarketView,
     PositionContext,
+    PriceContext,
     PriceLevel,
     ResearchAnalysis,
     ResearchCompositeAssessment,
@@ -35,6 +36,7 @@ from market_platform.research.models import (
     ResearchStructureAssessment,
     ResearchWarning,
 )
+from market_platform.research.price_context import build_price_context
 from market_platform.signals import (
     calculate_market_signals,
     classify_composite_signal,
@@ -120,6 +122,13 @@ class DefaultResearchWorkflow:
         structure_snapshot = self._price_structure_service.analyze(prices)
         structure_assessment = _build_structure_assessment(structure_snapshot)
         price_levels = _build_price_levels(structure_snapshot)
+        current_price = structure_snapshot.current_price
+        price_context = (
+            build_price_context(current_price, price_levels)
+            if structure_snapshot.status is PriceStructureStatus.OK
+            and current_price is not None
+            else None
+        )
 
         directional_raw = [
             signal
@@ -184,6 +193,7 @@ class DefaultResearchWorkflow:
             composite=composite,
             classification=classification,
             structure_assessment=structure_assessment,
+            price_context=price_context,
         )
         market_view = _build_market_view(
             analysis=analysis,
@@ -276,6 +286,7 @@ def _build_research_analysis(
     composite: MarketSignal,
     classification: SignalClassification | None,
     structure_assessment: ResearchStructureAssessment,
+    price_context: PriceContext | None,
 ) -> ResearchAnalysis:
     directional_by_name = {signal.name: signal for signal in interpreted_directional}
     components: list[ResearchSignalComponent] = []
@@ -352,6 +363,7 @@ def _build_research_analysis(
         ),
         composite=composite_assessment,
         structure=structure_assessment,
+        price_context=price_context,
     )
 
 

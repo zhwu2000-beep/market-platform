@@ -10,6 +10,7 @@ from market_platform.research import (
     MarketView,
     PositionAction,
     PositionContext,
+    PriceContext,
     PriceLevel,
     PriceTarget,
     ProbabilityEstimate,
@@ -67,6 +68,39 @@ def _price_level() -> PriceLevel:
         strength=0.4,
         sources=("trend",),
     )
+
+
+def _price_context(**overrides: object) -> PriceContext:
+    support = PriceLevel(
+        lower=90.0,
+        upper=95.0,
+        level_type="support",
+        sources=("support",),
+    )
+    resistance = PriceLevel(
+        lower=105.0,
+        upper=110.0,
+        level_type="resistance",
+        sources=("resistance",),
+    )
+    current_zone = PriceLevel(
+        lower=99.0,
+        upper=101.0,
+        level_type="current_zone",
+        sources=("current",),
+    )
+    payload: dict[str, object] = {
+        "current_price": 100.0,
+        "nearest_support": support,
+        "nearest_resistance": resistance,
+        "containing_levels": (current_zone,),
+        "distance_to_support": 5.0,
+        "distance_to_support_pct": 0.05,
+        "distance_to_resistance": 5.0,
+        "distance_to_resistance_pct": 0.05,
+    }
+    payload.update(overrides)
+    return PriceContext(**payload)  # type: ignore[arg-type]
 
 
 def _position_action() -> PositionAction:
@@ -238,6 +272,117 @@ def test_research_analysis_structure_defaults_to_none() -> None:
 
     assert analysis.structure is None
     assert analysis.to_dict()["structure"] is None
+    assert analysis.price_context is None
+    assert analysis.to_dict()["price_context"] is None
+
+
+def test_price_context_normalizes_and_serializes_fields() -> None:
+    context = _price_context()
+    payload = context.to_dict()
+
+    json.dumps(payload)
+    assert context.current_price == 100.0
+    assert payload == {
+        "current_price": 100.0,
+        "nearest_support": {
+            "lower": 90.0,
+            "upper": 95.0,
+            "level_type": "support",
+            "strength": None,
+            "sources": ["support"],
+        },
+        "nearest_resistance": {
+            "lower": 105.0,
+            "upper": 110.0,
+            "level_type": "resistance",
+            "strength": None,
+            "sources": ["resistance"],
+        },
+        "containing_levels": [
+            {
+                "lower": 99.0,
+                "upper": 101.0,
+                "level_type": "current_zone",
+                "strength": None,
+                "sources": ["current"],
+            }
+        ],
+        "distance_to_support": 5.0,
+        "distance_to_support_pct": 0.05,
+        "distance_to_resistance": 5.0,
+        "distance_to_resistance_pct": 0.05,
+    }
+
+
+def test_price_context_is_immutable() -> None:
+    context = _price_context()
+
+    with pytest.raises(FrozenInstanceError):
+        context.current_price = 101.0  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected_exception", "expected_message"),
+    [
+        ({"current_price": 0.0}, ValueError, "greater than 0"),
+        ({"current_price": True}, TypeError, "must be numeric"),
+        ({"nearest_support": "support"}, TypeError, "must be a PriceLevel"),
+        (
+            {
+                "nearest_support": PriceLevel(
+                    lower=105.0,
+                    upper=110.0,
+                    level_type="resistance",
+                )
+            },
+            ValueError,
+            "level_type support",
+        ),
+        (
+            {
+                "nearest_resistance": PriceLevel(
+                    lower=90.0,
+                    upper=95.0,
+                    level_type="support",
+                )
+            },
+            ValueError,
+            "level_type resistance",
+        ),
+        (
+            {
+                "containing_levels": (
+                    PriceLevel(
+                        lower=90.0,
+                        upper=95.0,
+                        level_type="support",
+                    ),
+                )
+            },
+            ValueError,
+            "level_type current_zone",
+        ),
+        ({"distance_to_support": None}, ValueError, "must be provided"),
+        (
+            {
+                "nearest_support": None,
+                "distance_to_support": 1.0,
+                "distance_to_support_pct": 0.01,
+            },
+            ValueError,
+            "must be None",
+        ),
+        ({"distance_to_resistance": -1.0}, ValueError, "must not be negative"),
+        ({"distance_to_resistance_pct": True}, TypeError, "must be numeric"),
+    ],
+)
+def test_price_context_rejects_invalid_fields(
+    overrides: dict[str, object],
+    expected_exception: type[Exception],
+    expected_message: str,
+) -> None:
+    with pytest.raises(expected_exception, match=expected_message):
+        _price_context(**overrides)
 
 
 def test_research_structure_assessment_normalizes_fields() -> None:

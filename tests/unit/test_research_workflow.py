@@ -15,6 +15,7 @@ from market_platform.research import (
     InterpretedSignal,
     InterpretedSignalState,
     PositionContext,
+    PriceContext,
     ResearchAnalysis,
     ResearchCompositeAssessment,
     ResearchRequest,
@@ -525,6 +526,15 @@ def test_workflow_maps_injected_price_structure_without_affecting_signals(
         candidate_count=len(snapshot.candidates),
         zone_count=len(snapshot.observed_zones),
     )
+    if structure_status is PriceStructureStatus.OK:
+        assert isinstance(result.analysis.price_context, PriceContext)
+        assert result.analysis.price_context.current_price == 101.0
+        assert result.analysis.price_context.distance_to_support == pytest.approx(1.0)
+        assert result.analysis.price_context.distance_to_support_pct == pytest.approx(
+            1.0 / 101.0
+        )
+    else:
+        assert result.analysis.price_context is None
     assert result.analysis.composite.score == pytest.approx(0.5)
     assert result.market_view is not None
     assert result.market_view.direction == "bullish"
@@ -565,6 +575,18 @@ def test_workflow_maps_price_structure_zones_to_ordered_price_levels(
         (105.0, 110.0, "resistance", None, ("near_resistance",)),
         (115.0, 120.0, "resistance", None, ("far_resistance",)),
     ]
+    assert isinstance(result.analysis, ResearchAnalysis)
+    assert isinstance(result.analysis.price_context, PriceContext)
+    assert result.analysis.price_context.current_price == 100.0
+    assert result.analysis.price_context.nearest_support is result.price_levels[0]
+    assert result.analysis.price_context.nearest_resistance is result.price_levels[4]
+    assert result.analysis.price_context.containing_levels == result.price_levels[2:4]
+    assert result.analysis.price_context.distance_to_support == pytest.approx(5.0)
+    assert result.analysis.price_context.distance_to_support_pct == pytest.approx(0.05)
+    assert result.analysis.price_context.distance_to_resistance == pytest.approx(5.0)
+    assert result.analysis.price_context.distance_to_resistance_pct == pytest.approx(
+        0.05
+    )
 
 
 @pytest.mark.parametrize(
@@ -590,6 +612,8 @@ def test_workflow_non_ok_structure_produces_no_price_levels(
     result = _run_workflow(workflow, _request())
 
     assert result.price_levels == ()
+    assert isinstance(result.analysis, ResearchAnalysis)
+    assert result.analysis.price_context is None
 
 
 @pytest.mark.parametrize(
@@ -972,6 +996,11 @@ def test_workflow_serialization_is_json_compatible(
         "candidate_count": 6,
         "zone_count": 6,
     }
+    assert payload["analysis"]["price_context"]["current_price"] == 100.0
+    assert payload["analysis"]["price_context"]["distance_to_support"] == 5.0
+    assert payload["analysis"]["price_context"]["distance_to_support_pct"] == 0.05
+    assert payload["analysis"]["price_context"]["distance_to_resistance"] == 5.0
+    assert payload["analysis"]["price_context"]["distance_to_resistance_pct"] == 0.05
     assert payload["price_levels"] == [
         {
             "lower": 90.0,
