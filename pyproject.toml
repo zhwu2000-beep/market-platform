@@ -23,7 +23,7 @@ charts = [
 [dependency-groups]
 dev = [
     "ipykernel>=6.29.0",
-    "mypy>=1.14.0",
+    "mypy==1.18.2",
     "pandas-stubs>=2.2.0",
     "pre-commit>=4.0.0",
     "pytest>=8.3.0",

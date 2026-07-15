@@ -33,8 +33,11 @@ from market_platform.research.models import (
     ResearchStructureAssessment,
     ResearchWarning,
     StrategyCandidate,
+    StructuralTargetDirection,
+    StructuralTargetLevel,
 )
 from market_platform.research.price_context import build_price_context
+from market_platform.research.target_framework import build_structural_target_levels
 from market_platform.research.workflow import DefaultResearchWorkflow, ResearchWorkflow
 
 __all__ = [
@@ -63,10 +66,13 @@ __all__ = [
     "ResearchWorkflow",
     "SignalInterpretationRule",
     "SignalRole",
+    "StructuralTargetDirection",
+    "StructuralTargetLevel",
     "StrategyCandidate",
     "VolatilityAssessment",
     "VolatilityState",
     "build_price_context",
+    "build_structural_target_levels",
     "calculate_research_composite_signal",
     "interpret_directional_signals",
     "interpret_market_signal",

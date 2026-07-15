@@ -35,8 +35,10 @@ from market_platform.research.models import (
     ResearchStatus,
     ResearchStructureAssessment,
     ResearchWarning,
+    StructuralTargetLevel,
 )
 from market_platform.research.price_context import build_price_context
+from market_platform.research.target_framework import build_structural_target_levels
 from market_platform.signals import (
     calculate_market_signals,
     classify_composite_signal,
@@ -129,6 +131,7 @@ class DefaultResearchWorkflow:
             and current_price is not None
             else None
         )
+        structural_target_levels = build_structural_target_levels(price_context)
 
         directional_raw = [
             signal
@@ -194,6 +197,7 @@ class DefaultResearchWorkflow:
             classification=classification,
             structure_assessment=structure_assessment,
             price_context=price_context,
+            structural_target_levels=structural_target_levels,
         )
         market_view = _build_market_view(
             analysis=analysis,
@@ -287,6 +291,7 @@ def _build_research_analysis(
     classification: SignalClassification | None,
     structure_assessment: ResearchStructureAssessment,
     price_context: PriceContext | None,
+    structural_target_levels: tuple[StructuralTargetLevel, ...],
 ) -> ResearchAnalysis:
     directional_by_name = {signal.name: signal for signal in interpreted_directional}
     components: list[ResearchSignalComponent] = []
@@ -364,6 +369,7 @@ def _build_research_analysis(
         composite=composite_assessment,
         structure=structure_assessment,
         price_context=price_context,
+        structural_target_levels=structural_target_levels,
     )
 
 

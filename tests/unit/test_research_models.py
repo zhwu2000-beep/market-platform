@@ -24,6 +24,8 @@ from market_platform.research import (
     ResearchWarning,
     ResearchWorkflow,
     StrategyCandidate,
+    StructuralTargetDirection,
+    StructuralTargetLevel,
 )
 
 _FIXED_AS_OF = datetime(2026, 1, 5, 12, 0, tzinfo=UTC)
@@ -101,6 +103,18 @@ def _price_context(**overrides: object) -> PriceContext:
     }
     payload.update(overrides)
     return PriceContext(**payload)  # type: ignore[arg-type]
+
+
+def _structural_target_level(**overrides: object) -> StructuralTargetLevel:
+    payload: dict[str, object] = {
+        "price": 95.0,
+        "direction": StructuralTargetDirection.DOWNSIDE,
+        "distance": 5.0,
+        "distance_pct": 0.05,
+        "sources": ("swing_pivot",),
+    }
+    payload.update(overrides)
+    return StructuralTargetLevel(**payload)  # type: ignore[arg-type]
 
 
 def _position_action() -> PositionAction:
@@ -274,6 +288,8 @@ def test_research_analysis_structure_defaults_to_none() -> None:
     assert analysis.to_dict()["structure"] is None
     assert analysis.price_context is None
     assert analysis.to_dict()["price_context"] is None
+    assert analysis.structural_target_levels == ()
+    assert analysis.to_dict()["structural_target_levels"] == []
 
 
 def test_price_context_normalizes_and_serializes_fields() -> None:
@@ -383,6 +399,104 @@ def test_price_context_rejects_invalid_fields(
 ) -> None:
     with pytest.raises(expected_exception, match=expected_message):
         _price_context(**overrides)
+
+
+def test_structural_target_level_normalizes_and_serializes_fields() -> None:
+    target = _structural_target_level(
+        price=95,
+        distance=5,
+        distance_pct=0.05,
+        sources=[" swing_pivot ", "cluster"],
+    )
+    payload = target.to_dict()
+
+    json.dumps(payload)
+    assert target.price == 95.0
+    assert target.distance == 5.0
+    assert target.distance_pct == 0.05
+    assert target.sources == ("swing_pivot", "cluster")
+    assert payload == {
+        "price": 95.0,
+        "direction": "downside",
+        "distance": 5.0,
+        "distance_pct": 0.05,
+        "sources": ["swing_pivot", "cluster"],
+    }
+
+
+def test_structural_target_level_is_immutable() -> None:
+    target = _structural_target_level()
+
+    with pytest.raises(FrozenInstanceError):
+        target.price = 96.0  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected_exception", "expected_message"),
+    [
+        ({"price": 0.0}, ValueError, "greater than 0"),
+        ({"price": -1.0}, ValueError, "must not be negative"),
+        ({"price": True}, TypeError, "must be numeric"),
+        ({"price": float("nan")}, ValueError, "must be finite"),
+        ({"price": float("inf")}, ValueError, "must be finite"),
+        ({"distance": -1.0}, ValueError, "must not be negative"),
+        ({"distance": float("nan")}, ValueError, "must be finite"),
+        ({"distance_pct": -0.1}, ValueError, "must not be negative"),
+        ({"distance_pct": float("inf")}, ValueError, "must be finite"),
+        (
+            {"direction": "downside"},
+            TypeError,
+            "must be a StructuralTargetDirection",
+        ),
+        ({"sources": "swing_pivot"}, TypeError, "must be a tuple or list"),
+        ({"sources": (" ",)}, ValueError, "must not be empty"),
+    ],
+)
+def test_structural_target_level_rejects_invalid_fields(
+    overrides: dict[str, object],
+    expected_exception: type[Exception],
+    expected_message: str,
+) -> None:
+    with pytest.raises(expected_exception, match=expected_message):
+        _structural_target_level(**overrides)
+
+
+def test_research_analysis_normalizes_structural_target_levels() -> None:
+    target = _structural_target_level()
+    analysis = _analysis(volatility_state="normal", volatility_value=0.2)
+    analysis = ResearchAnalysis(
+        symbol=analysis.symbol,
+        timestamp=analysis.timestamp,
+        components=analysis.components,
+        volatility_state=analysis.volatility_state,
+        volatility_value=analysis.volatility_value,
+        composite=analysis.composite,
+        structural_target_levels=[target],
+    )
+
+    assert analysis.structural_target_levels == (target,)
+    assert analysis.to_dict()["structural_target_levels"] == [target.to_dict()]
+
+
+@pytest.mark.parametrize(
+    "structural_target_levels",
+    ["target", ("target",)],
+)
+def test_research_analysis_rejects_invalid_structural_target_levels(
+    structural_target_levels: object,
+) -> None:
+    analysis = _analysis(volatility_state="normal", volatility_value=0.2)
+
+    with pytest.raises(TypeError, match="structural_target_levels"):
+        ResearchAnalysis(
+            symbol=analysis.symbol,
+            timestamp=analysis.timestamp,
+            components=analysis.components,
+            volatility_state=analysis.volatility_state,
+            volatility_value=analysis.volatility_value,
+            composite=analysis.composite,
+            structural_target_levels=structural_target_levels,  # type: ignore[arg-type]
+        )
 
 
 def test_research_structure_assessment_normalizes_fields() -> None:

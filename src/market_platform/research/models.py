@@ -28,6 +28,13 @@ class ResearchStatus(StrEnum):
     FAILED = "failed"
 
 
+class StructuralTargetDirection(StrEnum):
+    """Direction of a structural target relative to the current price."""
+
+    DOWNSIDE = "downside"
+    UPSIDE = "upside"
+
+
 @dataclass(frozen=True, slots=True)
 class ResearchWarning(ResearchSerializable):
     """Structured warning attached to a research result."""
@@ -288,6 +295,40 @@ class PriceContext(ResearchSerializable):
             level_field="nearest_resistance",
             distance_field="distance_to_resistance",
             percentage_field="distance_to_resistance_pct",
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class StructuralTargetLevel(ResearchSerializable):
+    """Observed structural price level relative to the current price."""
+
+    price: float
+    direction: StructuralTargetDirection
+    distance: float
+    distance_pct: float
+    sources: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        price = _normalize_non_negative_number(self.price, "price")
+        if price <= 0.0:
+            raise ValueError("price must be greater than 0")
+        object.__setattr__(self, "price", price)
+        if not isinstance(self.direction, StructuralTargetDirection):
+            raise TypeError("direction must be a StructuralTargetDirection")
+        object.__setattr__(
+            self,
+            "distance",
+            _normalize_non_negative_number(self.distance, "distance"),
+        )
+        object.__setattr__(
+            self,
+            "distance_pct",
+            _normalize_non_negative_number(self.distance_pct, "distance_pct"),
+        )
+        object.__setattr__(
+            self,
+            "sources",
+            _normalize_string_tuple(self.sources, "sources"),
         )
 
 
@@ -600,6 +641,7 @@ class ResearchAnalysis(ResearchSerializable):
     composite: ResearchCompositeAssessment
     structure: ResearchStructureAssessment | None = None
     price_context: PriceContext | None = None
+    structural_target_levels: tuple[StructuralTargetLevel, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "symbol", _normalize_symbol(self.symbol))
@@ -639,6 +681,15 @@ class ResearchAnalysis(ResearchSerializable):
             PriceContext,
         ):
             raise TypeError("price_context must be a PriceContext or None")
+        object.__setattr__(
+            self,
+            "structural_target_levels",
+            _normalize_model_tuple(
+                self.structural_target_levels,
+                "structural_target_levels",
+                StructuralTargetLevel,
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)

@@ -25,6 +25,8 @@ from market_platform.research import (
     ResearchStructureAssessment,
     ResearchWorkflow,
     SignalRole,
+    StructuralTargetDirection,
+    StructuralTargetLevel,
     VolatilityAssessment,
     VolatilityState,
 )
@@ -533,13 +535,25 @@ def test_workflow_maps_injected_price_structure_without_affecting_signals(
         assert result.analysis.price_context.distance_to_support_pct == pytest.approx(
             1.0 / 101.0
         )
+        assert result.analysis.structural_target_levels == (
+            StructuralTargetLevel(
+                price=100.0,
+                direction=StructuralTargetDirection.DOWNSIDE,
+                distance=1.0,
+                distance_pct=1.0 / 101.0,
+                sources=("swing_pivot",),
+            ),
+        )
     else:
         assert result.analysis.price_context is None
+        assert result.analysis.structural_target_levels == ()
     assert result.analysis.composite.score == pytest.approx(0.5)
+    assert result.analysis.composite.classification == "bullish"
     assert result.market_view is not None
     assert result.market_view.direction == "bullish"
     assert result.market_view.strength == "moderate"
     assert result.market_view.price_structure is None
+    assert result.price_targets == ()
     assert result.status is expected_status
     assert [warning.code for warning in result.warnings] == (
         [] if expected_warning_code is None else [expected_warning_code]
@@ -587,6 +601,23 @@ def test_workflow_maps_price_structure_zones_to_ordered_price_levels(
     assert result.analysis.price_context.distance_to_resistance_pct == pytest.approx(
         0.05
     )
+    assert result.analysis.structural_target_levels == (
+        StructuralTargetLevel(
+            price=95.0,
+            direction=StructuralTargetDirection.DOWNSIDE,
+            distance=5.0,
+            distance_pct=0.05,
+            sources=("near_support",),
+        ),
+        StructuralTargetLevel(
+            price=105.0,
+            direction=StructuralTargetDirection.UPSIDE,
+            distance=5.0,
+            distance_pct=0.05,
+            sources=("near_resistance",),
+        ),
+    )
+    assert result.price_targets == ()
 
 
 @pytest.mark.parametrize(
@@ -614,6 +645,8 @@ def test_workflow_non_ok_structure_produces_no_price_levels(
     assert result.price_levels == ()
     assert isinstance(result.analysis, ResearchAnalysis)
     assert result.analysis.price_context is None
+    assert result.analysis.structural_target_levels == ()
+    assert result.price_targets == ()
 
 
 @pytest.mark.parametrize(
@@ -1001,6 +1034,23 @@ def test_workflow_serialization_is_json_compatible(
     assert payload["analysis"]["price_context"]["distance_to_support_pct"] == 0.05
     assert payload["analysis"]["price_context"]["distance_to_resistance"] == 5.0
     assert payload["analysis"]["price_context"]["distance_to_resistance_pct"] == 0.05
+    assert payload["analysis"]["structural_target_levels"] == [
+        {
+            "price": 95.0,
+            "direction": "downside",
+            "distance": 5.0,
+            "distance_pct": 0.05,
+            "sources": ["near_support"],
+        },
+        {
+            "price": 105.0,
+            "direction": "upside",
+            "distance": 5.0,
+            "distance_pct": 0.05,
+            "sources": ["near_resistance"],
+        },
+    ]
+    assert payload["price_targets"] == []
     assert payload["price_levels"] == [
         {
             "lower": 90.0,
