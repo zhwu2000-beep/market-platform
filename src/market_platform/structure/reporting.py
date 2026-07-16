@@ -22,9 +22,10 @@ def snapshot_to_dict(snapshot: PriceStructureSnapshot) -> dict[str, object]:
 
     def candidate_key(
         candidate: PriceLevelCandidate,
-    ) -> tuple[str, str, float, str]:
+    ) -> tuple[str, str, str, float, str]:
         return (
-            candidate.observed_at.isoformat(),
+            candidate.occurred_at.isoformat(),
+            candidate.confirmed_at.isoformat(),
             candidate.kind.value,
             candidate.price,
             candidate.source_method,
@@ -34,18 +35,27 @@ def snapshot_to_dict(snapshot: PriceStructureSnapshot) -> dict[str, object]:
         return {
             "price": candidate.price,
             "kind": candidate.kind.value,
+            "occurred_at": candidate.occurred_at.isoformat(),
+            "confirmed_at": candidate.confirmed_at.isoformat(),
             "observed_at": candidate.observed_at.isoformat(),
             "source_method": candidate.source_method,
         }
 
     def observed_zone_key(
         observed: ObservedPriceZone,
-    ) -> tuple[float, float, float, tuple[tuple[str, str, float, str], ...]]:
+    ) -> tuple[
+        float,
+        float,
+        float,
+        str,
+        tuple[tuple[str, str, str, float, str], ...],
+    ]:
         zone = observed.zone
         return (
             zone.midpoint,
             zone.lower_bound,
             zone.upper_bound,
+            zone.available_at.isoformat(),
             tuple(sorted(candidate_key(item) for item in zone.candidates)),
         )
 
@@ -64,6 +74,7 @@ def snapshot_to_dict(snapshot: PriceStructureSnapshot) -> dict[str, object]:
                     "lower_bound": observed.zone.lower_bound,
                     "upper_bound": observed.zone.upper_bound,
                     "midpoint": observed.zone.midpoint,
+                    "available_at": observed.zone.available_at.isoformat(),
                     "candidates": [
                         candidate_data(candidate)
                         for candidate in sorted(

@@ -48,6 +48,8 @@ def test_detect_swing_highs_finds_single_strict_pivot() -> None:
     assert len(candidates) == 1
     assert candidates[0].kind is PriceLevelKind.SWING_HIGH
     assert candidates[0].price == 15.0
+    assert candidates[0].occurred_at == datetime(2026, 1, 3, tzinfo=UTC)
+    assert candidates[0].confirmed_at == datetime(2026, 1, 4, tzinfo=UTC)
     assert candidates[0].observed_at == datetime(2026, 1, 3, tzinfo=UTC)
     assert candidates[0].source_method == "swing_pivot"
 
@@ -64,6 +66,8 @@ def test_detect_swing_lows_finds_single_strict_pivot() -> None:
     assert len(candidates) == 1
     assert candidates[0].kind is PriceLevelKind.SWING_LOW
     assert candidates[0].price == 6.0
+    assert candidates[0].occurred_at == datetime(2026, 1, 3, tzinfo=UTC)
+    assert candidates[0].confirmed_at == datetime(2026, 1, 4, tzinfo=UTC)
     assert candidates[0].observed_at == datetime(2026, 1, 3, tzinfo=UTC)
     assert candidates[0].source_method == "swing_pivot"
 

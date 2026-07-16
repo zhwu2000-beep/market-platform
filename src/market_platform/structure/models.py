@@ -41,60 +41,125 @@ class PriceStructureConfig:
             raise ValueError("zone_atr_multiplier must be greater than 0")
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class PriceLevelCandidate:
-    """Detected swing high or swing low candidate."""
+    """Detected pivot with separate occurrence and confirmation times.
+
+    observed_at remains available as a compatibility alias for occurred_at.
+    Candidates constructed through the legacy alias default confirmed_at to
+    the occurrence time.
+    """
 
     price: float
     kind: PriceLevelKind
-    observed_at: datetime
-    source_method: str = "swing_pivot"
+    occurred_at: datetime
+    confirmed_at: datetime
+    source_method: str
 
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "price", _normalize_price(self.price))
-        if not isinstance(self.kind, PriceLevelKind):
+    def __init__(
+        self,
+        price: float,
+        kind: PriceLevelKind,
+        occurred_at: datetime | None = None,
+        source_method: str = "swing_pivot",
+        *,
+        confirmed_at: datetime | None = None,
+        observed_at: datetime | None = None,
+    ) -> None:
+        if occurred_at is not None and observed_at is not None:
+            raise ValueError("occurred_at and observed_at must not both be provided")
+        resolved_occurred_at = occurred_at if occurred_at is not None else observed_at
+        if resolved_occurred_at is None:
+            raise TypeError("occurred_at must be provided")
+
+        normalized_occurred_at = _normalize_timestamp(
+            resolved_occurred_at,
+            "occurred_at",
+        )
+        normalized_confirmed_at = (
+            normalized_occurred_at
+            if confirmed_at is None
+            else _normalize_timestamp(confirmed_at, "confirmed_at")
+        )
+        if normalized_confirmed_at < normalized_occurred_at:
+            raise ValueError(
+                "confirmed_at must be later than or equal to occurred_at"
+            )
+
+        object.__setattr__(self, "price", _normalize_price(price))
+        if not isinstance(kind, PriceLevelKind):
             raise TypeError("kind must be a PriceLevelKind")
-        object.__setattr__(self, "observed_at", _normalize_timestamp(self.observed_at))
+        object.__setattr__(self, "kind", kind)
+        object.__setattr__(self, "occurred_at", normalized_occurred_at)
+        object.__setattr__(self, "confirmed_at", normalized_confirmed_at)
         object.__setattr__(
             self,
             "source_method",
-            _normalize_required_text(self.source_method, "source_method"),
+            _normalize_required_text(source_method, "source_method"),
         )
 
+    @property
+    def observed_at(self) -> datetime:
+        """Return the pivot occurrence time for backward compatibility."""
 
-@dataclass(frozen=True, slots=True)
+        return self.occurred_at
+
+
+@dataclass(frozen=True, slots=True, init=False)
 class PriceZone:
-    """Cluster of nearby price level candidates."""
+    """Cluster of nearby price candidates with a first availability time."""
 
     lower_bound: float
     upper_bound: float
     midpoint: float
     candidates: tuple[PriceLevelCandidate, ...]
     source_methods: tuple[str, ...]
+    available_at: datetime
 
-    def __post_init__(self) -> None:
-        lower_bound = _normalize_price(self.lower_bound)
-        upper_bound = _normalize_price(self.upper_bound)
-        midpoint = _normalize_price(self.midpoint)
+    def __init__(
+        self,
+        lower_bound: float,
+        upper_bound: float,
+        midpoint: float,
+        candidates: tuple[PriceLevelCandidate, ...],
+        source_methods: tuple[str, ...],
+        available_at: datetime | None = None,
+    ) -> None:
+        lower_bound = _normalize_price(lower_bound)
+        upper_bound = _normalize_price(upper_bound)
+        midpoint = _normalize_price(midpoint)
         if lower_bound > upper_bound:
             raise ValueError("lower_bound must be less than or equal to upper_bound")
         if not lower_bound <= midpoint <= upper_bound:
             raise ValueError("midpoint must be within [lower_bound, upper_bound]")
-        candidates = _normalize_candidate_tuple(self.candidates, "candidates")
-        if not candidates:
+        normalized_candidates = _normalize_candidate_tuple(candidates, "candidates")
+        if not normalized_candidates:
             raise ValueError("candidates must not be empty")
-        for candidate in candidates:
+        for candidate in normalized_candidates:
             if candidate.price < lower_bound or candidate.price > upper_bound:
                 raise ValueError("candidates must stay within the zone bounds")
+        earliest_available_at = max(
+            candidate.confirmed_at for candidate in normalized_candidates
+        )
+        normalized_available_at = (
+            earliest_available_at
+            if available_at is None
+            else _normalize_timestamp(available_at, "available_at")
+        )
+        if normalized_available_at < earliest_available_at:
+            raise ValueError(
+                "available_at must not be earlier than candidate confirmations"
+            )
         object.__setattr__(self, "lower_bound", lower_bound)
         object.__setattr__(self, "upper_bound", upper_bound)
         object.__setattr__(self, "midpoint", midpoint)
-        object.__setattr__(self, "candidates", candidates)
+        object.__setattr__(self, "candidates", normalized_candidates)
         object.__setattr__(
             self,
             "source_methods",
-            _normalize_source_methods_tuple(self.source_methods),
+            _normalize_source_methods_tuple(source_methods),
         )
+        object.__setattr__(self, "available_at", normalized_available_at)
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,6 +262,11 @@ class PriceStructureSnapshot:
             if not observed_zones:
                 raise ValueError("observed_zones must not be empty when status is OK")
             _validate_candidate_partition(candidates, observed_zones)
+            _validate_point_in_time_visibility(
+                as_of=as_of,
+                candidates=candidates,
+                observed_zones=observed_zones,
+            )
         elif self.status is PriceStructureStatus.INSUFFICIENT_DATA:
             if atr is not None:
                 raise ValueError("atr must be None when status is INSUFFICIENT_DATA")
@@ -246,6 +316,11 @@ class PriceStructureSnapshot:
                 raise ValueError(
                     "atr must be None or 0 when status is VOLATILITY_UNAVAILABLE"
                 )
+            _validate_point_in_time_visibility(
+                as_of=as_of,
+                candidates=candidates,
+                observed_zones=(),
+            )
 
         object.__setattr__(self, "as_of", as_of)
         object.__setattr__(self, "current_price", current_price)
@@ -360,11 +435,11 @@ def _require_positive_number(value: object, field_name: str) -> float:
     return numeric_value
 
 
-def _normalize_timestamp(value: object) -> datetime:
+def _normalize_timestamp(value: object, field_name: str) -> datetime:
     if not isinstance(value, datetime):
-        raise TypeError("observed_at must be a datetime")
+        raise TypeError(f"{field_name} must be a datetime")
     if value.tzinfo is None:
-        raise ValueError("observed_at must be timezone-aware")
+        raise ValueError(f"{field_name} must be timezone-aware")
     return value.astimezone(UTC)
 
 
@@ -497,9 +572,10 @@ def _normalize_observed_zone_tuple(
 
 def _candidate_sort_key(
     candidate: PriceLevelCandidate,
-) -> tuple[str, str, float, str]:
+) -> tuple[str, str, str, float, str]:
     return (
-        candidate.observed_at.isoformat(),
+        candidate.occurred_at.isoformat(),
+        candidate.confirmed_at.isoformat(),
         candidate.kind.value,
         candidate.price,
         candidate.source_method,
@@ -508,12 +584,19 @@ def _candidate_sort_key(
 
 def _observed_zone_sort_key(
     observed: ObservedPriceZone,
-) -> tuple[float, float, float, tuple[tuple[str, str, float, str], ...]]:
+) -> tuple[
+    float,
+    float,
+    float,
+    str,
+    tuple[tuple[str, str, str, float, str], ...],
+]:
     zone = observed.zone
     return (
         zone.midpoint,
         zone.lower_bound,
         zone.upper_bound,
+        zone.available_at.isoformat(),
         tuple(_candidate_sort_key(candidate) for candidate in zone.candidates),
     )
 
@@ -540,3 +623,15 @@ def _validate_candidate_partition(
         raise ValueError(
             "observed_zones candidates must match snapshot candidates exactly"
         )
+
+
+def _validate_point_in_time_visibility(
+    *,
+    as_of: datetime,
+    candidates: tuple[PriceLevelCandidate, ...],
+    observed_zones: tuple[ObservedPriceZone, ...],
+) -> None:
+    if any(candidate.confirmed_at > as_of for candidate in candidates):
+        raise ValueError("candidates must be confirmed no later than as_of")
+    if any(observed.zone.available_at > as_of for observed in observed_zones):
+        raise ValueError("observed_zones must be available no later than as_of")

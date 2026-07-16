@@ -19,7 +19,11 @@ from market_platform.structure.models import (
     PriceZone,
     PriceZoneObservation,
 )
-from market_platform.structure.pivots import detect_swing_highs, detect_swing_lows
+from market_platform.structure.pivots import (
+    detect_swing_highs,
+    detect_swing_lows,
+    filter_confirmed_pivots,
+)
 from market_platform.structure.touches import observe_price_zone
 from market_platform.structure.volatility import calculate_atr
 
@@ -55,20 +59,28 @@ class PriceStructureService:
         *,
         config: PriceStructureConfig | None = None,
         current_price: float | None = None,
+        as_of: datetime | None = None,
     ) -> PriceStructureSnapshot:
-        """Return an immutable snapshot of observed price structure facts."""
+        """Return structure facts using no price data later than the cutoff."""
 
         normalized = _normalize_price_frame(prices)
         normalized_config = _normalize_config(config)
         explicit_current_price = _normalize_current_price(current_price)
+        requested_as_of = _normalize_analysis_as_of(as_of)
+        if requested_as_of is not None:
+            normalized = _filter_price_frame_as_of(normalized, requested_as_of)
 
         if normalized.empty:
             return PriceStructureSnapshot(
                 status=PriceStructureStatus.INSUFFICIENT_DATA,
+                as_of=requested_as_of,
                 current_price=explicit_current_price,
             )
 
-        as_of = _to_datetime(normalized.iloc[-1]["timestamp"])
+        snapshot_as_of = _to_datetime(normalized.iloc[-1]["timestamp"])
+        confirmation_cutoff = (
+            requested_as_of if requested_as_of is not None else snapshot_as_of
+        )
         resolved_current_price = (
             explicit_current_price
             if explicit_current_price is not None
@@ -82,26 +94,29 @@ class PriceStructureService:
         if len(normalized) < minimum_bars:
             return PriceStructureSnapshot(
                 status=PriceStructureStatus.INSUFFICIENT_DATA,
-                as_of=as_of,
+                as_of=snapshot_as_of,
                 current_price=resolved_current_price,
             )
 
-        candidates = _sort_candidates(
-            (
-                *self._swing_high_detector(
-                    normalized,
-                    window=normalized_config.pivot_window,
-                ),
-                *self._swing_low_detector(
-                    normalized,
-                    window=normalized_config.pivot_window,
-                ),
-            )
+        candidates = filter_confirmed_pivots(
+            _sort_candidates(
+                (
+                    *self._swing_high_detector(
+                        normalized,
+                        window=normalized_config.pivot_window,
+                    ),
+                    *self._swing_low_detector(
+                        normalized,
+                        window=normalized_config.pivot_window,
+                    ),
+                )
+            ),
+            confirmation_cutoff,
         )
         if not candidates:
             return PriceStructureSnapshot(
                 status=PriceStructureStatus.NO_PIVOTS,
-                as_of=as_of,
+                as_of=snapshot_as_of,
                 current_price=resolved_current_price,
             )
 
@@ -113,7 +128,7 @@ class PriceStructureService:
         if atr is None:
             return PriceStructureSnapshot(
                 status=PriceStructureStatus.VOLATILITY_UNAVAILABLE,
-                as_of=as_of,
+                as_of=snapshot_as_of,
                 current_price=resolved_current_price,
                 atr=_snapshot_atr(raw_atr),
                 candidates=candidates,
@@ -134,7 +149,7 @@ class PriceStructureService:
 
         return PriceStructureSnapshot(
             status=PriceStructureStatus.OK,
-            as_of=as_of,
+            as_of=snapshot_as_of,
             current_price=resolved_current_price,
             atr=atr,
             candidates=candidates,
@@ -199,6 +214,23 @@ def _normalize_current_price(value: object) -> float | None:
     return _require_current_price(value)
 
 
+def _normalize_analysis_as_of(value: object) -> datetime | None:
+    if value is None:
+        return None
+    if not isinstance(value, datetime):
+        raise TypeError("as_of must be a datetime or None")
+    if value.tzinfo is None:
+        raise ValueError("as_of must be timezone-aware")
+    return value.astimezone(UTC)
+
+
+def _filter_price_frame_as_of(
+    prices: pd.DataFrame,
+    as_of: datetime,
+) -> pd.DataFrame:
+    return prices.loc[prices["timestamp"] <= pd.Timestamp(as_of)].reset_index(drop=True)
+
+
 def _require_current_price(value: object) -> float:
     if isinstance(value, bool) or not isinstance(value, Real):
         raise TypeError("current_price must be numeric")
@@ -217,7 +249,8 @@ def _sort_candidates(
         sorted(
             candidates,
             key=lambda candidate: (
-                candidate.observed_at.isoformat(),
+                candidate.occurred_at.isoformat(),
+                candidate.confirmed_at.isoformat(),
                 candidate.kind.value,
                 candidate.price,
                 candidate.source_method,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from datetime import UTC, datetime
 
 import pandas as pd
@@ -52,6 +53,26 @@ def detect_swing_lows(
     )
 
 
+def filter_confirmed_pivots(
+    pivots: Sequence[PriceLevelCandidate],
+    as_of: datetime,
+) -> tuple[PriceLevelCandidate, ...]:
+    """Return pivots that were confirmed no later than the requested time."""
+
+    if isinstance(pivots, (str, bytes, bytearray, dict)):
+        raise TypeError("pivots must be a sequence of PriceLevelCandidate")
+    if not isinstance(pivots, Sequence):
+        raise TypeError("pivots must be a sequence of PriceLevelCandidate")
+    normalized_as_of = _normalize_as_of(as_of)
+    confirmed: list[PriceLevelCandidate] = []
+    for pivot in pivots:
+        if not isinstance(pivot, PriceLevelCandidate):
+            raise TypeError("pivots must contain PriceLevelCandidate instances")
+        if pivot.confirmed_at <= normalized_as_of:
+            confirmed.append(pivot)
+    return tuple(confirmed)
+
+
 def _detect_swing_candidates(
     frame: pd.DataFrame,
     *,
@@ -75,7 +96,8 @@ def _detect_swing_candidates(
                     PriceLevelCandidate(
                         price=current,
                         kind=kind,
-                        observed_at=_to_datetime(timestamps[index]),
+                        occurred_at=_to_datetime(timestamps[index]),
+                        confirmed_at=_to_datetime(timestamps[index + window]),
                         source_method=_SOURCE_METHOD,
                     )
                 )
@@ -87,7 +109,8 @@ def _detect_swing_candidates(
                     PriceLevelCandidate(
                         price=current,
                         kind=kind,
-                        observed_at=_to_datetime(timestamps[index]),
+                        occurred_at=_to_datetime(timestamps[index]),
+                        confirmed_at=_to_datetime(timestamps[index + window]),
                         source_method=_SOURCE_METHOD,
                     )
                 )
@@ -145,6 +168,14 @@ def _to_datetime(value: datetime | pd.Timestamp) -> datetime:
         return value.to_pydatetime()
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _normalize_as_of(value: object) -> datetime:
+    if not isinstance(value, datetime):
+        raise TypeError("as_of must be a datetime")
+    if value.tzinfo is None:
+        raise ValueError("as_of must be timezone-aware")
     return value.astimezone(UTC)
 
 
