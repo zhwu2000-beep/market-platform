@@ -2,13 +2,24 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from numbers import Real
 from typing import Protocol, runtime_checkable
 
+import pandas as pd
+
 from market_platform.data.service import MarketDataService
+from market_platform.observation import (
+    MarketObservation,
+    ObservationIdentity,
+    ObservationProvenance,
+    PriceFacts,
+    build_market_observation,
+)
+from market_platform.research.adapter import adapt_market_state_to_view
 from market_platform.research.interpretation import (
     DIRECTIONAL_CURRENT_DRAWDOWN_SCALE,
     DIRECTIONAL_DISTANCE_FROM_MOVING_AVERAGE_SCALE,
@@ -45,6 +56,7 @@ from market_platform.signals import (
 )
 from market_platform.signals.classification import SignalClassification
 from market_platform.signals.models import MarketSignal, MarketSignalSnapshot
+from market_platform.state.protocol import MarketStateModel
 from market_platform.structure.models import (
     PriceStructureSnapshot,
     PriceStructureStatus,
@@ -84,6 +96,7 @@ class DefaultResearchWorkflow:
         composite_weights: Mapping[str, float] | None = None,
         model_version: str = "research-workflow-v1",
         price_structure_service: PriceStructureService | None = None,
+        state_model: MarketStateModel | None = None,
     ) -> None:
         if isinstance(lookback_calendar_days, bool) or not isinstance(
             lookback_calendar_days,
@@ -103,6 +116,9 @@ class DefaultResearchWorkflow:
             if price_structure_service is None
             else price_structure_service
         )
+        if state_model is not None and not isinstance(state_model, MarketStateModel):
+            raise TypeError("state_model must implement MarketStateModel")
+        self._state_model = state_model
 
     async def run(
         self,
@@ -203,6 +219,17 @@ class DefaultResearchWorkflow:
             analysis=analysis,
             classification=classification,
         )
+        if self._state_model is not None:
+            observation = _build_state_observation(
+                prices=prices,
+                request=request,
+                as_of=as_of,
+                lookback_calendar_days=self._lookback_calendar_days,
+                signals_snapshot=signals_snapshot,
+                structure_snapshot=structure_snapshot,
+            )
+            market_state = self._state_model.evaluate(observation)
+            market_view = adapt_market_state_to_view(market_state)
         warnings = _build_warnings(
             missing_directional_names=missing_directional_names,
             composite_value=composite.value,
@@ -240,6 +267,92 @@ def _resolve_as_of(request: ResearchRequest) -> datetime:
 
 def _current_utc() -> datetime:
     return datetime.now(UTC)
+
+
+def _build_state_observation(
+    *,
+    prices: pd.DataFrame,
+    request: ResearchRequest,
+    as_of: datetime,
+    lookback_calendar_days: int,
+    signals_snapshot: MarketSignalSnapshot,
+    structure_snapshot: PriceStructureSnapshot,
+) -> MarketObservation:
+    timestamps = pd.to_datetime(
+        prices["timestamp"],
+        utc=True,
+        errors="raise",
+    )
+    first_position = int(timestamps.argmin())
+    last_position = int(timestamps.argmax())
+    window_start = timestamps.iloc[first_position].to_pydatetime()
+    window_end = timestamps.iloc[last_position].to_pydatetime()
+    latest_price = _normalize_positive_price(
+        prices.iloc[last_position]["close"],
+    )
+    fingerprint = _observation_fingerprint(
+        symbol=signals_snapshot.symbol,
+        window_start=window_start,
+        window_end=window_end,
+        row_count=len(prices),
+        latest_price=latest_price,
+    )
+    return build_market_observation(
+        ObservationIdentity(
+            symbol=signals_snapshot.symbol,
+            interval="1day",
+            as_of=as_of,
+            window_start=window_start,
+            window_end=window_end,
+        ),
+        ObservationProvenance(
+            provider=request.provider or "auto",
+            methodology="research_workflow_state_bridge",
+            methodology_version="1.0.0",
+            parameters={
+                "interval": "1day",
+                "lookback_calendar_days": lookback_calendar_days,
+            },
+            input_fingerprint=fingerprint,
+        ),
+        price_facts=PriceFacts(
+            latest_price=latest_price,
+            observed_at=window_end,
+        ),
+        signal_snapshot=signals_snapshot,
+        structure_snapshot=structure_snapshot,
+    )
+
+
+def _normalize_positive_price(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise TypeError("latest close must be numeric")
+    numeric = float(value)
+    if not math.isfinite(numeric) or numeric <= 0.0:
+        raise ValueError("latest close must be a positive finite number")
+    return numeric
+
+
+def _observation_fingerprint(
+    *,
+    symbol: str,
+    window_start: datetime,
+    window_end: datetime,
+    row_count: int,
+    latest_price: float,
+) -> str:
+    payload = "|".join(
+        (
+            symbol,
+            "1day",
+            window_start.isoformat(),
+            window_end.isoformat(),
+            str(row_count),
+            repr(latest_price),
+        )
+    )
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return f"sha256:{digest}"
 
 
 def _resolve_composite_weights(
