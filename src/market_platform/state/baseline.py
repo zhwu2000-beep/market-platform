@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from numbers import Real
 
 from market_platform.observation.models import MarketObservation
 from market_platform.signals.classification import (
+    SignalClassification,
     SignalClassificationLevel,
     SignalClassificationThresholds,
     classify_composite_signal,
@@ -18,8 +20,13 @@ from market_platform.state.models import (
     DirectionalRegime,
     MarketState,
     MomentumRegime,
+    StateClassificationThresholdEvidence,
+    StateCompositeEvidence,
+    StateEvaluationEvidence,
     StateModelProvenance,
     StateQuality,
+    StateSignalEvidence,
+    StateVolatilityEvidence,
     StructureState,
     TrendRegime,
     VolatilityRegime,
@@ -111,18 +118,31 @@ class BaselineMarketStateModel:
             _DISTANCE_FROM_MOVING_AVERAGE_SCALE,
         )
 
-        trend_regime = _trend_regime(trend_score, trend_valid)
-        momentum_regime = _momentum_regime(momentum_score, momentum_valid)
-        directional_regime = _directional_regime(
+        scores = {
+            "trend": trend_score,
+            "momentum": momentum_score,
+            "current_drawdown": current_drawdown_score,
+            "distance_from_moving_average": distance_score,
+        }
+        valid_components = {
+            "trend": trend_valid,
+            "momentum": momentum_valid,
+            "current_drawdown": current_drawdown_valid,
+            "distance_from_moving_average": distance_valid,
+        }
+        component_levels = {
+            name: (
+                _classification_level(score)
+                if valid_components[name] and score is not None
+                else None
+            )
+            for name, score in scores.items()
+        }
+        trend_regime = _trend_regime(component_levels["trend"])
+        momentum_regime = _momentum_regime(component_levels["momentum"])
+        directional_regime, composite, classification = _directional_evaluation(
             observation,
-            trend_score=trend_score,
-            trend_valid=trend_valid,
-            momentum_score=momentum_score,
-            momentum_valid=momentum_valid,
-            current_drawdown_score=current_drawdown_score,
-            current_drawdown_valid=current_drawdown_valid,
-            distance_score=distance_score,
-            distance_valid=distance_valid,
+            scores=scores,
         )
         volatility_regime, volatility_valid = _volatility_regime(
             signals.get("realized_volatility")
@@ -153,6 +173,14 @@ class BaselineMarketStateModel:
             structure_state=structure_state,
             missing_inputs=missing_inputs,
         )
+        evaluation_evidence = _build_evaluation_evidence(
+            signals=signals,
+            scores=scores,
+            component_levels=component_levels,
+            composite=composite,
+            classification=classification,
+            volatility_regime=volatility_regime,
+        )
 
         return MarketState(
             symbol=observation.identity.symbol,
@@ -173,6 +201,7 @@ class BaselineMarketStateModel:
             structure_state=structure_state,
             quality=quality,
             missing_inputs=missing_inputs,
+            evaluation_evidence=evaluation_evidence,
         )
 
 
@@ -191,46 +220,31 @@ def _scaled_signal_score(
     return max(-1.0, min(1.0, numeric / scale)), True
 
 
-def _trend_regime(score: float | None, valid: bool) -> TrendRegime:
-    if not valid or score is None:
+def _trend_regime(
+    level: SignalClassificationLevel | None,
+) -> TrendRegime:
+    if level is None:
         return TrendRegime.UNAVAILABLE
-    return _TREND_LEVEL_MAP[_classification_level(score)]
+    return _TREND_LEVEL_MAP[level]
 
 
-def _momentum_regime(score: float | None, valid: bool) -> MomentumRegime:
-    if not valid or score is None:
+def _momentum_regime(
+    level: SignalClassificationLevel | None,
+) -> MomentumRegime:
+    if level is None:
         return MomentumRegime.UNAVAILABLE
-    return _MOMENTUM_LEVEL_MAP[_classification_level(score)]
+    return _MOMENTUM_LEVEL_MAP[level]
 
 
-def _directional_regime(
+def _directional_evaluation(
     observation: MarketObservation,
     *,
-    trend_score: float | None,
-    trend_valid: bool,
-    momentum_score: float | None,
-    momentum_valid: bool,
-    current_drawdown_score: float | None,
-    current_drawdown_valid: bool,
-    distance_score: float | None,
-    distance_valid: bool,
-) -> DirectionalRegime:
-    if not any(
-        (
-            trend_valid,
-            momentum_valid,
-            current_drawdown_valid,
-            distance_valid,
-        )
-    ):
-        return DirectionalRegime.UNAVAILABLE
-
-    scores = {
-        "trend": trend_score,
-        "momentum": momentum_score,
-        "current_drawdown": current_drawdown_score,
-        "distance_from_moving_average": distance_score,
-    }
+    scores: dict[str, float | None],
+) -> tuple[
+    DirectionalRegime,
+    MarketSignal,
+    SignalClassification | None,
+]:
     components = tuple(
         MarketSignal(
             symbol=observation.identity.symbol,
@@ -247,9 +261,145 @@ def _directional_regime(
         missing_policy="exclude",
     )
     if composite.value is None:
-        return DirectionalRegime.UNAVAILABLE
+        return DirectionalRegime.UNAVAILABLE, composite, None
     classification = classify_composite_signal(composite)
-    return _DIRECTIONAL_LEVEL_MAP[classification.level]
+    return (
+        _DIRECTIONAL_LEVEL_MAP[classification.level],
+        composite,
+        classification,
+    )
+
+
+def _build_evaluation_evidence(
+    *,
+    signals: dict[str, MarketSignal],
+    scores: dict[str, float | None],
+    component_levels: dict[
+        str,
+        SignalClassificationLevel | None,
+    ],
+    composite: MarketSignal,
+    classification: SignalClassification | None,
+    volatility_regime: VolatilityRegime,
+) -> StateEvaluationEvidence:
+    configured_weights = _numeric_mapping_parameter(
+        composite,
+        "configured_weights",
+    )
+    normalized_weights = _numeric_mapping_parameter(
+        composite,
+        "normalized_weights",
+    )
+    contributions = _numeric_mapping_parameter(
+        composite,
+        "component_contributions",
+    )
+    components = tuple(
+        StateSignalEvidence(
+            name=name,
+            raw_value=_raw_signal_value(signals.get(name)),
+            normalized_score=scores[name],
+            normalization_scale=_DIRECTIONAL_SCALES[name],
+            configured_weight=configured_weights[name],
+            normalized_weight=normalized_weights.get(name),
+            weighted_contribution=contributions.get(name),
+            interpreted_state=_evidence_state(component_levels[name]),
+            methodology="baseline_uncalibrated_directional_rescaling_v1",
+            source_parameters=(
+                signals[name].parameters if name in signals else {}
+            ),
+        )
+        for name in _DIRECTIONAL_SCALES
+    )
+    thresholds = (
+        classification.thresholds
+        if classification is not None
+        else SignalClassificationThresholds()
+    )
+    volatility_signal = signals.get("realized_volatility")
+    return StateEvaluationEvidence(
+        directional_components=components,
+        composite=StateCompositeEvidence(
+            score=(
+                float(composite.value)
+                if composite.value is not None
+                else None
+            ),
+            classification=(
+                classification.level.value
+                if classification is not None
+                else None
+            ),
+            methodology="baseline_uncalibrated_composite_v1",
+            formula="sum(normalized_score * normalized_weight)",
+            thresholds=StateClassificationThresholdEvidence(
+                strong_bearish=thresholds.strong_bearish,
+                bearish=thresholds.bearish,
+                bullish=thresholds.bullish,
+                strong_bullish=thresholds.strong_bullish,
+            ),
+            component_order=tuple(_DIRECTIONAL_SCALES),
+            included_signals=_string_sequence_parameter(
+                composite,
+                "included_signals",
+            ),
+            missing_signals=_string_sequence_parameter(
+                composite,
+                "missing_signals",
+            ),
+        ),
+        volatility=StateVolatilityEvidence(
+            raw_value=_raw_signal_value(volatility_signal),
+            low_threshold=_VOLATILITY_LOW_THRESHOLD,
+            high_threshold=_VOLATILITY_HIGH_THRESHOLD,
+            regime=volatility_regime,
+            methodology="baseline_realized_volatility_thresholds_v1",
+        ),
+    )
+
+
+def _evidence_state(
+    level: SignalClassificationLevel | None,
+) -> str:
+    if level is None:
+        return "unavailable"
+    return {
+        SignalClassificationLevel.STRONG_BEARISH: "strongly_negative",
+        SignalClassificationLevel.BEARISH: "negative",
+        SignalClassificationLevel.NEUTRAL: "neutral",
+        SignalClassificationLevel.BULLISH: "positive",
+        SignalClassificationLevel.STRONG_BULLISH: "strongly_positive",
+    }[level]
+
+
+def _raw_signal_value(signal: MarketSignal | None) -> float | None:
+    if signal is None or signal.value is None:
+        return None
+    value = signal.value
+    if isinstance(value, bool) or not isinstance(value, Real):
+        return None
+    numeric = float(value)
+    return numeric if math.isfinite(numeric) else None
+
+
+def _numeric_mapping_parameter(
+    signal: MarketSignal,
+    field_name: str,
+) -> dict[str, float]:
+    value = signal.parameters.get(field_name)
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{field_name} must be a mapping")
+    return {str(name): float(number) for name, number in value.items()}
+
+
+def _string_sequence_parameter(
+    signal: MarketSignal,
+    field_name: str,
+) -> tuple[str, ...]:
+    value = signal.parameters.get(field_name)
+    if not isinstance(value, (list, tuple)):
+        raise TypeError(f"{field_name} must be a list or tuple")
+    return tuple(str(item) for item in value)
 
 
 def _volatility_regime(

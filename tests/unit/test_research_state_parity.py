@@ -9,6 +9,7 @@ from pandas.testing import assert_frame_equal
 
 import market_platform.research.workflow as research_workflow
 from market_platform.research.models import MarketView, ResearchRequest
+from market_platform.research.modes import ResearchInterpretationMode
 from market_platform.research.workflow import DefaultResearchWorkflow
 from market_platform.signals.models import MarketSignal, MarketSignalSnapshot
 from market_platform.state import BaselineMarketStateModel
@@ -188,10 +189,12 @@ def _run_pair(
     legacy = DefaultResearchWorkflow(
         data_service,
         price_structure_service=structure_service,  # type: ignore[arg-type]
+        interpretation_mode=ResearchInterpretationMode.LEGACY,
     )
     state = DefaultResearchWorkflow(
         data_service,
         price_structure_service=structure_service,  # type: ignore[arg-type]
+        interpretation_mode=ResearchInterpretationMode.STATE,
         state_model=BaselineMarketStateModel(),
     )
     return _run(legacy), _run(state), prices

@@ -19,7 +19,10 @@ from market_platform.observation import (
     PriceFacts,
     build_market_observation,
 )
-from market_platform.research.adapter import adapt_market_state_to_view
+from market_platform.research.adapter import (
+    adapt_market_state_to_analysis,
+    adapt_market_state_to_view,
+)
 from market_platform.research.interpretation import (
     DIRECTIONAL_CURRENT_DRAWDOWN_SCALE,
     DIRECTIONAL_DISTANCE_FROM_MOVING_AVERAGE_SCALE,
@@ -48,6 +51,7 @@ from market_platform.research.models import (
     ResearchWarning,
     StructuralTargetLevel,
 )
+from market_platform.research.modes import ResearchInterpretationMode
 from market_platform.research.price_context import build_price_context
 from market_platform.research.target_framework import build_structural_target_levels
 from market_platform.signals import (
@@ -56,6 +60,11 @@ from market_platform.signals import (
 )
 from market_platform.signals.classification import SignalClassification
 from market_platform.signals.models import MarketSignal, MarketSignalSnapshot
+from market_platform.state import (
+    BaselineMarketStateModel,
+    MarketState,
+    StateQuality,
+)
 from market_platform.state.protocol import MarketStateModel
 from market_platform.structure.models import (
     PriceStructureSnapshot,
@@ -96,6 +105,9 @@ class DefaultResearchWorkflow:
         composite_weights: Mapping[str, float] | None = None,
         model_version: str = "research-workflow-v1",
         price_structure_service: PriceStructureService | None = None,
+        interpretation_mode: ResearchInterpretationMode = (
+            ResearchInterpretationMode.STATE
+        ),
         state_model: MarketStateModel | None = None,
     ) -> None:
         if isinstance(lookback_calendar_days, bool) or not isinstance(
@@ -116,9 +128,26 @@ class DefaultResearchWorkflow:
             if price_structure_service is None
             else price_structure_service
         )
+        if not isinstance(interpretation_mode, ResearchInterpretationMode):
+            raise TypeError(
+                "interpretation_mode must be a ResearchInterpretationMode"
+            )
         if state_model is not None and not isinstance(state_model, MarketStateModel):
             raise TypeError("state_model must implement MarketStateModel")
-        self._state_model = state_model
+        if (
+            interpretation_mode is ResearchInterpretationMode.LEGACY
+            and state_model is not None
+        ):
+            raise ValueError(
+                "state_model must be None when interpretation_mode is LEGACY"
+            )
+        self._interpretation_mode = interpretation_mode
+        self._state_model = (
+            BaselineMarketStateModel()
+            if interpretation_mode is ResearchInterpretationMode.STATE
+            and state_model is None
+            else state_model
+        )
 
     async def run(
         self,
@@ -138,8 +167,23 @@ class DefaultResearchWorkflow:
         )
         signals_snapshot = calculate_market_signals(prices)
         structure_snapshot = self._price_structure_service.analyze(prices)
-        structure_assessment = _build_structure_assessment(structure_snapshot)
         price_levels = _build_price_levels(structure_snapshot)
+        if self._interpretation_mode is ResearchInterpretationMode.STATE:
+            if self._state_model is None:
+                raise RuntimeError("STATE interpretation requires a state model")
+            return _build_state_research_result(
+                prices=prices,
+                request=request,
+                as_of=as_of,
+                lookback_calendar_days=self._lookback_calendar_days,
+                signals_snapshot=signals_snapshot,
+                structure_snapshot=structure_snapshot,
+                state_model=self._state_model,
+                model_version=self._model_version,
+                price_levels=price_levels,
+            )
+
+        structure_assessment = _build_structure_assessment(structure_snapshot)
         current_price = structure_snapshot.current_price
         price_context = (
             build_price_context(current_price, price_levels)
@@ -219,17 +263,6 @@ class DefaultResearchWorkflow:
             analysis=analysis,
             classification=classification,
         )
-        if self._state_model is not None:
-            observation = _build_state_observation(
-                prices=prices,
-                request=request,
-                as_of=as_of,
-                lookback_calendar_days=self._lookback_calendar_days,
-                signals_snapshot=signals_snapshot,
-                structure_snapshot=structure_snapshot,
-            )
-            market_state = self._state_model.evaluate(observation)
-            market_view = adapt_market_state_to_view(market_state)
         warnings = _build_warnings(
             missing_directional_names=missing_directional_names,
             composite_value=composite.value,
@@ -257,6 +290,79 @@ class DefaultResearchWorkflow:
             model_version=self._model_version,
             analysis=analysis,
         )
+
+
+def _build_state_research_result(
+    *,
+    prices: pd.DataFrame,
+    request: ResearchRequest,
+    as_of: datetime,
+    lookback_calendar_days: int,
+    signals_snapshot: MarketSignalSnapshot,
+    structure_snapshot: PriceStructureSnapshot,
+    state_model: MarketStateModel,
+    model_version: str,
+    price_levels: tuple[PriceLevel, ...],
+) -> ResearchResult:
+    observation = _build_state_observation(
+        prices=prices,
+        request=request,
+        as_of=as_of,
+        lookback_calendar_days=lookback_calendar_days,
+        signals_snapshot=signals_snapshot,
+        structure_snapshot=structure_snapshot,
+    )
+    market_state = state_model.evaluate(observation)
+    market_view = adapt_market_state_to_view(market_state)
+    analysis = adapt_market_state_to_analysis(market_state, observation)
+    return ResearchResult(
+        request=request,
+        status=_state_research_status(market_state),
+        market_view=market_view,
+        price_levels=price_levels,
+        warnings=_build_state_warnings(
+            market_state=market_state,
+            structure_status=structure_snapshot.status,
+        ),
+        summary=_build_state_summary(
+            symbol=request.symbol,
+            horizon_days=request.horizon_days,
+            market_view=market_view,
+        ),
+        model_version=model_version,
+        analysis=analysis,
+    )
+
+
+def _state_research_status(state: MarketState) -> ResearchStatus:
+    return (
+        ResearchStatus.OK
+        if state.quality is StateQuality.COMPLETE
+        else ResearchStatus.DEGRADED
+    )
+
+
+def _build_state_warnings(
+    *,
+    market_state: MarketState,
+    structure_status: PriceStructureStatus,
+) -> tuple[ResearchWarning, ...]:
+    missing_directional_names = [
+        name
+        for name in _DIRECTIONAL_SIGNAL_NAMES
+        if name in market_state.missing_inputs
+    ]
+    warnings: list[ResearchWarning] = []
+    if missing_directional_names:
+        warnings.append(
+            ResearchWarning(
+                code="missing_directional_signals",
+                message="Missing directional signals: "
+                + ", ".join(missing_directional_names),
+            )
+        )
+    warnings.extend(_build_structure_warnings(structure_status))
+    return tuple(warnings)
 
 
 def _resolve_as_of(request: ResearchRequest) -> datetime:
@@ -592,6 +698,14 @@ def _build_warnings(
                 ),
             )
         )
+    warnings.extend(_build_structure_warnings(structure_status))
+    return tuple(warnings)
+
+
+def _build_structure_warnings(
+    structure_status: PriceStructureStatus,
+) -> tuple[ResearchWarning, ...]:
+    warnings: list[ResearchWarning] = []
     if structure_status is PriceStructureStatus.INSUFFICIENT_DATA:
         warnings.append(
             ResearchWarning(
@@ -642,6 +756,24 @@ def _build_summary(
     classification: SignalClassification | None,
 ) -> str:
     if classification is None or market_view.direction is None:
+        return (
+            f"{symbol} has insufficient directional signal data for a composite "
+            f"classification."
+        )
+    return (
+        f"{symbol}'s current composite signal is classified as "
+        f"{market_view.direction}; the requested research horizon is "
+        f"{horizon_days} days."
+    )
+
+
+def _build_state_summary(
+    *,
+    symbol: str,
+    horizon_days: int,
+    market_view: MarketView,
+) -> str:
+    if market_view.direction is None:
         return (
             f"{symbol} has insufficient directional signal data for a composite "
             f"classification."

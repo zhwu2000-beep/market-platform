@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import fields
+from dataclasses import FrozenInstanceError, fields
 from datetime import UTC, datetime
 from pathlib import Path
+
+import pytest
 
 from market_platform.observation import (
     MarketObservation,
@@ -103,6 +105,59 @@ def test_baseline_model_satisfies_protocol_and_evaluates_normal_observation() ->
     assert state.structure_state is StructureState.AVAILABLE
     assert state.quality is StateQuality.COMPLETE
     assert state.missing_inputs == ()
+
+
+def test_baseline_evaluation_evidence_is_complete_and_replayable() -> None:
+    state = BaselineMarketStateModel().evaluate(_observation())
+
+    evidence = state.evaluation_evidence
+    assert evidence is not None
+    assert not hasattr(evidence, "__dict__")
+    assert [component.name for component in evidence.directional_components] == [
+        "trend",
+        "momentum",
+        "current_drawdown",
+        "distance_from_moving_average",
+    ]
+    assert [
+        component.normalized_score
+        for component in evidence.directional_components
+    ] == pytest.approx([0.8, 0.5, 0.8, 0.8])
+    assert all(
+        component.configured_weight == 1.0
+        for component in evidence.directional_components
+    )
+    assert all(
+        component.normalized_weight == 0.25
+        for component in evidence.directional_components
+    )
+    replayed_score = sum(
+        component.weighted_contribution or 0.0
+        for component in evidence.directional_components
+    )
+    assert replayed_score == pytest.approx(evidence.composite.score)
+    assert evidence.composite.score == pytest.approx(0.725)
+    assert evidence.composite.classification == "strong_bullish"
+    assert evidence.composite.component_order == (
+        "trend",
+        "momentum",
+        "current_drawdown",
+        "distance_from_moving_average",
+    )
+    assert evidence.composite.thresholds.to_dict() == {
+        "strong_bearish": -0.6,
+        "bearish": -0.2,
+        "bullish": 0.2,
+        "strong_bullish": 0.6,
+    }
+    assert evidence.volatility.raw_value == 0.2
+    assert evidence.volatility.low_threshold == 0.15
+    assert evidence.volatility.high_threshold == 0.30
+    assert evidence.volatility.regime is VolatilityRegime.NORMAL
+    with pytest.raises(FrozenInstanceError):
+        evidence.composite.score = 0.0  # type: ignore[misc]
+    with pytest.raises(TypeError):
+        evidence.directional_components[0].source_parameters["new"] = True  # type: ignore[index]
 
 
 def test_missing_signal_facts_produces_unavailable_signal_states() -> None:

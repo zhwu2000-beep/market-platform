@@ -12,6 +12,7 @@ import market_platform.research.workflow as research_workflow
 from market_platform.observation import MarketObservation
 from market_platform.research.adapter import adapt_market_state_to_view
 from market_platform.research.models import MarketView, ResearchRequest, ResearchResult
+from market_platform.research.modes import ResearchInterpretationMode
 from market_platform.research.workflow import DefaultResearchWorkflow
 from market_platform.state import (
     DirectionalRegime,
@@ -115,22 +116,23 @@ def _run(workflow: DefaultResearchWorkflow) -> ResearchResult:
     return asyncio.run(workflow.run(request))
 
 
-def test_default_workflow_behavior_is_unchanged_with_explicit_none() -> None:
+def test_default_state_behavior_matches_explicit_state_with_none_model() -> None:
     implicit = DefaultResearchWorkflow(FakeMarketDataService(_prices()))
     explicit = DefaultResearchWorkflow(
         FakeMarketDataService(_prices()),
+        interpretation_mode=ResearchInterpretationMode.STATE,
         state_model=None,
     )
 
     assert _run(implicit).to_dict() == _run(explicit).to_dict()
 
 
-def test_default_path_does_not_call_adapter(
+def test_explicit_legacy_path_does_not_call_adapter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fail_if_called(state: MarketState) -> MarketView:
         del state
-        raise AssertionError("adapter must not run without a state model")
+        raise AssertionError("adapter must not run in LEGACY mode")
 
     monkeypatch.setattr(
         research_workflow,
@@ -139,7 +141,10 @@ def test_default_path_does_not_call_adapter(
     )
 
     assert _run(
-        DefaultResearchWorkflow(FakeMarketDataService(_prices()))
+        DefaultResearchWorkflow(
+            FakeMarketDataService(_prices()),
+            interpretation_mode=ResearchInterpretationMode.LEGACY,
+        )
     ).market_view is not None
 
 
@@ -161,6 +166,7 @@ def test_injected_model_uses_adapter_and_controls_market_view(
     result = _run(
         DefaultResearchWorkflow(
             FakeMarketDataService(_prices()),
+            interpretation_mode=ResearchInterpretationMode.STATE,
             state_model=model,
         )
     )
@@ -175,6 +181,9 @@ def test_injected_model_uses_adapter_and_controls_market_view(
         price_structure="available",
         confidence=None,
     )
+    assert result.analysis is not None
+    assert result.analysis.composite.score is None
+    assert result.analysis.composite.classification is None
 
 
 def test_bridge_observation_is_point_in_time_and_not_modified() -> None:
@@ -183,6 +192,7 @@ def test_bridge_observation_is_point_in_time_and_not_modified() -> None:
     _run(
         DefaultResearchWorkflow(
             FakeMarketDataService(_prices()),
+            interpretation_mode=ResearchInterpretationMode.STATE,
             state_model=model,
         )
     )
@@ -205,6 +215,7 @@ def test_bridge_preserves_research_result_and_market_view_schema() -> None:
     payload = _run(
         DefaultResearchWorkflow(
             FakeMarketDataService(_prices()),
+            interpretation_mode=ResearchInterpretationMode.STATE,
             state_model=FakeStateModel(),
         )
     ).to_dict()
@@ -235,7 +246,7 @@ def test_bridge_preserves_research_result_and_market_view_schema() -> None:
     }
 
 
-def test_state_model_package_does_not_depend_on_research_workflow() -> None:
+def test_state_model_package_has_no_higher_layer_dependencies() -> None:
     state_package = (
         Path(__file__).resolve().parents[2]
         / "src"
@@ -247,4 +258,6 @@ def test_state_model_package_does_not_depend_on_research_workflow() -> None:
         for path in sorted(state_package.glob("*.py"))
     )
 
-    assert "market_platform.research.workflow" not in source
+    assert "market_platform.research" not in source
+    assert "market_platform.strategy" not in source
+    assert "market_platform.cli" not in source

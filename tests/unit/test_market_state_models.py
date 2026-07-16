@@ -124,6 +124,7 @@ def test_market_state_normalizes_identity_and_serializes_to_json() -> None:
         "structure_state": "observed",
         "quality": "complete",
         "missing_inputs": [],
+        "evaluation_evidence": None,
     }
     json.dumps(payload)
 

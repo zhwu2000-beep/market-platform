@@ -36,6 +36,7 @@ from market_platform.research.models import (
     StructuralTargetDirection,
     StructuralTargetLevel,
 )
+from market_platform.research.modes import ResearchInterpretationMode
 from market_platform.research.price_context import build_price_context
 from market_platform.research.target_framework import build_structural_target_levels
 from market_platform.research.workflow import DefaultResearchWorkflow, ResearchWorkflow
@@ -59,6 +60,7 @@ __all__ = [
     "ResearchCompositeAssessment",
     "ResearchRequest",
     "ResearchResult",
+    "ResearchInterpretationMode",
     "ResearchSignalComponent",
     "ResearchStatus",
     "ResearchStructureAssessment",

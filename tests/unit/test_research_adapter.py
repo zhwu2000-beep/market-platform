@@ -6,8 +6,20 @@ from pathlib import Path
 
 import pytest
 
-from market_platform.research.adapter import adapt_market_state_to_view
-from market_platform.research.models import MarketView
+from market_platform.observation import (
+    MarketObservation,
+    ObservationIdentity,
+    ObservationProvenance,
+    PriceFacts,
+    SignalFacts,
+    StructureFacts,
+)
+from market_platform.research.adapter import (
+    adapt_market_state_to_analysis,
+    adapt_market_state_to_view,
+)
+from market_platform.research.models import MarketView, ResearchAnalysis
+from market_platform.signals.models import MarketSignal
 from market_platform.state import (
     DirectionalRegime,
     MarketState,
@@ -18,13 +30,16 @@ from market_platform.state import (
     TrendRegime,
     VolatilityRegime,
 )
+from market_platform.structure.models import PriceStructureStatus
+
+_AS_OF = datetime(2026, 7, 16, tzinfo=UTC)
 
 
 def _state(**overrides: object) -> MarketState:
     values: dict[str, object] = {
         "symbol": "MSFT",
         "interval": "1day",
-        "as_of": datetime(2026, 7, 16, tzinfo=UTC),
+        "as_of": _AS_OF,
         "provenance": StateModelProvenance(
             model_id="test-state-model",
             model_version="1.0.0",
@@ -41,6 +56,79 @@ def _state(**overrides: object) -> MarketState:
     }
     values.update(overrides)
     return MarketState(**values)  # type: ignore[arg-type]
+
+
+def _observation() -> MarketObservation:
+    signals = (
+        MarketSignal(
+            symbol="MSFT",
+            name="trend",
+            value=0.04,
+            timestamp=_AS_OF,
+            parameters={"window": 20},
+        ),
+        MarketSignal(
+            symbol="MSFT",
+            name="momentum",
+            value=0.08,
+            timestamp=_AS_OF,
+            parameters={"window": 10},
+        ),
+        MarketSignal(
+            symbol="MSFT",
+            name="current_drawdown",
+            value=0.08,
+            timestamp=_AS_OF,
+            parameters={},
+        ),
+        MarketSignal(
+            symbol="MSFT",
+            name="distance_from_moving_average",
+            value=0.04,
+            timestamp=_AS_OF,
+            parameters={},
+        ),
+        MarketSignal(
+            symbol="MSFT",
+            name="realized_volatility",
+            value=0.20,
+            timestamp=_AS_OF,
+            parameters={"window": 20},
+        ),
+    )
+    return MarketObservation(
+        identity=ObservationIdentity(
+            symbol="MSFT",
+            interval="1day",
+            as_of=_AS_OF,
+            window_start=datetime(2026, 7, 1, tzinfo=UTC),
+            window_end=_AS_OF,
+        ),
+        provenance=ObservationProvenance(
+            provider="test",
+            methodology="test-observation",
+            methodology_version="1.0.0",
+            parameters={},
+            input_fingerprint="sha256:observation",
+        ),
+        price_facts=PriceFacts(
+            latest_price=102.0,
+            observed_at=_AS_OF,
+        ),
+        signal_facts=SignalFacts(
+            symbol="MSFT",
+            as_of=_AS_OF,
+            signals=signals,
+        ),
+        structure_facts=StructureFacts(
+            status=PriceStructureStatus.OK,
+            as_of=_AS_OF,
+            current_price=102.0,
+            atr=2.0,
+            confirmed_pivots=(),
+            available_zones=(),
+        ),
+    )
 
 
 @pytest.mark.parametrize(
@@ -222,6 +310,44 @@ def test_adapter_output_uses_existing_market_view_schema() -> None:
     }
 
 
+def test_analysis_adapter_projects_state_and_observation_evidence() -> None:
+    state = _state()
+    observation = _observation()
+    state_before = state.to_dict()
+    observation_before = observation.to_dict()
+
+    analysis = adapt_market_state_to_analysis(state, observation)
+
+    assert isinstance(analysis, ResearchAnalysis)
+    assert analysis.symbol == "MSFT"
+    assert analysis.timestamp == _AS_OF
+    assert [component.name for component in analysis.components] == [
+        "trend",
+        "momentum",
+        "current_drawdown",
+        "distance_from_moving_average",
+        "realized_volatility",
+    ]
+    assert analysis.components[0].raw_value == 0.04
+    assert analysis.components[0].score is None
+    assert analysis.components[0].state == "positive"
+    assert analysis.components[2].state == "observed"
+    assert analysis.volatility_state == "normal"
+    assert analysis.volatility_value == 0.20
+    assert analysis.composite.score is None
+    assert analysis.composite.classification is None
+    assert analysis.composite.configured_weights == {}
+    assert analysis.composite.component_contributions == {}
+    assert analysis.structure is not None
+    assert analysis.structure.status == "ok"
+    assert analysis.structure.current_price == 102.0
+    assert analysis.price_context is not None
+    assert analysis.price_context.current_price == 102.0
+    assert analysis.structural_target_levels == ()
+    assert state.to_dict() == state_before
+    assert observation.to_dict() == observation_before
+
+
 def test_adapter_has_no_computation_or_data_dependencies() -> None:
     adapter_path = (
         Path(__file__).resolve().parents[2]
@@ -233,7 +359,8 @@ def test_adapter_has_no_computation_or_data_dependencies() -> None:
     source = adapter_path.read_text(encoding="utf-8")
 
     assert "market_platform.research.interpretation" not in source
-    assert "market_platform.signals" not in source
+    assert "market_platform.signals.composite" not in source
+    assert "market_platform.signals.classification" not in source
     assert "market_platform.data" not in source
     assert "calculate_composite" not in source
     assert "classify_" not in source
@@ -243,3 +370,11 @@ def test_adapter_has_no_computation_or_data_dependencies() -> None:
 def test_adapter_rejects_non_state_input() -> None:
     with pytest.raises(TypeError, match="state must be a MarketState"):
         adapt_market_state_to_view("state")  # type: ignore[arg-type]
+
+
+def test_analysis_adapter_rejects_non_observation_input() -> None:
+    with pytest.raises(TypeError, match="observation must be a MarketObservation"):
+        adapt_market_state_to_analysis(
+            _state(),
+            "observation",  # type: ignore[arg-type]
+        )

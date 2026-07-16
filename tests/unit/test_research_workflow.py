@@ -11,13 +11,16 @@ import pytest
 
 import market_platform.research.workflow as research_workflow
 from market_platform.research import (
-    DefaultResearchWorkflow,
+    DefaultResearchWorkflow as _DefaultResearchWorkflow,
+)
+from market_platform.research import (
     InterpretedSignal,
     InterpretedSignalState,
     PositionContext,
     PriceContext,
     ResearchAnalysis,
     ResearchCompositeAssessment,
+    ResearchInterpretationMode,
     ResearchRequest,
     ResearchResult,
     ResearchSignalComponent,
@@ -46,6 +49,17 @@ from market_platform.structure import (
 _REQUEST_AS_OF = datetime(2026, 1, 5, 1, 0, tzinfo=timezone(timedelta(hours=14)))
 _CLOCK_NOW = datetime(2026, 1, 10, 12, 0, tzinfo=UTC)
 _SNAPSHOT_TIMESTAMP = datetime(2026, 1, 10, 12, 0, tzinfo=UTC)
+
+
+class DefaultResearchWorkflow(_DefaultResearchWorkflow):
+    """Run the pre-existing workflow behavior suite in explicit LEGACY mode."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        kwargs.setdefault(
+            "interpretation_mode",
+            ResearchInterpretationMode.LEGACY,
+        )
+        super().__init__(*args, **kwargs)
 
 
 class FakeMarketDataService:
