@@ -55,7 +55,8 @@ class FakeStructureService:
         self.snapshot = snapshot
         self.inputs: list[pd.DataFrame] = []
 
-    def analyze(self, prices: pd.DataFrame) -> PriceStructureSnapshot:
+    def analyze(self, prices: pd.DataFrame, **kwargs: object) -> PriceStructureSnapshot:
+        del kwargs
         self.inputs.append(prices.copy(deep=True))
         return self.snapshot
 
@@ -69,9 +70,12 @@ def _prices() -> pd.DataFrame:
                 datetime(2026, 7, 15, tzinfo=UTC),
                 _FACTS_AS_OF,
             ],
+            "open": [98.5, 100.5, 101.5],
             "high": [100.0, 102.0, 103.0],
             "low": [98.0, 99.0, 100.0],
             "close": [99.0, 101.0, 102.0],
+            "volume": [1_000_000.0, 1_100_000.0, 1_200_000.0],
+            "provider": ["test-provider", "test-provider", "test-provider"],
         }
     )
 

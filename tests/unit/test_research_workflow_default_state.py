@@ -56,10 +56,16 @@ class FakeStructureService:
         self.snapshot = snapshot
         self.calls = 0
         self.inputs: list[pd.DataFrame] = []
+        self.as_of_values: list[object] = []
 
-    def analyze(self, prices: pd.DataFrame) -> PriceStructureSnapshot:
+    def analyze(
+        self,
+        prices: pd.DataFrame,
+        **kwargs: object,
+    ) -> PriceStructureSnapshot:
         self.calls += 1
         self.inputs.append(prices.copy(deep=True))
+        self.as_of_values.append(kwargs.get("as_of"))
         return self.snapshot
 
 
@@ -95,11 +101,30 @@ def _prices() -> pd.DataFrame:
                 datetime(2026, 7, 15, tzinfo=UTC),
                 _FACTS_AS_OF,
             ],
+            "open": [98.5, 100.5, 101.5],
             "high": [100.0, 102.0, 103.0],
             "low": [98.0, 99.0, 100.0],
             "close": [99.0, 101.0, 102.0],
+            "volume": [1_000_000.0, 1_100_000.0, 1_200_000.0],
+            "provider": ["test-provider", "test-provider", "test-provider"],
         }
     )
+
+
+def _prices_with_future() -> pd.DataFrame:
+    future = pd.DataFrame(
+        {
+            "symbol": ["MSFT"],
+            "timestamp": [datetime(2026, 7, 17, tzinfo=UTC)],
+            "open": [9998.0],
+            "high": [10000.0],
+            "low": [9990.0],
+            "close": [9999.0],
+            "volume": [9_999_999.0],
+            "provider": ["test-provider"],
+        }
+    )
+    return pd.concat([_prices(), future], ignore_index=True)
 
 
 def _signals() -> MarketSignalSnapshot:
@@ -287,6 +312,82 @@ def test_explicit_state_uses_injected_custom_model(
 
     assert len(model.observations) == 1
     assert model.observations[0].identity.as_of == _AS_OF
+
+
+def test_state_workflow_ignores_future_rows_for_same_as_of(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signals = _signals()
+    base_signal_inputs = _install_signals(monkeypatch, signals)
+    base_model = RecordingStateModel()
+    base_workflow, _, base_structure_service = _workflow(
+        prices=_prices(),
+        structure=_structure_snapshot(),
+        state_model=base_model,
+    )
+    base_result = _run(base_workflow)
+
+    future_signal_inputs = _install_signals(monkeypatch, signals)
+    future_model = RecordingStateModel()
+    future_prices = _prices_with_future()
+    original_future_prices = future_prices.copy(deep=True)
+    future_workflow, _, future_structure_service = _workflow(
+        prices=future_prices,
+        structure=_structure_snapshot(),
+        state_model=future_model,
+    )
+    future_result = _run(future_workflow)
+
+    assert base_result.to_dict() == future_result.to_dict()
+    assert_frame_equal(future_prices, original_future_prices)
+    assert len(base_signal_inputs[0]) == 3
+    assert len(future_signal_inputs[0]) == 3
+    assert len(future_structure_service.inputs[0]) == 3
+    assert future_structure_service.as_of_values == [_AS_OF]
+    base_observation = base_model.observations[0]
+    future_observation = future_model.observations[0]
+    assert base_observation.identity.window_end == _FACTS_AS_OF
+    assert future_observation.identity.window_end == _FACTS_AS_OF
+    assert future_observation.price_facts.latest_price == 102.0
+    assert (
+        base_observation.provenance.input_fingerprint
+        == future_observation.provenance.input_fingerprint
+    )
+    assert base_structure_service.as_of_values == [_AS_OF]
+
+
+def test_state_workflow_keeps_row_at_exact_as_of(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    exact_row = pd.DataFrame(
+        {
+            "symbol": ["MSFT"],
+            "timestamp": [_AS_OF],
+            "open": [102.5],
+            "high": [104.0],
+            "low": [102.0],
+            "close": [103.5],
+            "volume": [1_300_000.0],
+            "provider": ["test-provider"],
+        }
+    )
+    prices = pd.concat([_prices(), exact_row], ignore_index=True)
+    signal_inputs = _install_signals(monkeypatch, _signals())
+    model = RecordingStateModel()
+    workflow, _, structure_service = _workflow(
+        prices=prices,
+        structure=_structure_snapshot(),
+        state_model=model,
+    )
+
+    _run(workflow)
+
+    observation = model.observations[0]
+    assert len(signal_inputs[0]) == 4
+    assert len(structure_service.inputs[0]) == 4
+    assert structure_service.as_of_values == [_AS_OF]
+    assert observation.identity.window_end == _AS_OF
+    assert observation.price_facts.latest_price == 103.5
 
 
 def test_explicit_legacy_preserves_parity_and_state_structure_enrichment(

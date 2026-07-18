@@ -102,6 +102,7 @@ def _prices() -> pd.DataFrame:
             "low": [close - 1.0 for close in closes],
             "close": closes,
             "volume": [1_000_000] * len(timestamps),
+            "provider": ["test-provider"] * len(timestamps),
         }
     )
 

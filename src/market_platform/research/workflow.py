@@ -11,6 +11,8 @@ from typing import Protocol, runtime_checkable
 
 import pandas as pd
 
+from market_platform.data.exceptions import DataProviderError
+from market_platform.data.models import normalize_price_frame
 from market_platform.data.service import MarketDataService
 from market_platform.observation import (
     MarketObservation,
@@ -165,14 +167,18 @@ class DefaultResearchWorkflow:
             end=end_date,
             provider=request.provider,
         )
-        signals_snapshot = calculate_market_signals(prices)
-        structure_snapshot = self._price_structure_service.analyze(prices)
+        prices_prefix = _filter_prices_as_of(prices, as_of)
+        signals_snapshot = calculate_market_signals(prices_prefix)
+        structure_snapshot = self._price_structure_service.analyze(
+            prices_prefix,
+            as_of=as_of,
+        )
         price_levels = _build_price_levels(structure_snapshot)
         if self._interpretation_mode is ResearchInterpretationMode.STATE:
             if self._state_model is None:
                 raise RuntimeError("STATE interpretation requires a state model")
             return _build_state_research_result(
-                prices=prices,
+                prices=prices_prefix,
                 request=request,
                 as_of=as_of,
                 lookback_calendar_days=self._lookback_calendar_days,
@@ -373,6 +379,19 @@ def _resolve_as_of(request: ResearchRequest) -> datetime:
 
 def _current_utc() -> datetime:
     return datetime.now(UTC)
+
+
+def _filter_prices_as_of(prices: pd.DataFrame, as_of: datetime) -> pd.DataFrame:
+    normalized = normalize_price_frame(prices)
+    normalized_as_of = as_of.astimezone(UTC)
+    prefix = normalized.loc[
+        normalized["timestamp"] <= pd.Timestamp(normalized_as_of)
+    ].copy(deep=True)
+    if prefix.empty:
+        raise DataProviderError(
+            "No price data available at or before request.as_of."
+        )
+    return prefix.reset_index(drop=True)
 
 
 def _build_state_observation(

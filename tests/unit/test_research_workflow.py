@@ -10,6 +10,7 @@ import pandas as pd
 import pytest
 
 import market_platform.research.workflow as research_workflow
+from market_platform.data.exceptions import DataProviderError
 from market_platform.research import (
     DefaultResearchWorkflow as _DefaultResearchWorkflow,
 )
@@ -88,15 +89,14 @@ class FakeMarketDataService:
 class FakePriceStructureService(PriceStructureService):
     def __init__(self, snapshot: PriceStructureSnapshot) -> None:
         self.snapshot = snapshot
-        self.calls: list[pd.DataFrame] = []
+        self.calls: list[dict[str, object]] = []
 
     def analyze(
         self,
         prices: pd.DataFrame,
         **kwargs: Any,
     ) -> PriceStructureSnapshot:
-        del kwargs
-        self.calls.append(prices)
+        self.calls.append({"prices": prices, "kwargs": dict(kwargs)})
         return self.snapshot
 
 
@@ -128,14 +128,37 @@ def _prices_frame() -> pd.DataFrame:
         {
             "symbol": ["MSFT", "MSFT"],
             "timestamp": [
-                datetime(2026, 1, 8, 0, 0, tzinfo=UTC),
-                datetime(2026, 1, 9, 0, 0, tzinfo=UTC),
+                datetime(2026, 1, 3, 0, 0, tzinfo=UTC),
+                datetime(2026, 1, 4, 0, 0, tzinfo=UTC),
             ],
+            "open": [99.0, 100.0],
             "high": [101.0, 102.0],
             "low": [99.0, 100.0],
             "close": [100.0, 101.0],
+            "volume": [1_000_000.0, 1_100_000.0],
+            "provider": ["polygon", "polygon"],
         }
     )
+
+
+def _prices_frame_with_future() -> pd.DataFrame:
+    frame = _prices_frame()
+    future = pd.DataFrame(
+        {
+            "symbol": ["MSFT", "MSFT"],
+            "timestamp": [
+                _REQUEST_AS_OF.astimezone(UTC),
+                datetime(2026, 1, 5, 0, 0, tzinfo=UTC),
+            ],
+            "open": [101.5, 9998.0],
+            "high": [103.0, 10000.0],
+            "low": [100.5, 9990.0],
+            "close": [102.0, 9999.0],
+            "volume": [1_200_000.0, 9_999_999.0],
+            "provider": ["polygon", "polygon"],
+        }
+    )
+    return pd.concat([frame, future], ignore_index=True)
 
 
 def _structure_snapshot(status: PriceStructureStatus) -> PriceStructureSnapshot:
@@ -459,7 +482,8 @@ def test_workflow_uses_request_window_and_preserves_input_frame(
         }
     ]
     assert frame.equals(original)
-    assert captured["prices_frame"] is frame
+    assert captured["prices_frame"] is not frame
+    assert len(captured["prices_frame"]) == len(frame)  # type: ignore[arg-type]
     assert result.request.symbol == "MSFT"
 
 
@@ -475,6 +499,58 @@ def test_workflow_uses_explicit_as_of_in_utc(
 
     assert service.calls[0]["start"] == date(2025, 12, 15)
     assert service.calls[0]["end"] == date(2026, 1, 4)
+
+
+def test_workflow_filters_future_rows_before_signals_and_structure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = _prices_frame_with_future()
+    original = frame.copy(deep=True)
+    service = FakeMarketDataService(frame)
+    structure_service = FakePriceStructureService(
+        _structure_snapshot(PriceStructureStatus.OK)
+    )
+    workflow = DefaultResearchWorkflow(
+        service,
+        price_structure_service=structure_service,
+    )
+    captured = _install_pipeline(monkeypatch, directional_scores=(0.5, 0.5, 0.5, 0.5))
+
+    _run_workflow(workflow, _request())
+
+    signal_prices = captured["prices_frame"]
+    structure_prices = structure_service.calls[0]["prices"]
+    assert isinstance(signal_prices, pd.DataFrame)
+    assert isinstance(structure_prices, pd.DataFrame)
+    assert list(signal_prices["timestamp"]) == [
+        pd.Timestamp("2026-01-03T00:00:00Z"),
+        pd.Timestamp("2026-01-04T00:00:00Z"),
+        pd.Timestamp(_REQUEST_AS_OF.astimezone(UTC)),
+    ]
+    assert list(structure_prices["timestamp"]) == list(signal_prices["timestamp"])
+    assert structure_service.calls[0]["kwargs"] == {
+        "as_of": _REQUEST_AS_OF.astimezone(UTC)
+    }
+    assert frame.equals(original)
+
+
+def test_workflow_fails_fast_when_no_prices_are_available_as_of() -> None:
+    frame = pd.DataFrame(
+        {
+            "symbol": ["MSFT"],
+            "timestamp": [datetime(2026, 1, 5, 0, 0, tzinfo=UTC)],
+            "open": [100.0],
+            "high": [101.0],
+            "low": [99.0],
+            "close": [100.5],
+            "volume": [1_000_000.0],
+            "provider": ["polygon"],
+        }
+    )
+    workflow = DefaultResearchWorkflow(FakeMarketDataService(frame))
+
+    with pytest.raises(DataProviderError, match="at or before"):
+        _run_workflow(workflow, _request())
 
 
 @pytest.mark.parametrize(
@@ -521,8 +597,11 @@ def test_workflow_maps_injected_price_structure_without_affecting_signals(
 
     assert len(market_data_service.calls) == 1
     assert len(structure_service.calls) == 1
-    assert structure_service.calls[0] is frame
-    assert captured["prices_frame"] is frame
+    assert structure_service.calls[0]["prices"] is not frame
+    assert structure_service.calls[0]["kwargs"] == {
+        "as_of": _REQUEST_AS_OF.astimezone(UTC)
+    }
+    assert captured["prices_frame"] is not frame
     assert [
         signal.name for signal in captured["directional_inputs"]  # type: ignore[union-attr]
     ] == [
