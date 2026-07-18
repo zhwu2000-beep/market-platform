@@ -14,6 +14,7 @@ from market_platform.strategy import (
     StrategyEvidence,
     StrategyEvidenceSource,
     StrategyProvenance,
+    StrategyRunResult,
 )
 
 _AS_OF = datetime(2026, 7, 17, tzinfo=UTC)
@@ -60,6 +61,20 @@ def _evaluation(**overrides: object) -> StrategyEvaluation:
     return StrategyEvaluation(**values)  # type: ignore[arg-type]
 
 
+def _run_result(**overrides: object) -> StrategyRunResult:
+    values: dict[str, object] = {
+        "symbol": "MSFT",
+        "interval": "1day",
+        "as_of": _AS_OF,
+        "observation_fingerprint": "sha256:observation",
+        "state_model_id": "baseline-market-state",
+        "state_model_version": "v1",
+        "evaluations": (_evaluation(),),
+    }
+    values.update(overrides)
+    return StrategyRunResult(**values)  # type: ignore[arg-type]
+
+
 def test_strategy_models_are_frozen_and_use_slots() -> None:
     evidence = _evidence()
     provenance = _provenance()
@@ -73,6 +88,96 @@ def test_strategy_models_are_frozen_and_use_slots() -> None:
         provenance.strategy_id = "replacement"  # type: ignore[misc]
     with pytest.raises(FrozenInstanceError):
         evaluation.symbol = "AAPL"  # type: ignore[misc]
+
+
+def test_strategy_run_result_is_frozen_and_uses_slots() -> None:
+    result = _run_result()
+
+    assert not hasattr(result, "__dict__")
+    with pytest.raises(FrozenInstanceError):
+        result.symbol = "AAPL"  # type: ignore[misc]
+
+
+def test_strategy_run_result_normalizes_utc_and_freezes_list_input() -> None:
+    local_time = datetime(
+        2026,
+        7,
+        17,
+        8,
+        tzinfo=timezone(timedelta(hours=8)),
+    )
+    evaluations = [_evaluation()]
+
+    result = _run_result(as_of=local_time, evaluations=evaluations)
+    evaluations.clear()
+
+    assert result.as_of == _AS_OF
+    assert result.evaluations == (_evaluation(),)
+    assert result.strategy_count == 1
+
+
+def test_strategy_run_result_allows_empty_evaluations() -> None:
+    result = _run_result(evaluations=[])
+
+    assert result.evaluations == ()
+    assert result.strategy_count == 0
+    assert result.observation_fingerprint == "sha256:observation"
+
+
+def test_strategy_run_result_rejects_invalid_evaluation() -> None:
+    with pytest.raises(TypeError, match="StrategyEvaluation"):
+        _run_result(evaluations=[object()])
+
+
+@pytest.mark.parametrize(
+    ("evaluation_override", "message"),
+    [
+        ({"symbol": "AAPL"}, "symbols must match"),
+        ({"interval": "1hour"}, "intervals must match"),
+        (
+            {
+                "as_of": _AS_OF - timedelta(seconds=1),
+                "evidence": (),
+            },
+            "as_of values must match",
+        ),
+        (
+            {"provenance": _provenance(state_model_id="other-state")},
+            "state_model_id must match",
+        ),
+        (
+            {"provenance": _provenance(state_model_version="v2")},
+            "state_model_version must match",
+        ),
+    ],
+)
+def test_strategy_run_result_rejects_evaluation_identity_mismatch(
+    evaluation_override: dict[str, object],
+    message: str,
+) -> None:
+    evaluation = _evaluation(**evaluation_override)
+
+    with pytest.raises(ValueError, match=message):
+        _run_result(evaluations=[evaluation])
+
+
+def test_strategy_run_result_rejects_fingerprint_mismatch() -> None:
+    evaluation = _evaluation(
+        provenance=_provenance(observation_fingerprint="sha256:different")
+    )
+
+    with pytest.raises(ValueError, match="fingerprint must match"):
+        _run_result(evaluations=[evaluation])
+
+
+def test_strategy_run_result_to_dict_is_json_compatible() -> None:
+    payload = _run_result().to_dict()
+
+    assert payload["symbol"] == "MSFT"
+    assert payload["as_of"] == _AS_OF.isoformat()
+    assert payload["observation_fingerprint"] == "sha256:observation"
+    assert isinstance(payload["evaluations"], list)
+    json.dumps(payload)
 
 
 def test_strategy_provenance_defensively_freezes_nested_parameters() -> None:
@@ -251,7 +356,12 @@ def test_datetime_evidence_value_serializes_as_utc_text() -> None:
 def test_strategy_domain_fields_have_no_execution_or_prediction_semantics() -> None:
     field_names = {
         field.name
-        for model_type in (StrategyEvidence, StrategyProvenance, StrategyEvaluation)
+        for model_type in (
+            StrategyEvidence,
+            StrategyProvenance,
+            StrategyEvaluation,
+            StrategyRunResult,
+        )
         for field in fields(model_type)
     }
     forbidden = {

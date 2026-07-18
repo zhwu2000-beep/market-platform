@@ -19,7 +19,14 @@ from market_platform.state import (
     TrendRegime,
     VolatilityRegime,
 )
-from market_platform.strategy import validate_strategy_inputs
+from market_platform.strategy import (
+    StrategyEvaluation,
+    StrategyEvaluationStatus,
+    StrategyProvenance,
+    StrategyRunResult,
+    validate_strategy_inputs,
+    validate_strategy_run_result,
+)
 
 _AS_OF = datetime(2026, 7, 17, tzinfo=UTC)
 
@@ -67,8 +74,97 @@ def _state(**overrides: object) -> MarketState:
     return MarketState(**values)  # type: ignore[arg-type]
 
 
+def _evaluation() -> StrategyEvaluation:
+    return StrategyEvaluation(
+        symbol="MSFT",
+        interval="1day",
+        as_of=_AS_OF,
+        provenance=StrategyProvenance(
+            strategy_id="test-strategy",
+            strategy_version="v1",
+            parameters={},
+            observation_fingerprint="sha256:observation",
+            state_model_id="baseline-market-state",
+            state_model_version="v1",
+        ),
+        status=StrategyEvaluationStatus.APPLICABLE,
+        rationale="The strategy applies.",
+    )
+
+
+def _run_result(**overrides: object) -> StrategyRunResult:
+    values: dict[str, object] = {
+        "symbol": "MSFT",
+        "interval": "1day",
+        "as_of": _AS_OF,
+        "observation_fingerprint": "sha256:observation",
+        "state_model_id": "baseline-market-state",
+        "state_model_version": "v1",
+        "evaluations": (_evaluation(),),
+    }
+    values.update(overrides)
+    return StrategyRunResult(**values)  # type: ignore[arg-type]
+
+
+class ValidationStrategy:
+    def __init__(self, strategy_id: str = "test-strategy") -> None:
+        self.strategy_id = strategy_id
+        self.strategy_version = "v1"
+
+    def evaluate(
+        self,
+        state: MarketState,
+        observation: MarketObservation,
+    ) -> StrategyEvaluation:
+        return _evaluation()
+
+
 def test_matching_strategy_inputs_pass_validation() -> None:
     validate_strategy_inputs(_state(), _observation())
+
+
+def test_valid_strategy_run_result_passes_validation() -> None:
+    validate_strategy_run_result(
+        _run_result(),
+        [ValidationStrategy()],
+        _state(),
+        _observation(),
+    )
+
+
+def test_strategy_run_result_validation_rejects_wrong_type() -> None:
+    with pytest.raises(TypeError, match="StrategyRunResult"):
+        validate_strategy_run_result(
+            object(),
+            [ValidationStrategy()],
+            _state(),
+            _observation(),
+        )
+
+
+def test_strategy_run_result_validation_rejects_strategy_mismatch() -> None:
+    with pytest.raises(ValueError, match="strategy_id must match"):
+        validate_strategy_run_result(
+            _run_result(),
+            [ValidationStrategy("other-strategy")],
+            _state(),
+            _observation(),
+        )
+
+
+def test_strategy_run_result_validation_rejects_input_fingerprint_mismatch() -> None:
+    result = _run_result(
+        observation_fingerprint="sha256:different",
+        evaluations=(),
+    )
+
+    with pytest.raises(ValueError, match="fingerprint must match observation"):
+        validate_strategy_run_result(
+            result,
+            [],
+            _state(),
+            _observation(),
+        )
 
 
 def test_symbol_mismatch_is_rejected() -> None:

@@ -87,9 +87,10 @@ class StrategyProvenance:
     strategy_id: str
     strategy_version: str
     parameters: Mapping[str, object]
-    observation_fingerprint: str | None
-    state_model_id: str
-    state_model_version: str
+    observation_fingerprint: str | None = None
+    state_model_id: str | None = None
+    state_model_version: str | None = None
+    configuration_fingerprint: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -112,19 +113,30 @@ class StrategyProvenance:
                     "observation_fingerprint",
                 ),
             )
-        object.__setattr__(
-            self,
-            "state_model_id",
-            _normalize_required_text(self.state_model_id, "state_model_id"),
-        )
-        object.__setattr__(
-            self,
-            "state_model_version",
-            _normalize_required_text(
-                self.state_model_version,
+        if self.state_model_id is not None:
+            object.__setattr__(
+                self,
+                "state_model_id",
+                _normalize_required_text(self.state_model_id, "state_model_id"),
+            )
+        if self.state_model_version is not None:
+            object.__setattr__(
+                self,
                 "state_model_version",
-            ),
-        )
+                _normalize_required_text(
+                    self.state_model_version,
+                    "state_model_version",
+                ),
+            )
+        if self.configuration_fingerprint is not None:
+            object.__setattr__(
+                self,
+                "configuration_fingerprint",
+                _normalize_required_text(
+                    self.configuration_fingerprint,
+                    "configuration_fingerprint",
+                ),
+            )
 
     def to_dict(self) -> dict[str, object]:
         """Return a JSON-compatible provenance representation."""
@@ -136,6 +148,7 @@ class StrategyProvenance:
             "observation_fingerprint": self.observation_fingerprint,
             "state_model_id": self.state_model_id,
             "state_model_version": self.state_model_version,
+            "configuration_fingerprint": self.configuration_fingerprint,
         }
 
 
@@ -223,6 +236,96 @@ class StrategyEvaluation:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class StrategyRunResult:
+    """Immutable result of evaluating strategies against one point in time."""
+
+    symbol: str
+    interval: str
+    as_of: datetime
+    observation_fingerprint: str
+    state_model_id: str
+    state_model_version: str
+    evaluations: tuple[StrategyEvaluation, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "symbol", _normalize_symbol(self.symbol))
+        object.__setattr__(
+            self,
+            "interval",
+            _normalize_required_text(self.interval, "interval"),
+        )
+        object.__setattr__(self, "as_of", _normalize_timestamp(self.as_of, "as_of"))
+        object.__setattr__(
+            self,
+            "observation_fingerprint",
+            _normalize_required_text(
+                self.observation_fingerprint,
+                "observation_fingerprint",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "state_model_id",
+            _normalize_required_text(self.state_model_id, "state_model_id"),
+        )
+        object.__setattr__(
+            self,
+            "state_model_version",
+            _normalize_required_text(
+                self.state_model_version,
+                "state_model_version",
+            ),
+        )
+        evaluations = _normalize_strategy_evaluation_tuple(self.evaluations)
+        for evaluation in evaluations:
+            if evaluation.symbol != self.symbol:
+                raise ValueError("evaluation and run result symbols must match")
+            if evaluation.interval != self.interval:
+                raise ValueError("evaluation and run result intervals must match")
+            if evaluation.as_of != self.as_of:
+                raise ValueError("evaluation and run result as_of values must match")
+            provenance = evaluation.provenance
+            if provenance.state_model_id != self.state_model_id:
+                raise ValueError(
+                    "evaluation state_model_id must match run result"
+                )
+            if provenance.state_model_version != self.state_model_version:
+                raise ValueError(
+                    "evaluation state_model_version must match run result"
+                )
+            if (
+                provenance.observation_fingerprint is not None
+                and provenance.observation_fingerprint
+                != self.observation_fingerprint
+            ):
+                raise ValueError(
+                    "evaluation fingerprint must match run result"
+                )
+        object.__setattr__(self, "evaluations", evaluations)
+
+    @property
+    def strategy_count(self) -> int:
+        """Return the number of collected strategy evaluations."""
+
+        return len(self.evaluations)
+
+    def to_dict(self) -> dict[str, object]:
+        """Return a nested JSON-compatible run result representation."""
+
+        return {
+            "symbol": self.symbol,
+            "interval": self.interval,
+            "as_of": self.as_of.isoformat(),
+            "observation_fingerprint": self.observation_fingerprint,
+            "state_model_id": self.state_model_id,
+            "state_model_version": self.state_model_version,
+            "evaluations": [
+                evaluation.to_dict() for evaluation in self.evaluations
+            ],
+        }
+
+
 def _normalize_symbol(value: object) -> str:
     return _normalize_required_text(value, "symbol").upper()
 
@@ -287,6 +390,23 @@ def _normalize_evidence_tuple(value: object) -> tuple[StrategyEvidence, ...]:
     for item in container:
         if not isinstance(item, StrategyEvidence):
             raise TypeError("evidence elements must be StrategyEvidence instances")
+    return container
+
+
+def _normalize_strategy_evaluation_tuple(
+    value: object,
+) -> tuple[StrategyEvaluation, ...]:
+    if isinstance(value, tuple):
+        container = value
+    elif isinstance(value, list):
+        container = tuple(value)
+    else:
+        raise TypeError("evaluations must be a tuple or list")
+    for item in container:
+        if not isinstance(item, StrategyEvaluation):
+            raise TypeError(
+                "evaluations elements must be StrategyEvaluation instances"
+            )
     return container
 
 
