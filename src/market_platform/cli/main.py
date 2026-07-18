@@ -8,7 +8,7 @@ import json
 import math
 import sys
 from collections.abc import Sequence
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -33,6 +33,12 @@ from market_platform.data.health import (
     render_provider_health_report,
 )
 from market_platform.logging import configure_logging, get_logger
+from market_platform.replay import (
+    HistoricalReplayResult,
+    HistoricalReplayService,
+    HistoricalReplaySummary,
+    summarize_historical_replay,
+)
 from market_platform.research import (
     DefaultResearchWorkflow,
     ResearchRequest,
@@ -47,6 +53,14 @@ from market_platform.signals.ranking import (
     SignalClassificationSort,
     sort_signal_classifications,
 )
+from market_platform.state import BaselineMarketStateModel
+from market_platform.strategy import (
+    BaselineTrendRegimeStrategy,
+    create_strategy_collection,
+)
+
+_REPLAY_DAILY_INTERVAL = "1day"
+_DEFAULT_REPLAY_MAX_BARS = 500
 
 
 class CommandHandler(Protocol):
@@ -250,6 +264,49 @@ def build_parser() -> argparse.ArgumentParser:
         help="Daily lookback window in calendar days.",
     )
     run_parser.set_defaults(handler=_handle_research_run)
+
+    replay_parser = subparsers.add_parser(
+        "replay",
+        help="Historical replay commands.",
+    )
+    replay_subparsers = replay_parser.add_subparsers(dest="replay_command")
+    replay_run_parser = replay_subparsers.add_parser(
+        "run",
+        help="Run point-in-time historical replay over daily prices.",
+        parents=[_build_output_options_parser(["table", "json", "csv"])],
+    )
+    replay_run_parser.add_argument("--symbol", required=True, help="Ticker symbol.")
+    replay_run_parser.add_argument(
+        "--start",
+        type=_parse_iso_date,
+        required=True,
+        help="Replay start date, YYYY-MM-DD, inclusive.",
+    )
+    replay_run_parser.add_argument(
+        "--end",
+        type=_parse_iso_date,
+        required=True,
+        help="Replay end date, YYYY-MM-DD, inclusive.",
+    )
+    replay_run_parser.add_argument(
+        "--provider",
+        default=None,
+        type=_normalize_provider_name_arg,
+        help="Explicit provider. Defaults to configured provider fallback order.",
+    )
+    replay_run_parser.add_argument(
+        "--view",
+        choices=["summary", "steps"],
+        default="summary",
+        help="Replay output view.",
+    )
+    replay_run_parser.add_argument(
+        "--max-bars",
+        type=_parse_positive_int,
+        default=_DEFAULT_REPLAY_MAX_BARS,
+        help="Maximum number of replay bars before refusing O(n²) replay.",
+    )
+    replay_run_parser.set_defaults(handler=_handle_replay_run)
 
     return parser
 
@@ -530,6 +587,96 @@ def _handle_research_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_replay_run(args: argparse.Namespace) -> int:
+    logger = get_logger(__name__)
+    symbol = args.symbol.strip().upper()
+    if not symbol:
+        print("error: symbol must not be empty.", file=sys.stderr)
+        return 2
+    if args.start > args.end:
+        print(
+            "error: start date must be earlier than or equal to end date.",
+            file=sys.stderr,
+        )
+        return 2
+    if args.view == "steps" and args.format != "json":
+        print(
+            "error: replay steps view only supports --format json.",
+            file=sys.stderr,
+        )
+        return 2
+
+    replay_start = _start_of_utc_day(args.start)
+    replay_end = _end_of_utc_day(args.end)
+    fetch_end = args.end + timedelta(days=1)
+    service = create_default_market_data_service()
+    try:
+        frame = asyncio.run(
+            service.get_daily_prices(
+                symbol=symbol,
+                start=args.start,
+                end=fetch_end,
+                provider=args.provider,
+            )
+        )
+        replay_frame = _filter_replay_price_window(
+            frame,
+            start=replay_start,
+            end=replay_end,
+        )
+        if len(replay_frame) > args.max_bars:
+            print(
+                "error: replay would process "
+                f"{len(replay_frame)} bars, exceeding --max-bars {args.max_bars}.",
+                file=sys.stderr,
+            )
+            return 2
+        replay_result = HistoricalReplayService().run(
+            replay_frame,
+            symbol=symbol,
+            interval=_REPLAY_DAILY_INTERVAL,
+            strategies=create_strategy_collection([BaselineTrendRegimeStrategy()]),
+            state_model=BaselineMarketStateModel(),
+            start=replay_start,
+            end=replay_end,
+        )
+    except ConfigurationError as exc:
+        logger.error("Failed to run historical replay: %s", exc)
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except DataProviderError as exc:
+        logger.error("Failed to run historical replay: %s", exc)
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        logger.error("Failed to run historical replay: %s", exc)
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    summary = summarize_historical_replay(replay_result)
+    rendered_output = _render_replay_output(
+        replay_result=replay_result,
+        summary=summary,
+        view=args.view,
+        output_format=args.format,
+    )
+    if args.output is not None:
+        try:
+            _write_output(Path(args.output), rendered_output)
+        except OSError as exc:
+            logger.error("Failed to write replay output: %s", exc)
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(
+            f"Wrote replay {args.view} to {args.output} as {args.format}.",
+            file=sys.stderr,
+        )
+        return 0
+
+    print(rendered_output, end="" if rendered_output.endswith("\n") else "\n")
+    return 0
+
+
 def _render_signal_classifications(
     snapshot: SignalClassificationSnapshot,
     output_format: str,
@@ -636,6 +783,75 @@ def _render_research_result_json(result: ResearchResult) -> str:
     return json.dumps(result.to_dict(), ensure_ascii=False) + "\n"
 
 
+def _render_replay_output(
+    *,
+    replay_result: HistoricalReplayResult,
+    summary: HistoricalReplaySummary,
+    view: str,
+    output_format: str,
+) -> str:
+    if view == "summary":
+        return _render_replay_summary(summary, output_format)
+    if view == "steps" and output_format == "json":
+        return json.dumps(replay_result.to_dict(), ensure_ascii=False) + "\n"
+    raise ValueError(f"Unsupported replay view/format: {view}/{output_format}")
+
+
+def _render_replay_summary(
+    summary: HistoricalReplaySummary,
+    output_format: str,
+) -> str:
+    if output_format == "table":
+        return _render_replay_summary_table(summary)
+    if output_format == "json":
+        return json.dumps(summary.to_dict(), ensure_ascii=False) + "\n"
+    if output_format == "csv":
+        return _render_replay_summary_csv(summary)
+    raise ValueError(f"Unsupported output format: {output_format}")
+
+
+def _render_replay_summary_table(summary: HistoricalReplaySummary) -> str:
+    frame = pd.DataFrame(_replay_summary_rows(summary))
+    if frame.empty:
+        return "No replay strategies returned.\n"
+    return f"{frame.to_string(index=False)}\n"
+
+
+def _render_replay_summary_csv(summary: HistoricalReplaySummary) -> str:
+    frame = pd.DataFrame(_replay_summary_rows(summary))
+    return frame.to_csv(index=False)
+
+
+def _replay_summary_rows(summary: HistoricalReplaySummary) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for strategy in summary.strategies:
+        rows.append(
+            {
+                "symbol": summary.symbol,
+                "interval": summary.interval,
+                "start_as_of": _format_datetime_for_table(summary.start_as_of),
+                "end_as_of": _format_datetime_for_table(summary.end_as_of),
+                "step_count": summary.step_count,
+                "strategy_id": strategy.strategy.strategy_id,
+                "strategy_version": strategy.strategy.strategy_version,
+                "configuration_fingerprint": _placeholder_if_none(
+                    strategy.strategy.configuration_fingerprint
+                ),
+                "applicable_count": strategy.applicable_count,
+                "not_applicable_count": strategy.not_applicable_count,
+                "insufficient_data_count": strategy.insufficient_data_count,
+                "first_applicable_as_of": _format_datetime_for_table(
+                    strategy.first_applicable_as_of
+                ),
+                "last_applicable_as_of": _format_datetime_for_table(
+                    strategy.last_applicable_as_of
+                ),
+                "status_transition_count": strategy.status_transition_count,
+            }
+        )
+    return rows
+
+
 def _render_provider_diagnostics_report(
     report: ProviderDiagnosticsReport,
     output_format: str,
@@ -704,6 +920,36 @@ def _render_csv(frame: pd.DataFrame) -> str:
     return serializable_frame.to_csv(index=False)
 
 
+def _filter_replay_price_window(
+    frame: pd.DataFrame,
+    *,
+    start: datetime,
+    end: datetime,
+) -> pd.DataFrame:
+    if not isinstance(frame, pd.DataFrame):
+        raise ValueError("daily price service must return a pandas DataFrame")
+    if "timestamp" not in frame.columns:
+        raise ValueError("daily price data missing timestamp column")
+    filtered = frame.copy(deep=True)
+    timestamps: list[pd.Timestamp] = []
+    for value in filtered["timestamp"]:
+        timestamp = pd.Timestamp(value)
+        if pd.isna(timestamp):
+            raise ValueError("daily price timestamp must not be missing")
+        if timestamp.tzinfo is None:
+            raise ValueError("daily price timestamp must be timezone-aware")
+        timestamps.append(timestamp.tz_convert(UTC))
+    filtered["timestamp"] = pd.Series(
+        timestamps,
+        index=filtered.index,
+        dtype="datetime64[ns, UTC]",
+    )
+    mask = (filtered["timestamp"] >= pd.Timestamp(start)) & (
+        filtered["timestamp"] <= pd.Timestamp(end)
+    )
+    return filtered.loc[mask].copy(deep=True).reset_index(drop=True)
+
+
 def _write_output(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
@@ -734,6 +980,23 @@ def _parse_positive_int(value: str) -> int:
             f"invalid integer value {value!r}; expected a positive integer"
         )
     return parsed
+
+
+def _start_of_utc_day(value: date) -> datetime:
+    return datetime(value.year, value.month, value.day, tzinfo=UTC)
+
+
+def _end_of_utc_day(value: date) -> datetime:
+    return datetime(
+        value.year,
+        value.month,
+        value.day,
+        23,
+        59,
+        59,
+        999999,
+        tzinfo=UTC,
+    )
 
 
 def _as_of_datetime(value: date | None) -> datetime | None:
