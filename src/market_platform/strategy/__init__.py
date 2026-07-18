@@ -1,6 +1,9 @@
 """Strategy evaluation domain and replaceable protocol."""
 
 from market_platform.strategy.baseline_trend import BaselineTrendRegimeStrategy
+from market_platform.strategy.baseline_volatility import (
+    BaselineVolatilityRegimeStrategy,
+)
 from market_platform.strategy.collection import (
     StrategyCollection,
     create_strategy_collection,
@@ -29,6 +32,7 @@ from market_platform.strategy.validation import (
 )
 
 __all__ = [
+    "BaselineVolatilityRegimeStrategy",
     "BaselineTrendRegimeStrategy",
     "Strategy",
     "StrategyCollection",
