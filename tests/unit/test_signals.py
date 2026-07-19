@@ -13,7 +13,10 @@ from market_platform.signals.calculators import (
     calculate_realized_volatility,
     calculate_trend,
 )
-from market_platform.signals.service import calculate_market_signals
+from market_platform.signals.service import (
+    calculate_market_signals,
+    precompute_market_signal_snapshots,
+)
 
 
 def _price_frame(
@@ -201,6 +204,25 @@ def test_calculate_realized_volatility_rejects_non_positive_close_values() -> No
         calculate_realized_volatility(frame)
 
 
+def test_precompute_rejects_non_positive_close_when_volatility_is_available() -> None:
+    frame = _price_frame(rows=60)
+    frame.loc[10, "close"] = 0.0
+
+    with pytest.raises(ValueError, match="must be positive"):
+        precompute_market_signal_snapshots(frame)
+
+
+def test_precompute_keeps_warmup_none_for_short_non_positive_close_frame() -> None:
+    frame = _price_frame(rows=20)
+    frame.loc[10, "close"] = 0.0
+
+    snapshot = precompute_market_signal_snapshots(frame)[-1]
+
+    assert {signal.name: signal.value for signal in snapshot.signals}[
+        "realized_volatility"
+    ] is None
+
+
 def test_market_signal_snapshot_contents_and_order_are_stable() -> None:
     frame = _price_frame(rows=60)
 
@@ -226,3 +248,52 @@ def test_market_signal_snapshot_contents_and_order_are_stable() -> None:
         "reference": "highest_close_to_latest_timestamp"
     }
     assert snapshot.signals[4].parameters == {"window": 20}
+
+
+@pytest.mark.parametrize("bar_count", [50, 100, 300, 500])
+def test_precomputed_market_signal_snapshots_match_prefix_reference(
+    bar_count: int,
+) -> None:
+    frame = _price_frame(rows=bar_count)
+
+    snapshots = precompute_market_signal_snapshots(frame)
+
+    assert len(snapshots) == bar_count
+    for position in range(bar_count):
+        reference = calculate_market_signals(frame.iloc[: position + 1])
+        assert snapshots[position] == reference
+
+
+@pytest.mark.parametrize("bar_count", [20, 21, 49, 50])
+def test_precomputed_market_signal_snapshots_match_warmup_boundaries(
+    bar_count: int,
+) -> None:
+    frame = _price_frame(rows=bar_count)
+
+    snapshot = precompute_market_signal_snapshots(frame)[-1]
+    reference = calculate_market_signals(frame)
+
+    assert snapshot == reference
+
+
+def test_precomputed_market_signal_snapshots_ignore_future_data_for_prior_positions(
+) -> None:
+    historical = _price_frame(rows=60)
+    future = _price_frame(rows=80)
+
+    historical_snapshots = precompute_market_signal_snapshots(historical)
+    future_snapshots = precompute_market_signal_snapshots(future)
+
+    assert future_snapshots[: len(historical_snapshots)] == historical_snapshots
+
+
+def test_precompute_sorts_unsorted_input_without_mutating_source() -> None:
+    frame = _price_frame(rows=80)
+    unsorted = frame.sample(frac=1.0, random_state=11).reset_index(drop=True)
+    before = unsorted.copy(deep=True)
+
+    snapshots = precompute_market_signal_snapshots(unsorted)
+    reference = precompute_market_signal_snapshots(frame)
+
+    pd.testing.assert_frame_equal(unsorted, before)
+    assert snapshots == reference

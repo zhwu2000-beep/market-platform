@@ -8,6 +8,8 @@ import pandas as pd
 import pytest
 from pandas.testing import assert_frame_equal
 
+import market_platform.replay.service as replay_service
+import market_platform.signals.service as signal_service
 from market_platform.replay import HistoricalReplayResult, HistoricalReplayService
 from market_platform.state import (
     BaselineMarketStateModel,
@@ -370,3 +372,147 @@ def test_fast_structure_path_preserves_replay_future_data_invariance() -> None:
     ).steps[0]
 
     assert future_step.to_dict() == historical_step.to_dict()
+
+
+def _prefix_reference_signal_snapshots(
+    prices: pd.DataFrame,
+) -> tuple[signal_service.MarketSignalSnapshot, ...]:
+    return tuple(
+        signal_service.calculate_market_signals(prices.iloc[: position + 1])
+        for position in range(len(prices))
+    )
+
+
+def test_signal_precompute_replay_preserves_prefix_reference_result_dict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prices = _prices(100)
+    strategies = _two_baseline_strategies()
+    optimized = HistoricalReplayService().run(
+        prices,
+        symbol="MSFT",
+        interval="1day",
+        strategies=strategies,
+        state_model=BaselineMarketStateModel(),
+    )
+    monkeypatch.setattr(
+        replay_service,
+        "precompute_market_signal_snapshots",
+        _prefix_reference_signal_snapshots,
+    )
+
+    reference = HistoricalReplayService().run(
+        prices,
+        symbol="MSFT",
+        interval="1day",
+        strategies=strategies,
+        state_model=BaselineMarketStateModel(),
+    )
+
+    assert optimized.to_dict() == reference.to_dict()
+
+
+def test_signal_precompute_replay_uses_full_frame_positions_for_start_end(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prices = _prices(120)
+    start = _START + timedelta(days=100)
+    end = _START + timedelta(days=102)
+    full_result = HistoricalReplayService().run(
+        prices,
+        symbol="MSFT",
+        interval="1day",
+        strategies=_two_baseline_strategies(),
+        state_model=BaselineMarketStateModel(),
+    )
+    observed_lengths: list[int] = []
+    real_precompute = replay_service.precompute_market_signal_snapshots
+
+    def recording_precompute(
+        frame: pd.DataFrame,
+    ) -> tuple[signal_service.MarketSignalSnapshot, ...]:
+        observed_lengths.append(len(frame))
+        return real_precompute(frame)
+
+    monkeypatch.setattr(
+        replay_service,
+        "precompute_market_signal_snapshots",
+        recording_precompute,
+    )
+
+    result = HistoricalReplayService().run(
+        prices,
+        symbol="MSFT",
+        interval="1day",
+        strategies=_two_baseline_strategies(),
+        state_model=BaselineMarketStateModel(),
+        start=start,
+        end=end,
+    )
+    assert observed_lengths == [120]
+    assert result.to_dict()["steps"] == full_result.to_dict()["steps"][100:103]
+
+
+def test_replay_calls_signal_precompute_once_and_not_public_prefix_calculator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+    real_precompute = replay_service.precompute_market_signal_snapshots
+
+    def counting_precompute(
+        frame: pd.DataFrame,
+    ) -> tuple[signal_service.MarketSignalSnapshot, ...]:
+        nonlocal calls
+        calls += 1
+        return real_precompute(frame)
+
+    def exploding_calculate(
+        prices: pd.DataFrame,
+    ) -> signal_service.MarketSignalSnapshot:
+        raise AssertionError("calculate_market_signals must not run per replay step")
+
+    monkeypatch.setattr(
+        replay_service,
+        "precompute_market_signal_snapshots",
+        counting_precompute,
+    )
+    monkeypatch.setattr(signal_service, "calculate_market_signals", exploding_calculate)
+
+    result = HistoricalReplayService().run(
+        _prices(20),
+        symbol="MSFT",
+        interval="1day",
+        strategies=_two_baseline_strategies(),
+        state_model=BaselineMarketStateModel(),
+    )
+
+    assert calls == 1
+    assert result.step_count == 20
+
+
+def test_signal_precompute_replay_preserves_strategy_and_empty_collection_shapes(
+) -> None:
+    strategies = _two_baseline_strategies()
+    result = HistoricalReplayService().run(
+        _prices(30),
+        symbol="MSFT",
+        interval="1day",
+        strategies=strategies,
+        state_model=BaselineMarketStateModel(),
+    )
+    empty = HistoricalReplayService().run(
+        _prices(30),
+        symbol="MSFT",
+        interval="1day",
+        strategies=create_strategy_collection([]),
+        state_model=BaselineMarketStateModel(),
+    )
+
+    assert [strategy.strategy_id for strategy in result.strategies] == [
+        strategy.strategy_id for strategy in strategies.strategies
+    ]
+    assert result.step_count == 30
+    assert all(len(step.strategy_result.evaluations) == 2 for step in result.steps)
+    assert empty.step_count == 30
+    assert empty.strategies == ()
+    assert all(step.strategy_result.evaluations == () for step in empty.steps)

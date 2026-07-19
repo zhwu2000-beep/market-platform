@@ -13,7 +13,7 @@ from market_platform.replay.models import (
     HistoricalReplayStep,
     ReplayStrategyIdentity,
 )
-from market_platform.signals import calculate_market_signals
+from market_platform.signals.service import precompute_market_signal_snapshots
 from market_platform.state.models import MarketState
 from market_platform.state.protocol import MarketStateModel
 from market_platform.strategy.collection import StrategyCollection
@@ -89,12 +89,13 @@ class HistoricalReplayService:
         if not replay_positions:
             raise ValueError("no replay timestamps found in requested range")
 
+        signal_snapshots = precompute_market_signal_snapshots(normalized)
         strategy_identities = _strategy_identities(strategies)
         steps: list[HistoricalReplayStep] = []
         for position in replay_positions:
             prefix = normalized.iloc[: position + 1].copy(deep=True)
             as_of = _to_datetime(normalized.iloc[position]["timestamp"])
-            signal_snapshot = calculate_market_signals(prefix)
+            signal_snapshot = signal_snapshots[position]
             structure_snapshot = self._price_structure_service.analyze(
                 prefix, as_of=as_of
             )
