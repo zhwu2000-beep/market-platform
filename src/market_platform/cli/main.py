@@ -56,6 +56,8 @@ from market_platform.signals.ranking import (
 from market_platform.state import BaselineMarketStateModel
 from market_platform.strategy import (
     BaselineTrendRegimeStrategy,
+    BaselineVolatilityRegimeStrategy,
+    StrategyCollection,
     create_strategy_collection,
 )
 
@@ -635,7 +637,7 @@ def _handle_replay_run(args: argparse.Namespace) -> int:
             replay_frame,
             symbol=symbol,
             interval=_REPLAY_DAILY_INTERVAL,
-            strategies=create_strategy_collection([BaselineTrendRegimeStrategy()]),
+            strategies=_default_replay_strategy_collection(),
             state_model=BaselineMarketStateModel(),
             start=replay_start,
             end=replay_end,
@@ -675,6 +677,15 @@ def _handle_replay_run(args: argparse.Namespace) -> int:
 
     print(rendered_output, end="" if rendered_output.endswith("\n") else "\n")
     return 0
+
+
+def _default_replay_strategy_collection() -> StrategyCollection:
+    return create_strategy_collection(
+        (
+            BaselineTrendRegimeStrategy(),
+            BaselineVolatilityRegimeStrategy(),
+        )
+    )
 
 
 def _render_signal_classifications(

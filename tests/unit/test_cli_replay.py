@@ -52,12 +52,39 @@ class _ContractFailingReplayService:
         raise ValueError("replay contract violation")
 
 
+_EXPECTED_REPLAY_STRATEGY_IDS = (
+    "baseline_trend_regime",
+    "baseline_volatility_regime",
+)
+
+
 def _prices(count: int = 5) -> pd.DataFrame:
     start = datetime(2026, 1, 1, tzinfo=UTC)
     rows = []
     for index in range(count):
         timestamp = start + timedelta(days=index)
         close = 100.0 + index
+        rows.append(
+            {
+                "symbol": "MSFT",
+                "timestamp": pd.Timestamp(timestamp),
+                "open": close,
+                "high": close + 1.0,
+                "low": close - 1.0,
+                "close": close,
+                "volume": 1_000_000.0,
+                "provider": "polygon",
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _falling_low_volatility_prices(count: int = 60) -> pd.DataFrame:
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    rows = []
+    for index in range(count):
+        timestamp = start + timedelta(days=index)
+        close = 100.0 - (index * 0.1)
         rows.append(
             {
                 "symbol": "MSFT",
@@ -108,6 +135,23 @@ def _install_service(
     )
 
 
+def _summary_strategy_ids(payload: dict[str, object]) -> tuple[str, ...]:
+    return tuple(
+        strategy["strategy"]["strategy_id"] for strategy in payload["strategies"]
+    )
+
+
+def _result_strategy_ids(payload: dict[str, object]) -> tuple[str, ...]:
+    return tuple(strategy["strategy_id"] for strategy in payload["strategies"])
+
+
+def _evaluation_strategy_ids(step: dict[str, object]) -> tuple[str, ...]:
+    return tuple(
+        evaluation["provenance"]["strategy_id"]
+        for evaluation in step["strategy_result"]["evaluations"]
+    )
+
+
 def test_parser_registers_replay_run() -> None:
     parser = cli_main.build_parser()
 
@@ -128,6 +172,38 @@ def test_parser_registers_replay_run() -> None:
     assert args.replay_command == "run"
     assert args.view == "summary"
     assert args.format == "table"
+
+
+def test_replay_parser_does_not_register_strategy_argument(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        cli_main.run(
+            [
+                "replay",
+                "run",
+                "--symbol",
+                "MSFT",
+                "--start",
+                "2026-01-01",
+                "--end",
+                "2026-01-02",
+                "--strategy",
+                "baseline_trend_regime",
+            ]
+        )
+
+    captured = capsys.readouterr()
+
+    assert excinfo.value.code == 2
+    assert "--strategy" in captured.err
+
+
+def test_default_replay_strategy_collection_contains_ordered_baselines() -> None:
+    collection = cli_main._default_replay_strategy_collection()
+
+    assert collection.strategy_count == 2
+    assert collection.strategy_ids == _EXPECTED_REPLAY_STRATEGY_IDS
 
 
 def test_replay_run_requires_arguments(capsys: pytest.CaptureFixture[str]) -> None:
@@ -307,11 +383,11 @@ def test_replay_includes_user_end_date_when_provider_end_is_exclusive(
     assert payload["step_count"] == 3
 
 
-def test_replay_summary_table_output(
+def test_replay_summary_table_output_has_two_ordered_strategy_rows(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    service = _FakeDailyService(_prices(2), [])
+    service = _FakeDailyService(_falling_low_volatility_prices(), [])
     _install_service(monkeypatch, service)
 
     exit_code = cli_main.run(
@@ -323,15 +399,24 @@ def test_replay_summary_table_output(
             "--start",
             "2026-01-01",
             "--end",
-            "2026-01-02",
+            "2026-03-01",
         ]
     )
     captured = capsys.readouterr()
+    strategy_lines = [
+        line for line in captured.out.splitlines() if "baseline_" in line
+    ]
 
     assert exit_code == 0
-    assert "baseline_trend_regime" in captured.out
     assert "insufficient_data_count" in captured.out
-    assert "MSFT" in captured.out
+    assert len(strategy_lines) == 2
+    assert [line.split()[5] for line in strategy_lines] == list(
+        _EXPECTED_REPLAY_STRATEGY_IDS
+    )
+    trend_counts = strategy_lines[0].split()[8:11]
+    volatility_counts = strategy_lines[1].split()[8:11]
+    assert trend_counts == ["0", "11", "49"]
+    assert volatility_counts == ["40", "0", "20"]
 
 
 def test_replay_summary_json_stdout_is_pure(
@@ -361,7 +446,13 @@ def test_replay_summary_json_stdout_is_pure(
     assert exit_code == 0
     assert captured.err == ""
     assert payload["symbol"] == "MSFT"
-    assert payload["strategies"][0]["insufficient_data_count"] == 2
+    assert _summary_strategy_ids(payload) == _EXPECTED_REPLAY_STRATEGY_IDS
+    assert len(payload["strategies"]) == 2
+    for strategy in payload["strategies"]:
+        assert strategy["strategy"]["configuration_fingerprint"].startswith(
+            "sha256:"
+        )
+        assert strategy["insufficient_data_count"] == 2
 
 
 def test_replay_summary_csv_file_output_has_fixed_columns(
@@ -401,7 +492,13 @@ def test_replay_summary_csv_file_output_has_fixed_columns(
         "not_applicable_count,insufficient_data_count,first_applicable_as_of,"
         "last_applicable_as_of,status_transition_count"
     )
+    rows = [row for row in content.splitlines() if row]
+    assert len(rows) == 3
+    assert [row.split(",")[5] for row in rows[1:]] == list(
+        _EXPECTED_REPLAY_STRATEGY_IDS
+    )
     assert "baseline_trend_regime" in content
+    assert "baseline_volatility_regime" in content
     assert "StrategyReplaySummary" not in content
 
 
@@ -439,8 +536,11 @@ def test_replay_steps_json_file_output_and_parent_creation(
     assert captured.out == ""
     assert "Wrote replay steps" in captured.err
     assert output_path.parent.exists()
+    assert _result_strategy_ids(payload) == _EXPECTED_REPLAY_STRATEGY_IDS
     assert len(payload["steps"]) == 2
-    assert payload["steps"][0]["strategy_result"]["evaluations"]
+    for step in payload["steps"]:
+        assert len(step["strategy_result"]["evaluations"]) == 2
+        assert _evaluation_strategy_ids(step) == _EXPECTED_REPLAY_STRATEGY_IDS
 
 
 def test_replay_max_bars_rejects_before_replay_execution(
@@ -495,8 +595,48 @@ def test_replay_warmup_insufficient_data_returns_success(
     payload = json.loads(capsys.readouterr().out)
 
     assert exit_code == 0
-    assert payload["strategies"][0]["insufficient_data_count"] == 1
+    assert _summary_strategy_ids(payload) == _EXPECTED_REPLAY_STRATEGY_IDS
+    for strategy in payload["strategies"]:
+        assert strategy["insufficient_data_count"] == 1
 
+
+def test_replay_keeps_mixed_strategy_statuses_independent(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    service = _FakeDailyService(_falling_low_volatility_prices(), [])
+    _install_service(monkeypatch, service)
+
+    exit_code = cli_main.run(
+        [
+            "replay",
+            "run",
+            "--symbol",
+            "MSFT",
+            "--start",
+            "2026-01-01",
+            "--end",
+            "2026-03-01",
+            "--view",
+            "steps",
+            "--format",
+            "json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert _result_strategy_ids(payload) == _EXPECTED_REPLAY_STRATEGY_IDS
+    mixed_step = next(
+        step
+        for step in payload["steps"]
+        if [
+            evaluation["status"]
+            for evaluation in step["strategy_result"]["evaluations"]
+        ]
+        == ["not_applicable", "applicable"]
+    )
+    assert _evaluation_strategy_ids(mixed_step) == _EXPECTED_REPLAY_STRATEGY_IDS
 
 def test_replay_provider_failure_returns_1(
     monkeypatch: pytest.MonkeyPatch,
@@ -642,7 +782,17 @@ def test_replay_outputs_have_no_trading_or_performance_terms(
     output = capsys.readouterr().out.lower()
 
     assert exit_code == 0
-    for forbidden in ("buy", "sell", "hold", "p&l", "sharpe", "drawdown"):
+    for forbidden in (
+        "buy",
+        "sell",
+        "hold",
+        "ranking",
+        "recommendation",
+        "score",
+        "p&l",
+        "sharpe",
+        "drawdown",
+    ):
         assert forbidden not in output
     assert "performance" not in output
 
@@ -676,5 +826,8 @@ def test_replay_real_sys_argv_path(
 
     captured = capsys.readouterr()
 
+    payload = json.loads(captured.out)
+
     assert excinfo.value.code == 0
-    assert json.loads(captured.out)["symbol"] == "MSFT"
+    assert payload["symbol"] == "MSFT"
+    assert _summary_strategy_ids(payload) == _EXPECTED_REPLAY_STRATEGY_IDS
