@@ -93,7 +93,7 @@ class HistoricalReplayService:
         strategy_identities = _strategy_identities(strategies)
         steps: list[HistoricalReplayStep] = []
         for position in replay_positions:
-            prefix = normalized.iloc[: position + 1].copy(deep=True)
+            prefix = _copy_replay_prefix(normalized, position)
             as_of = _to_datetime(normalized.iloc[position]["timestamp"])
             signal_snapshot = signal_snapshots[position]
             structure_snapshot = self._price_structure_service.analyze(
@@ -137,6 +137,10 @@ class HistoricalReplayService:
             state_model_version=state_model.model_version,
             strategies=strategy_identities,
         )
+
+
+def _copy_replay_prefix(prices: pd.DataFrame, position: int) -> pd.DataFrame:
+    return prices.iloc[: position + 1].copy(deep=True)
 
 
 def _normalize_replay_prices(prices: pd.DataFrame, symbol: str) -> pd.DataFrame:
