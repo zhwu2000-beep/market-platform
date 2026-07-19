@@ -20,12 +20,20 @@ from market_platform.structure.models import (
     PriceZoneObservation,
 )
 from market_platform.structure.pivots import (
+    _detect_swing_highs_normalized,
+    _detect_swing_lows_normalized,
     detect_swing_highs,
     detect_swing_lows,
     filter_confirmed_pivots,
 )
-from market_platform.structure.touches import observe_price_zone
-from market_platform.structure.volatility import calculate_atr
+from market_platform.structure.touches import (
+    _observe_price_zone_normalized,
+    observe_price_zone,
+)
+from market_platform.structure.volatility import (
+    _calculate_atr_normalized,
+    calculate_atr,
+)
 
 PivotDetector = Callable[..., tuple[PriceLevelCandidate, ...]]
 AtrCalculator = Callable[..., float | None]
@@ -101,11 +109,13 @@ class PriceStructureService:
         candidates = filter_confirmed_pivots(
             _sort_candidates(
                 (
-                    *self._swing_high_detector(
+                    *_detect_swing_highs(
+                        self._swing_high_detector,
                         normalized,
                         window=normalized_config.pivot_window,
                     ),
-                    *self._swing_low_detector(
+                    *_detect_swing_lows(
+                        self._swing_low_detector,
                         normalized,
                         window=normalized_config.pivot_window,
                     ),
@@ -120,7 +130,8 @@ class PriceStructureService:
                 current_price=resolved_current_price,
             )
 
-        raw_atr = self._atr_calculator(
+        raw_atr = _calculate_atr(
+            self._atr_calculator,
             normalized,
             period=normalized_config.atr_period,
         )
@@ -142,7 +153,11 @@ class PriceStructureService:
         observed_zones = tuple(
             ObservedPriceZone(
                 zone=zone,
-                observation=self._zone_observer(normalized, zone),
+                observation=_observe_zone(
+                    self._zone_observer,
+                    normalized,
+                    zone,
+                ),
             )
             for zone in zones
         )
@@ -156,6 +171,48 @@ class PriceStructureService:
             observed_zones=observed_zones,
         )
 
+
+def _detect_swing_highs(
+    detector: PivotDetector,
+    prices: pd.DataFrame,
+    *,
+    window: int,
+) -> tuple[PriceLevelCandidate, ...]:
+    if detector is detect_swing_highs:
+        return _detect_swing_highs_normalized(prices, window=window)
+    return detector(prices, window=window)
+
+
+def _detect_swing_lows(
+    detector: PivotDetector,
+    prices: pd.DataFrame,
+    *,
+    window: int,
+) -> tuple[PriceLevelCandidate, ...]:
+    if detector is detect_swing_lows:
+        return _detect_swing_lows_normalized(prices, window=window)
+    return detector(prices, window=window)
+
+
+def _calculate_atr(
+    calculator: AtrCalculator,
+    prices: pd.DataFrame,
+    *,
+    period: int,
+) -> float | None:
+    if calculator is calculate_atr:
+        return _calculate_atr_normalized(prices, period=period)
+    return calculator(prices, period=period)
+
+
+def _observe_zone(
+    observer: ZoneObserver,
+    prices: pd.DataFrame,
+    zone: PriceZone,
+) -> PriceZoneObservation:
+    if observer is observe_price_zone:
+        return _observe_price_zone_normalized(prices, zone)
+    return observer(prices, zone)
 
 def _normalize_price_frame(prices: pd.DataFrame) -> pd.DataFrame:
     if not isinstance(prices, pd.DataFrame):

@@ -26,6 +26,15 @@ def observe_price_zone(
 
     normalized_zone = _require_price_zone(zone)
     normalized = _normalize_price_frame(prices)
+    return _observe_price_zone_normalized(normalized, normalized_zone)
+
+
+def _observe_price_zone_normalized(
+    prices: pd.DataFrame,
+    zone: PriceZone,
+) -> PriceZoneObservation:
+    normalized_zone = _require_price_zone(zone)
+    normalized = prices
     if normalized.empty:
         return PriceZoneObservation(0, None, None)
 

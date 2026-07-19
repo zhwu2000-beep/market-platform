@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 import pandas as pd
 import pytest
 
+import market_platform.structure.touches as touches_module
 from market_platform.structure import (
     PriceLevelCandidate,
     PriceLevelKind,
@@ -281,3 +282,71 @@ def test_observe_price_zone_rejects_high_below_low() -> None:
 
     with pytest.raises(ValueError, match="high must be greater than or equal to low"):
         observe_price_zone(prices, _zone())
+
+def test_private_normalized_touch_path_matches_public_path() -> None:
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    prices = _frame(
+        (start, 98.5, 97.5),
+        (start + timedelta(days=1), 99.0, 98.5),
+        (start + timedelta(days=2), 101.0, 100.5),
+        (start + timedelta(days=3), 102.0, 101.5),
+        (start + timedelta(days=4), 100.5, 99.5),
+    )
+    zone = _zone()
+    normalized = touches_module._normalize_price_frame(prices)
+
+    assert touches_module._observe_price_zone_normalized(
+        normalized,
+        zone,
+    ) == observe_price_zone(prices, zone)
+
+
+@pytest.mark.parametrize(
+    "zone",
+    [
+        _zone(),
+        PriceZone(
+            lower_bound=97.0,
+            upper_bound=98.0,
+            midpoint=97.5,
+            candidates=(
+                PriceLevelCandidate(
+                    price=97.5,
+                    kind=PriceLevelKind.SWING_LOW,
+                    observed_at=datetime(2026, 1, 1, tzinfo=UTC),
+                ),
+            ),
+            source_methods=("swing_pivot",),
+        ),
+        PriceZone(
+            lower_bound=110.0,
+            upper_bound=111.0,
+            midpoint=110.5,
+            candidates=(
+                PriceLevelCandidate(
+                    price=110.5,
+                    kind=PriceLevelKind.SWING_HIGH,
+                    observed_at=datetime(2026, 1, 1, tzinfo=UTC),
+                ),
+            ),
+            source_methods=("swing_pivot",),
+        ),
+    ],
+)
+def test_private_normalized_touch_path_handles_multiple_touch_shapes(
+    zone: PriceZone,
+) -> None:
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    prices = _frame(
+        (start, 97.5, 96.5),
+        (start + timedelta(days=1), 100.0, 99.0),
+        (start + timedelta(days=2), 100.5, 99.5),
+        (start + timedelta(days=3), 102.5, 101.5),
+        (start + timedelta(days=4), 99.0, 98.0),
+    )
+    normalized = touches_module._normalize_price_frame(prices)
+
+    assert touches_module._observe_price_zone_normalized(
+        normalized,
+        zone,
+    ) == observe_price_zone(prices, zone)

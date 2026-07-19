@@ -21,18 +21,25 @@ def calculate_atr(
     price regions. It is not a trading signal.
     """
 
-    normalized_period = _require_positive_int(period, "period")
     normalized = _normalize_price_frame(prices)
-    if len(normalized) < normalized_period:
+    return _calculate_atr_normalized(normalized, period=period)
+
+
+def _calculate_atr_normalized(
+    prices: pd.DataFrame,
+    *,
+    period: int,
+) -> float | None:
+    normalized_period = _require_positive_int(period, "period")
+    if len(prices) < normalized_period:
         return None
 
     true_ranges = _calculate_true_ranges(
-        normalized["high"].tolist(),
-        normalized["low"].tolist(),
-        normalized["close"].tolist(),
+        prices["high"].tolist(),
+        prices["low"].tolist(),
+        prices["close"].tolist(),
     )
     return float(pd.Series(true_ranges).rolling(normalized_period).mean().iloc[-1])
-
 
 def _calculate_true_ranges(
     highs: Sequence[float],

@@ -53,6 +53,35 @@ def detect_swing_lows(
     )
 
 
+def _detect_swing_highs_normalized(
+    prices: pd.DataFrame,
+    *,
+    window: int,
+) -> tuple[PriceLevelCandidate, ...]:
+    normalized_window = _require_positive_int(window, "window")
+    if len(prices) < 2 * normalized_window + 1:
+        return ()
+    return _detect_swing_candidates(
+        prices,
+        window=normalized_window,
+        kind=PriceLevelKind.SWING_HIGH,
+    )
+
+
+def _detect_swing_lows_normalized(
+    prices: pd.DataFrame,
+    *,
+    window: int,
+) -> tuple[PriceLevelCandidate, ...]:
+    normalized_window = _require_positive_int(window, "window")
+    if len(prices) < 2 * normalized_window + 1:
+        return ()
+    return _detect_swing_candidates(
+        prices,
+        window=normalized_window,
+        kind=PriceLevelKind.SWING_LOW,
+    )
+
 def filter_confirmed_pivots(
     pivots: Sequence[PriceLevelCandidate],
     as_of: datetime,

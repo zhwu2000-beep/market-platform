@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import ast
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pandas as pd
 import pytest
 
+import market_platform.structure.service as service_module
+import market_platform.structure.touches as touches_module
 from market_platform.structure import (
     ObservedPriceZone,
     PriceLevelCandidate,
@@ -13,7 +17,11 @@ from market_platform.structure import (
     PriceStructureService,
     PriceStructureStatus,
     PriceZoneObservation,
+    calculate_atr,
     create_price_zone,
+    detect_swing_highs,
+    detect_swing_lows,
+    observe_price_zone,
 )
 
 
@@ -421,3 +429,125 @@ def test_analyze_rejects_invalid_current_price(current_price: object) -> None:
             config=_stage_four_config(),
             current_price=current_price,  # type: ignore[arg-type]
         )
+
+def _reference_public_service() -> PriceStructureService:
+    return PriceStructureService(
+        swing_high_detector=lambda prices, *, window: detect_swing_highs(
+            prices,
+            window=window,
+        ),
+        swing_low_detector=lambda prices, *, window: detect_swing_lows(
+            prices,
+            window=window,
+        ),
+        atr_calculator=lambda prices, *, period: calculate_atr(
+            prices,
+            period=period,
+        ),
+        zone_observer=lambda prices, zone: observe_price_zone(prices, zone),
+    )
+
+
+@pytest.mark.parametrize("prefix_length", [3, 5, 9])
+def test_analyze_fast_path_matches_public_reference_for_representative_prefixes(
+    prefix_length: int,
+) -> None:
+    prices = _oscillating_frame().iloc[:prefix_length].copy(deep=True)
+    config = _stage_four_config()
+
+    fast_snapshot = PriceStructureService().analyze(prices, config=config)
+    reference_snapshot = _reference_public_service().analyze(prices, config=config)
+
+    assert fast_snapshot == reference_snapshot
+
+
+def test_analyze_fast_path_does_not_repeat_touch_frame_normalization_per_zone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service_normalize_calls = 0
+    touch_normalize_calls = 0
+    timestamp = datetime(2026, 1, 2, tzinfo=UTC)
+    candidates = tuple(
+        PriceLevelCandidate(
+            price=price,
+            kind=PriceLevelKind.SWING_HIGH,
+            observed_at=timestamp + timedelta(days=index),
+        )
+        for index, price in enumerate((98.0, 100.0, 102.0))
+    )
+
+    original_service_normalize = service_module._normalize_price_frame
+    original_touch_normalize = touches_module._normalize_price_frame
+
+    def count_service_normalize(prices: pd.DataFrame) -> pd.DataFrame:
+        nonlocal service_normalize_calls
+        service_normalize_calls += 1
+        return original_service_normalize(prices)
+
+    def count_touch_normalize(prices: pd.DataFrame) -> pd.DataFrame:
+        nonlocal touch_normalize_calls
+        touch_normalize_calls += 1
+        return original_touch_normalize(prices)
+
+    def cluster_individual_levels(
+        values: tuple[PriceLevelCandidate, ...],
+        *,
+        atr: float,
+        atr_multiplier: float,
+    ) -> tuple:
+        del atr, atr_multiplier
+        return tuple(create_price_zone((candidate,)) for candidate in values)
+
+    monkeypatch.setattr(
+        service_module,
+        "_normalize_price_frame",
+        count_service_normalize,
+    )
+    monkeypatch.setattr(
+        touches_module,
+        "_normalize_price_frame",
+        count_touch_normalize,
+    )
+    service = PriceStructureService(
+        swing_high_detector=lambda prices, *, window: candidates,
+        swing_low_detector=lambda prices, *, window: (),
+        atr_calculator=lambda prices, *, period: 1.0,
+        zone_clusterer=cluster_individual_levels,
+    )
+
+    snapshot = service.analyze(
+        _oscillating_frame(),
+        config=_stage_four_config(),
+        current_price=100.0,
+    )
+
+    assert snapshot.status is PriceStructureStatus.OK
+    assert len(snapshot.observed_zones) == 3
+    assert service_normalize_calls == 1
+    assert touch_normalize_calls == 0
+
+
+def test_structure_package_has_no_forbidden_dependencies() -> None:
+    forbidden = {
+        "market_platform.replay",
+        "market_platform.research",
+        "market_platform.cli",
+        "market_platform.provider",
+        "market_platform.data",
+    }
+    imported: set[str] = set()
+    for path in sorted(Path("src/market_platform/structure").glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported.add(node.module)
+
+    violations = {
+        module
+        for module in imported
+        for forbidden_module in forbidden
+        if module == forbidden_module or module.startswith(f"{forbidden_module}.")
+    }
+    assert not violations

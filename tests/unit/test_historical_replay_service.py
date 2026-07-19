@@ -22,8 +22,16 @@ from market_platform.state import (
 )
 from market_platform.strategy import (
     BaselineTrendRegimeStrategy,
+    BaselineVolatilityRegimeStrategy,
     StrategyEvaluationStatus,
     create_strategy_collection,
+)
+from market_platform.structure import (
+    PriceStructureService,
+    calculate_atr,
+    detect_swing_highs,
+    detect_swing_lows,
+    observe_price_zone,
 )
 
 _START = datetime(2026, 1, 1, tzinfo=UTC)
@@ -260,3 +268,105 @@ def test_replay_package_has_no_forbidden_dependencies() -> None:
         if module == forbidden_module or module.startswith(f"{forbidden_module}.")
     }
     assert not violations
+
+def _two_baseline_strategies():
+    return create_strategy_collection(
+        (BaselineTrendRegimeStrategy(), BaselineVolatilityRegimeStrategy())
+    )
+
+
+def _reference_public_structure_service() -> PriceStructureService:
+    return PriceStructureService(
+        swing_high_detector=lambda prices, *, window: detect_swing_highs(
+            prices,
+            window=window,
+        ),
+        swing_low_detector=lambda prices, *, window: detect_swing_lows(
+            prices,
+            window=window,
+        ),
+        atr_calculator=lambda prices, *, period: calculate_atr(
+            prices,
+            period=period,
+        ),
+        zone_observer=lambda prices, zone: observe_price_zone(prices, zone),
+    )
+
+
+@pytest.mark.parametrize("bar_count", [50, 100, 300])
+def test_fast_structure_path_preserves_replay_result_dict(
+    bar_count: int,
+) -> None:
+    prices = _prices(bar_count)
+    strategies = _two_baseline_strategies()
+    fast_result = HistoricalReplayService().run(
+        prices,
+        symbol="MSFT",
+        interval="1day",
+        strategies=strategies,
+        state_model=BaselineMarketStateModel(),
+    )
+    reference_result = HistoricalReplayService(
+        price_structure_service=_reference_public_structure_service(),
+    ).run(
+        prices,
+        symbol="MSFT",
+        interval="1day",
+        strategies=strategies,
+        state_model=BaselineMarketStateModel(),
+    )
+
+    assert fast_result.to_dict() == reference_result.to_dict()
+    assert fast_result.to_dict() == HistoricalReplayService().run(
+        prices,
+        symbol="MSFT",
+        interval="1day",
+        strategies=strategies,
+        state_model=BaselineMarketStateModel(),
+    ).to_dict()
+
+
+def test_fast_structure_path_preserves_replay_future_data_invariance() -> None:
+    prices = _prices(100)
+    strategies = _two_baseline_strategies()
+    as_of = prices.iloc[59]["timestamp"].to_pydatetime()
+    historical = prices.iloc[:60].copy(deep=True)
+    with_future = pd.concat(
+        [
+            historical,
+            pd.DataFrame(
+                {
+                    "symbol": ["MSFT"],
+                    "timestamp": [as_of + timedelta(days=1)],
+                    "open": [9999.0],
+                    "high": [10000.0],
+                    "low": [9998.0],
+                    "close": [9999.0],
+                    "volume": [1_000_000.0],
+                    "provider": ["test-provider"],
+                }
+            ),
+        ],
+        ignore_index=True,
+    )
+
+    historical_step = HistoricalReplayService().run(
+        historical,
+        symbol="MSFT",
+        interval="1day",
+        strategies=strategies,
+        state_model=BaselineMarketStateModel(),
+        start=as_of,
+        end=as_of,
+    ).steps[0]
+    future_step = HistoricalReplayService().run(
+        with_future,
+        symbol="MSFT",
+        interval="1day",
+        strategies=strategies,
+        state_model=BaselineMarketStateModel(),
+        start=as_of,
+        end=as_of,
+    ).steps[0]
+
+    assert future_step.to_dict() == historical_step.to_dict()
