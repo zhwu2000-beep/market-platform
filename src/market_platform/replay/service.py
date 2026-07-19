@@ -19,6 +19,8 @@ from market_platform.state.protocol import MarketStateModel
 from market_platform.strategy.collection import StrategyCollection
 from market_platform.strategy.instance import StrategyInstance, get_strategy_provenance
 from market_platform.strategy.runner import StrategyRunner
+from market_platform.structure.models import PriceStructureSnapshot
+from market_platform.structure.precompute import precompute_price_structure_snapshots
 from market_platform.structure.service import PriceStructureService
 
 _PRICE_COLUMNS = (
@@ -90,14 +92,20 @@ class HistoricalReplayService:
             raise ValueError("no replay timestamps found in requested range")
 
         signal_snapshots = precompute_market_signal_snapshots(normalized)
+        structure_snapshots = _precompute_default_structure_snapshots(
+            self._price_structure_service,
+            normalized,
+        )
         strategy_identities = _strategy_identities(strategies)
         steps: list[HistoricalReplayStep] = []
         for position in replay_positions:
             prefix = _copy_replay_prefix(normalized, position)
             as_of = _to_datetime(normalized.iloc[position]["timestamp"])
             signal_snapshot = signal_snapshots[position]
-            structure_snapshot = self._price_structure_service.analyze(
-                prefix, as_of=as_of
+            structure_snapshot = (
+                structure_snapshots[position]
+                if structure_snapshots is not None
+                else self._price_structure_service.analyze(prefix, as_of=as_of)
             )
             observation = build_historical_market_observation(
                 prefix,
@@ -137,6 +145,15 @@ class HistoricalReplayService:
             state_model_version=state_model.model_version,
             strategies=strategy_identities,
         )
+
+
+def _precompute_default_structure_snapshots(
+    service: PriceStructureService,
+    prices: pd.DataFrame,
+) -> tuple[PriceStructureSnapshot, ...] | None:
+    if not service._uses_default_components():
+        return None
+    return precompute_price_structure_snapshots(prices)
 
 
 def _copy_replay_prefix(prices: pd.DataFrame, position: int) -> pd.DataFrame:

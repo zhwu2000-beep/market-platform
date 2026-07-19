@@ -30,16 +30,30 @@ def _calculate_atr_normalized(
     *,
     period: int,
 ) -> float | None:
-    normalized_period = _require_positive_int(period, "period")
-    if len(prices) < normalized_period:
+    series = _calculate_atr_series_normalized(prices, period=period)
+    if not series:
         return None
+    return series[-1]
 
+
+def _calculate_atr_series_normalized(
+    prices: pd.DataFrame,
+    *,
+    period: int,
+) -> tuple[float | None, ...]:
+    normalized_period = _require_positive_int(period, "period")
     true_ranges = _calculate_true_ranges(
         prices["high"].tolist(),
         prices["low"].tolist(),
         prices["close"].tolist(),
     )
-    return float(pd.Series(true_ranges).rolling(normalized_period).mean().iloc[-1])
+    rolling = pd.Series(true_ranges).rolling(normalized_period).mean()
+    values: list[float | None] = []
+    for value in rolling.tolist():
+        numeric = float(value)
+        values.append(None if math.isnan(numeric) else numeric)
+    return tuple(values)
+
 
 def _calculate_true_ranges(
     highs: Sequence[float],

@@ -11,6 +11,8 @@ import pytest
 from pandas.testing import assert_frame_equal
 
 import market_platform.replay.service as replay_service
+import market_platform.structure.precompute as structure_precompute
+import market_platform.structure.service as structure_service
 from market_platform.replay import HistoricalReplayService
 from market_platform.state import BaselineMarketStateModel
 from market_platform.strategy import create_strategy_collection
@@ -76,7 +78,8 @@ def test_instrumented_call_counts_for_full_replay() -> None:
     assert counts["signal_precompute"] == 1
     assert counts["strategy_identity_construction"] == 1
     assert counts["prefix_slicing_copy"] == result.step_count == 18
-    assert counts["structure_analysis"] == result.step_count
+    assert counts["structure_precompute"] == 1
+    assert counts["structure_analysis"] == 0
     assert counts["observation_construction"] == result.step_count
     assert counts["state_evaluation"] == result.step_count
     assert counts["strategy_runner_evaluation"] == result.step_count
@@ -100,7 +103,8 @@ def test_instrumented_call_counts_for_start_end_subwindow() -> None:
     assert result.step_count == 3
     assert counts["signal_precompute"] == 1
     assert counts["prefix_slicing_copy"] == 3
-    assert counts["structure_analysis"] == 3
+    assert counts["structure_precompute"] == 1
+    assert counts["structure_analysis"] == 0
     assert counts["observation_construction"] == 3
     assert result.to_dict()["steps"] == HistoricalReplayService().run(
         prices,
@@ -128,6 +132,8 @@ def test_instrumented_call_counts_for_empty_strategy_collection() -> None:
     assert result.strategies == ()
     assert result.step_count == 12
     assert counts["strategy_runner_evaluation"] == 12
+    assert counts["structure_precompute"] == 1
+    assert counts["structure_analysis"] == 0
     assert counts["strategy_evaluations"] == 0
 
 
@@ -157,6 +163,9 @@ def test_instrumentation_restores_patches_and_does_not_swallow_exceptions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     original_prefix = replay_service._copy_replay_prefix
+    original_structure_precompute = replay_service.precompute_price_structure_snapshots
+    original_structure_frame = structure_precompute._normalize_price_frame
+    original_observe_zone = structure_service._observe_zone
     original_normalize = replay_service._normalize_replay_prices
 
     with pytest.raises(
@@ -169,6 +178,12 @@ def test_instrumentation_restores_patches_and_does_not_swallow_exceptions(
         raise RuntimeError("boom")
 
     assert replay_service._copy_replay_prefix is original_prefix
+    assert (
+        replay_service.precompute_price_structure_snapshots
+        is original_structure_precompute
+    )
+    assert structure_precompute._normalize_price_frame is original_structure_frame
+    assert structure_service._observe_zone is original_observe_zone
 
     def exploding_normalize(prices: pd.DataFrame, symbol: str) -> pd.DataFrame:
         raise ValueError("bad frame")
@@ -209,6 +224,11 @@ def test_run_scenario_reports_required_keys_without_speed_thresholds() -> None:
     assert {segment["name"] for segment in scenario["segments"]} == set(
         benchmark_replay.SEGMENT_NAMES
     )
+    assert {
+        segment["name"] for segment in scenario["structure_internal_segments"]
+    } == set(benchmark_replay.STRUCTURE_INTERNAL_SEGMENT_NAMES) | {
+        "structure_precompute_residual"
+    }
 
 
 def test_benchmark_cli_json_output_and_argument_validation(tmp_path: Path) -> None:
@@ -241,6 +261,7 @@ def test_benchmark_cli_json_output_and_argument_validation(tmp_path: Path) -> No
     assert isinstance(scenario["production_run"]["samples_ns"][0], int)
     assert isinstance(scenario["instrumented_run"]["median_ns"], int)
     assert "structure_workload" in scenario
+    assert "structure_internal_segments" in scenario
     assert benchmark_replay.main(["--bars", "0"]) == 2
 
 
@@ -353,6 +374,55 @@ def test_scenario_reports_structure_workload_from_instrumented_snapshots() -> No
     assert "final_candidate_count" in workload
     assert "final_observed_zone_count" in workload
     assert "total_independent_zone_touches" in workload
+
+
+def test_structure_internal_attribution_records_real_call_counts() -> None:
+    result, _samples, recorders = benchmark_replay.run_instrumented_samples(
+        _prices(30),
+        runs=1,
+        warmups=0,
+    )
+    recorder = recorders[0]
+    internal = benchmark_replay._aggregate_structure_internal_segments(recorders)
+    internal_by_name = {segment.name: segment for segment in internal}
+
+    assert recorder.call_count("structure_frame_preparation") == 1
+    assert recorder.call_count("structure_pivot_high_detection") == 1
+    assert recorder.call_count("structure_pivot_low_detection") == 1
+    assert recorder.call_count("structure_atr_series") == 1
+    assert recorder.call_count("structure_candidate_visibility") <= result.step_count
+    assert (
+        recorder.call_count("structure_clustering_and_zone_construction")
+        == result.step_count - 13
+    )
+    assert recorder.call_count("structure_touch_observation") == sum(
+        len(snapshot.observed_zones) for snapshot in recorder.structure_snapshots
+    )
+    assert (
+        sum(recorder.structure_zone_observation_scanned_rows)
+        >= recorder.call_count("structure_touch_observation")
+    )
+    assert internal_by_name["structure_precompute_residual"].median_total_ns >= 0
+
+
+def test_structure_internal_segments_are_not_counted_in_replay_residual() -> None:
+    _result, samples, recorders = benchmark_replay.run_instrumented_samples(
+        _prices(18),
+        runs=1,
+        warmups=0,
+    )
+    top_level_total = sum(
+        recorders[0].total_ns(segment)
+        for segment in benchmark_replay.SEGMENT_NAMES
+    )
+    with_internal_total = top_level_total + sum(
+        recorders[0].total_ns(segment)
+        for segment in benchmark_replay.STRUCTURE_INTERNAL_SEGMENT_NAMES
+    )
+
+    assert top_level_total <= samples[0]
+    assert with_internal_total > top_level_total
+
 
 def test_benchmark_harness_does_not_copy_production_replay_loop() -> None:
     source = Path("scripts/benchmark_replay.py").read_text(encoding="utf-8")
