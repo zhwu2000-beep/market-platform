@@ -374,6 +374,140 @@ def test_fast_structure_path_preserves_replay_future_data_invariance() -> None:
     assert future_step.to_dict() == historical_step.to_dict()
 
 
+
+def test_structure_precompute_replay_preserves_prefix_reference_result_dict() -> None:
+    prices = _prices(120)
+    strategies = _two_baseline_strategies()
+    optimized = HistoricalReplayService().run(
+        prices,
+        symbol="MSFT",
+        interval="1day",
+        strategies=strategies,
+        state_model=BaselineMarketStateModel(),
+    )
+    reference = HistoricalReplayService(
+        price_structure_service=_reference_public_structure_service(),
+    ).run(
+        prices,
+        symbol="MSFT",
+        interval="1day",
+        strategies=strategies,
+        state_model=BaselineMarketStateModel(),
+    )
+
+    assert optimized.to_dict() == reference.to_dict()
+
+
+def test_structure_precompute_uses_full_frame_positions_for_start_end(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prices = _prices(120)
+    start = _START + timedelta(days=100)
+    end = _START + timedelta(days=102)
+    full_result = HistoricalReplayService().run(
+        prices,
+        symbol="MSFT",
+        interval="1day",
+        strategies=_two_baseline_strategies(),
+        state_model=BaselineMarketStateModel(),
+    )
+    observed_lengths: list[int] = []
+    real_precompute = replay_service.precompute_price_structure_snapshots
+
+    def recording_precompute(frame: pd.DataFrame):
+        observed_lengths.append(len(frame))
+        return real_precompute(frame)
+
+    monkeypatch.setattr(
+        replay_service,
+        "precompute_price_structure_snapshots",
+        recording_precompute,
+    )
+
+    result = HistoricalReplayService().run(
+        prices,
+        symbol="MSFT",
+        interval="1day",
+        strategies=_two_baseline_strategies(),
+        state_model=BaselineMarketStateModel(),
+        start=start,
+        end=end,
+    )
+
+    assert observed_lengths == [120]
+    assert result.to_dict()["steps"] == full_result.to_dict()["steps"][100:103]
+
+
+def test_default_replay_precomputes_structure_once_and_skips_public_analyze(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    precompute_calls = 0
+    real_precompute = replay_service.precompute_price_structure_snapshots
+
+    def counting_precompute(frame: pd.DataFrame):
+        nonlocal precompute_calls
+        precompute_calls += 1
+        return real_precompute(frame)
+
+    def exploding_analyze(self, prices: pd.DataFrame, **kwargs):
+        raise AssertionError("default replay must not call analyze per step")
+
+    monkeypatch.setattr(
+        replay_service,
+        "precompute_price_structure_snapshots",
+        counting_precompute,
+    )
+    monkeypatch.setattr(PriceStructureService, "analyze", exploding_analyze)
+
+    result = HistoricalReplayService().run(
+        _prices(30),
+        symbol="MSFT",
+        interval="1day",
+        strategies=_two_baseline_strategies(),
+        state_model=BaselineMarketStateModel(),
+    )
+
+    assert precompute_calls == 1
+    assert result.step_count == 30
+
+
+def test_injected_structure_service_falls_back_to_per_step_analyze(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    precompute_calls = 0
+
+    def counting_precompute(frame: pd.DataFrame):
+        nonlocal precompute_calls
+        precompute_calls += 1
+        return ()
+
+    class CountingStructureService(PriceStructureService):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls: list[datetime] = []
+
+        def analyze(self, prices: pd.DataFrame, **kwargs):
+            as_of = kwargs["as_of"]
+            self.calls.append(as_of)
+            return PriceStructureService().analyze(prices, **kwargs)
+
+    service = CountingStructureService()
+    monkeypatch.setattr(
+        replay_service,
+        "precompute_price_structure_snapshots",
+        counting_precompute,
+    )
+
+    result = HistoricalReplayService(price_structure_service=service).run(
+        _prices(12),
+        symbol="MSFT",
+        interval="1day",
+        strategies=_two_baseline_strategies(),
+        state_model=BaselineMarketStateModel(),
+    )
+
+    assert precompute_calls == 0
+    assert service.calls == [step.as_of for step in result.steps]
 def _prefix_reference_signal_snapshots(
     prices: pd.DataFrame,
 ) -> tuple[signal_service.MarketSignalSnapshot, ...]:

@@ -94,7 +94,6 @@ class PriceStructureService:
             if explicit_current_price is not None
             else _require_current_price(normalized.iloc[-1]["close"])
         )
-
         minimum_bars = max(
             2 * normalized_config.pivot_window + 1,
             normalized_config.atr_period,
@@ -105,7 +104,6 @@ class PriceStructureService:
                 as_of=snapshot_as_of,
                 current_price=resolved_current_price,
             )
-
         candidates = filter_confirmed_pivots(
             _sort_candidates(
                 (
@@ -135,41 +133,95 @@ class PriceStructureService:
             normalized,
             period=normalized_config.atr_period,
         )
-        atr = _usable_atr(raw_atr)
-        if atr is None:
-            return PriceStructureSnapshot(
-                status=PriceStructureStatus.VOLATILITY_UNAVAILABLE,
-                as_of=snapshot_as_of,
-                current_price=resolved_current_price,
-                atr=_snapshot_atr(raw_atr),
-                candidates=candidates,
-            )
-
-        zones = self._zone_clusterer(
-            candidates,
-            atr=atr,
-            atr_multiplier=normalized_config.zone_atr_multiplier,
-        )
-        observed_zones = tuple(
-            ObservedPriceZone(
-                zone=zone,
-                observation=_observe_zone(
-                    self._zone_observer,
-                    normalized,
-                    zone,
-                ),
-            )
-            for zone in zones
-        )
-
-        return PriceStructureSnapshot(
-            status=PriceStructureStatus.OK,
-            as_of=snapshot_as_of,
+        return _structure_snapshot_from_normalized(
+            normalized,
+            config=normalized_config,
             current_price=resolved_current_price,
-            atr=atr,
+            snapshot_as_of=snapshot_as_of,
+            confirmation_cutoff=confirmation_cutoff,
             candidates=candidates,
-            observed_zones=observed_zones,
+            raw_atr=raw_atr,
+            zone_clusterer=self._zone_clusterer,
+            zone_observer=self._zone_observer,
         )
+
+    def _uses_default_components(self) -> bool:
+        return (
+            type(self) is PriceStructureService
+            and self._swing_high_detector is detect_swing_highs
+            and self._swing_low_detector is detect_swing_lows
+            and self._atr_calculator is calculate_atr
+            and self._zone_clusterer is cluster_price_levels
+            and self._zone_observer is observe_price_zone
+        )
+
+
+def _structure_snapshot_from_normalized(
+    prices: pd.DataFrame,
+    *,
+    config: PriceStructureConfig,
+    current_price: float,
+    snapshot_as_of: datetime,
+    confirmation_cutoff: datetime,
+    candidates: tuple[PriceLevelCandidate, ...],
+    raw_atr: float | None,
+    zone_clusterer: ZoneClusterer,
+    zone_observer: ZoneObserver,
+) -> PriceStructureSnapshot:
+    minimum_bars = max(
+        2 * config.pivot_window + 1,
+        config.atr_period,
+    )
+    if len(prices) < minimum_bars:
+        return PriceStructureSnapshot(
+            status=PriceStructureStatus.INSUFFICIENT_DATA,
+            as_of=snapshot_as_of,
+            current_price=current_price,
+        )
+
+    confirmed_candidates = filter_confirmed_pivots(candidates, confirmation_cutoff)
+    if not confirmed_candidates:
+        return PriceStructureSnapshot(
+            status=PriceStructureStatus.NO_PIVOTS,
+            as_of=snapshot_as_of,
+            current_price=current_price,
+        )
+
+    atr = _usable_atr(raw_atr)
+    if atr is None:
+        return PriceStructureSnapshot(
+            status=PriceStructureStatus.VOLATILITY_UNAVAILABLE,
+            as_of=snapshot_as_of,
+            current_price=current_price,
+            atr=_snapshot_atr(raw_atr),
+            candidates=confirmed_candidates,
+        )
+
+    zones = zone_clusterer(
+        confirmed_candidates,
+        atr=atr,
+        atr_multiplier=config.zone_atr_multiplier,
+    )
+    observed_zones = tuple(
+        ObservedPriceZone(
+            zone=zone,
+            observation=_observe_zone(
+                zone_observer,
+                prices,
+                zone,
+            ),
+        )
+        for zone in zones
+    )
+
+    return PriceStructureSnapshot(
+        status=PriceStructureStatus.OK,
+        as_of=snapshot_as_of,
+        current_price=current_price,
+        atr=atr,
+        candidates=confirmed_candidates,
+        observed_zones=observed_zones,
+    )
 
 
 def _detect_swing_highs(
@@ -213,6 +265,7 @@ def _observe_zone(
     if observer is observe_price_zone:
         return _observe_price_zone_normalized(prices, zone)
     return observer(prices, zone)
+
 
 def _normalize_price_frame(prices: pd.DataFrame) -> pd.DataFrame:
     if not isinstance(prices, pd.DataFrame):

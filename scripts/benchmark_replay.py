@@ -21,6 +21,8 @@ from typing import Any, cast
 import pandas as pd
 
 import market_platform.replay.service as replay_service
+import market_platform.structure.precompute as structure_precompute
+import market_platform.structure.service as structure_service
 from market_platform.observation.models import MarketObservation
 from market_platform.replay import (
     HistoricalReplayResult,
@@ -44,11 +46,14 @@ from market_platform.structure import PriceStructureService
 from market_platform.structure.models import (
     PriceStructureConfig,
     PriceStructureSnapshot,
+    PriceZone,
+    PriceZoneObservation,
 )
 
 SCHEMA_VERSION = "1.0.0"
 _PRECOMPUTE_ATTR = "precompute_market_signal_snapshots"
 _OBSERVATION_ATTR = "build_historical_market_observation"
+_STRUCTURE_PRECOMPUTE_ATTR = "precompute_price_structure_snapshots"
 DEFAULT_BARS = (100, 300, 500)
 DEFAULT_RUNS = 3
 DEFAULT_WARMUPS = 1
@@ -64,10 +69,21 @@ SEGMENT_NAMES = (
     "signal_precompute",
     "strategy_identity_construction",
     "prefix_slicing_copy",
+    "structure_precompute",
     "structure_analysis",
     "observation_construction",
     "state_evaluation",
     "strategy_runner_evaluation",
+)
+
+STRUCTURE_INTERNAL_SEGMENT_NAMES = (
+    "structure_frame_preparation",
+    "structure_pivot_high_detection",
+    "structure_pivot_low_detection",
+    "structure_atr_series",
+    "structure_candidate_visibility",
+    "structure_clustering_and_zone_construction",
+    "structure_touch_observation",
 )
 
 SERIALIZATION_ITEMS = (
@@ -91,6 +107,9 @@ class TimingRecorder:
 
     durations_ns: dict[str, list[int]] = field(default_factory=dict)
     structure_snapshots: list[PriceStructureSnapshot] = field(default_factory=list)
+    structure_cluster_candidate_counts: list[int] = field(default_factory=list)
+    structure_zone_observation_scanned_rows: list[int] = field(default_factory=list)
+    structure_zone_observation_touch_counts: list[int] = field(default_factory=list)
 
     @contextmanager
     def measure(self, segment: str) -> Iterator[None]:
@@ -132,6 +151,26 @@ class SegmentAggregate:
 
 
 @dataclass(frozen=True, slots=True)
+class StructureInternalAggregate:
+    name: str
+    total_samples_ns: tuple[int, ...]
+    median_total_ns: int
+    call_count: int
+    median_per_call_ns: int
+    structure_precompute_share: float
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "name": self.name,
+            "total_samples_ns": list(self.total_samples_ns),
+            "median_total_ns": self.median_total_ns,
+            "call_count": self.call_count,
+            "median_per_call_ns": self.median_per_call_ns,
+            "structure_precompute_share": self.structure_precompute_share,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class BenchmarkScenarioResult:
     bars: int
     step_count: int
@@ -142,6 +181,7 @@ class BenchmarkScenarioResult:
     instrumented_median_ns: int
     overhead_ratio: float
     segments: tuple[SegmentAggregate, ...]
+    structure_internal_segments: tuple[StructureInternalAggregate, ...]
     residual_samples_ns: tuple[int, ...]
     residual_median_ns: int
     residual_production_share: float
@@ -168,6 +208,9 @@ class BenchmarkScenarioResult:
                 "overhead_ratio": self.overhead_ratio,
             },
             "segments": [segment.to_dict() for segment in self.segments],
+            "structure_internal_segments": [
+                segment.to_dict() for segment in self.structure_internal_segments
+            ],
             "residual": {
                 "samples_ns": list(self.residual_samples_ns),
                 "median_ns": self.residual_median_ns,
@@ -271,8 +314,17 @@ def _instrument_replay_bindings(recorder: TimingRecorder) -> Iterator[None]:
     original_precompute = getattr(replay_service, _PRECOMPUTE_ATTR)
     original_identities = cast(Any, replay_service._strategy_identities)
     original_prefix = cast(Any, replay_service._copy_replay_prefix)
+    original_structure_precompute = getattr(replay_service, _STRUCTURE_PRECOMPUTE_ATTR)
     original_observation = getattr(replay_service, _OBSERVATION_ATTR)
-
+    structure_precompute_module = cast(Any, structure_precompute)
+    structure_service_module = cast(Any, structure_service)
+    original_structure_frame = structure_precompute_module._normalize_price_frame
+    original_pivot_highs = structure_precompute_module._detect_swing_highs_normalized
+    original_pivot_lows = structure_precompute_module._detect_swing_lows_normalized
+    original_atr_series = structure_precompute_module._calculate_atr_series_normalized
+    original_cluster = structure_precompute_module.cluster_price_levels
+    original_filter_candidates = structure_service_module.filter_confirmed_pivots
+    original_observe_zone = structure_service_module._observe_zone
 
     def timed_normalize(prices: pd.DataFrame, symbol: str) -> pd.DataFrame:
         with recorder.measure("price_normalization"):
@@ -306,24 +358,116 @@ def _instrument_replay_bindings(recorder: TimingRecorder) -> Iterator[None]:
         with recorder.measure("prefix_slicing_copy"):
             return cast(pd.DataFrame, original_prefix(prices, position))
 
+    def timed_structure_frame(prices: pd.DataFrame) -> pd.DataFrame:
+        with recorder.measure("structure_frame_preparation"):
+            return cast(pd.DataFrame, original_structure_frame(prices))
+
+    def timed_pivot_highs(
+        prices: pd.DataFrame,
+        *,
+        window: int,
+    ) -> tuple[Any, ...]:
+        with recorder.measure("structure_pivot_high_detection"):
+            return cast(tuple[Any, ...], original_pivot_highs(prices, window=window))
+
+    def timed_pivot_lows(
+        prices: pd.DataFrame,
+        *,
+        window: int,
+    ) -> tuple[Any, ...]:
+        with recorder.measure("structure_pivot_low_detection"):
+            return cast(tuple[Any, ...], original_pivot_lows(prices, window=window))
+
+    def timed_atr_series(
+        prices: pd.DataFrame,
+        *,
+        period: int,
+    ) -> tuple[float | None, ...]:
+        with recorder.measure("structure_atr_series"):
+            return cast(
+                tuple[float | None, ...],
+                original_atr_series(prices, period=period),
+            )
+
+    def timed_filter_candidates(
+        candidates: Sequence[Any],
+        as_of: datetime,
+    ) -> tuple[Any, ...]:
+        with recorder.measure("structure_candidate_visibility"):
+            return cast(
+                tuple[Any, ...],
+                original_filter_candidates(candidates, as_of),
+            )
+
+    def timed_cluster(
+        candidates: Sequence[Any],
+        *,
+        atr: float,
+        atr_multiplier: float,
+    ) -> tuple[PriceZone, ...]:
+        recorder.structure_cluster_candidate_counts.append(len(candidates))
+        with recorder.measure("structure_clustering_and_zone_construction"):
+            return cast(
+                tuple[PriceZone, ...],
+                original_cluster(
+                    candidates,
+                    atr=atr,
+                    atr_multiplier=atr_multiplier,
+                ),
+            )
+
+    def timed_observe_zone(
+        observer: Any,
+        prices: pd.DataFrame,
+        zone: PriceZone,
+    ) -> PriceZoneObservation:
+        recorder.structure_zone_observation_scanned_rows.append(len(prices))
+        with recorder.measure("structure_touch_observation"):
+            observation = cast(
+                PriceZoneObservation,
+                original_observe_zone(observer, prices, zone),
+            )
+        recorder.structure_zone_observation_touch_counts.append(
+            observation.touch_count
+        )
+        return observation
+
+    def timed_structure_precompute(
+        prices: pd.DataFrame,
+    ) -> tuple[PriceStructureSnapshot, ...]:
+        with recorder.measure("structure_precompute"):
+            snapshots = cast(
+                tuple[PriceStructureSnapshot, ...],
+                original_structure_precompute(prices),
+            )
+        recorder.structure_snapshots.extend(snapshots)
+        return snapshots
+
     def timed_observation(*args: object, **kwargs: object) -> MarketObservation:
         with recorder.measure("observation_construction"):
             return cast(MarketObservation, original_observation(*args, **kwargs))
 
     patches = (
-        ("_normalize_replay_prices", timed_normalize),
-        ("_single_provider", timed_provider),
-        ("_replay_positions", timed_positions),
-        (_PRECOMPUTE_ATTR, timed_precompute),
-        ("_strategy_identities", timed_identities),
-        ("_copy_replay_prefix", timed_prefix),
-        (_OBSERVATION_ATTR, timed_observation),
+        (replay_service, "_normalize_replay_prices", timed_normalize),
+        (replay_service, "_single_provider", timed_provider),
+        (replay_service, "_replay_positions", timed_positions),
+        (replay_service, _PRECOMPUTE_ATTR, timed_precompute),
+        (replay_service, "_strategy_identities", timed_identities),
+        (replay_service, "_copy_replay_prefix", timed_prefix),
+        (replay_service, _STRUCTURE_PRECOMPUTE_ATTR, timed_structure_precompute),
+        (replay_service, _OBSERVATION_ATTR, timed_observation),
+        (structure_precompute, "_normalize_price_frame", timed_structure_frame),
+        (structure_precompute, "_detect_swing_highs_normalized", timed_pivot_highs),
+        (structure_precompute, "_detect_swing_lows_normalized", timed_pivot_lows),
+        (structure_precompute, "_calculate_atr_series_normalized", timed_atr_series),
+        (structure_precompute, "cluster_price_levels", timed_cluster),
+        (structure_service, "filter_confirmed_pivots", timed_filter_candidates),
+        (structure_service, "_observe_zone", timed_observe_zone),
     )
     with ExitStack() as stack:
-        for name, replacement in patches:
-            stack.enter_context(_patched_attribute(replay_service, name, replacement))
+        for target, name, replacement in patches:
+            stack.enter_context(_patched_attribute(target, name, replacement))
         yield
-
 
 def build_price_frame(bars: int, *, seed: int = DEFAULT_SEED) -> pd.DataFrame:
     if bars <= 0:
@@ -504,7 +648,6 @@ def _run_instrumented_replay(
     end: datetime | None = None,
 ) -> HistoricalReplayResult:
     active_recorder = TimingRecorder() if recorder is None else recorder
-    structure = TimedPriceStructureService(PriceStructureService(), active_recorder)
     state_model = TimedMarketStateModel(BaselineMarketStateModel(), active_recorder)
     runner = TimedStrategyRunner(StrategyRunner(), active_recorder)
     with _instrument_replay_bindings(active_recorder):
@@ -512,7 +655,6 @@ def _run_instrumented_replay(
             prices,
             strategies=strategies,
             state_model=state_model,
-            price_structure_service=structure,
             strategy_runner=runner,
             start=start,
             end=end,
@@ -627,6 +769,9 @@ def run_scenario(
         production_median_ns=production_median,
         instrumented_median_ns=instrumented_median,
     )
+    structure_internal_segments = _aggregate_structure_internal_segments(
+        recorders,
+    )
     residual_samples = tuple(
         max(0, total - sum(recorder.total_ns(segment) for segment in SEGMENT_NAMES))
         for total, recorder in zip(instrumented_samples, recorders, strict=True)
@@ -634,7 +779,7 @@ def run_scenario(
     residual_median = _median(residual_samples)
     serialization = measure_serialization(production_result, runs=runs)
     call_counts = _call_counts(recorders, production_result)
-    structure_share = _segment_share(segments, "structure_analysis")
+    structure_share = _segment_share(segments, "structure_precompute")
     prefix_share = _segment_share(segments, "prefix_slicing_copy")
     observation_share = _segment_share(segments, "observation_construction")
     overhead_ratio = (
@@ -661,6 +806,7 @@ def run_scenario(
         instrumented_median_ns=instrumented_median,
         overhead_ratio=overhead_ratio,
         segments=segments,
+        structure_internal_segments=structure_internal_segments,
         residual_samples_ns=residual_samples,
         residual_median_ns=residual_median,
         residual_production_share=_share(residual_median, production_median),
@@ -758,6 +904,67 @@ def _aggregate_segments(
     return tuple(aggregates)
 
 
+def _aggregate_structure_internal_segments(
+    recorders: Sequence[TimingRecorder],
+) -> tuple[StructureInternalAggregate, ...]:
+    aggregates: list[StructureInternalAggregate] = []
+    structure_totals = tuple(
+        recorder.total_ns("structure_precompute") for recorder in recorders
+    )
+    structure_median = _median(structure_totals)
+    for name in STRUCTURE_INTERNAL_SEGMENT_NAMES:
+        aggregates.append(
+            _structure_internal_aggregate(
+                name,
+                tuple(recorder.total_ns(name) for recorder in recorders),
+                [recorder.call_count(name) for recorder in recorders],
+                structure_median,
+            )
+        )
+    residual_samples = tuple(
+        max(
+            0,
+            recorder.total_ns("structure_precompute")
+            - sum(
+                recorder.total_ns(segment)
+                for segment in STRUCTURE_INTERNAL_SEGMENT_NAMES
+            ),
+        )
+        for recorder in recorders
+    )
+    aggregates.append(
+        _structure_internal_aggregate(
+            "structure_precompute_residual",
+            residual_samples,
+            [
+                1 if recorder.call_count("structure_precompute") else 0
+                for recorder in recorders
+            ],
+            structure_median,
+        )
+    )
+    return tuple(aggregates)
+
+
+def _structure_internal_aggregate(
+    name: str,
+    total_samples: tuple[int, ...],
+    call_counts: Sequence[int],
+    structure_median_ns: int,
+) -> StructureInternalAggregate:
+    median_total = _median(total_samples)
+    median_call_count = int(statistics.median(call_counts)) if call_counts else 0
+    median_per_call = median_total // median_call_count if median_call_count else 0
+    return StructureInternalAggregate(
+        name=name,
+        total_samples_ns=total_samples,
+        median_total_ns=median_total,
+        call_count=median_call_count,
+        median_per_call_ns=median_per_call,
+        structure_precompute_share=_share(median_total, structure_median_ns),
+    )
+
+
 def _structure_workload_stats(
     recorders: Sequence[TimingRecorder],
 ) -> dict[str, object]:
@@ -776,10 +983,31 @@ def _structure_workload_stats(
             for observed in snapshot.observed_zones
         )
     final_snapshot = snapshots[-1] if snapshots else None
+    zone_observer_calls = [
+        recorder.call_count("structure_touch_observation")
+        for recorder in recorders
+    ]
+    clustering_calls = [
+        recorder.call_count("structure_clustering_and_zone_construction")
+        for recorder in recorders
+    ]
+    scanned_rows = [
+        sum(recorder.structure_zone_observation_scanned_rows)
+        for recorder in recorders
+    ]
+    observed_touches = [
+        sum(recorder.structure_zone_observation_touch_counts)
+        for recorder in recorders
+    ]
+    cluster_input_candidates = [
+        sum(recorder.structure_cluster_candidate_counts)
+        for recorder in recorders
+    ]
     return {
         "source": (
-            "first measured instrumented run PriceStructureSnapshot returns; "
-            "no extra structure analysis executed"
+            "first measured instrumented run PriceStructureSnapshot returns and "
+            "instrumented call-through structure internals; no extra structure "
+            "analysis executed"
         ),
         "step_count": len(snapshots),
         "structure_available_step_count": status_counts.get("ok", 0),
@@ -793,6 +1021,11 @@ def _structure_workload_stats(
             len(final_snapshot.observed_zones) if final_snapshot is not None else 0
         ),
         "total_independent_zone_touches": total_independent_zone_touches,
+        "clustering_call_count": _median(clustering_calls),
+        "zone_observer_call_count": _median(zone_observer_calls),
+        "cumulative_zone_observer_scanned_rows": _median(scanned_rows),
+        "zone_observer_observed_touch_count": _median(observed_touches),
+        "cumulative_cluster_input_candidates": _median(cluster_input_candidates),
     }
 
 
@@ -957,13 +1190,33 @@ def render_table(payload: Mapping[str, object]) -> str:
         lines.append(
             "  structure workload: available_steps={available} "
             "final_candidates={candidates} final_zones={zones} "
-            "total_touches={touches}".format(
+            "total_touches={touches} cluster_calls={cluster_calls} "
+            "zone_observer_calls={observer_calls} scanned_rows={scanned_rows}".format(
                 available=workload["structure_available_step_count"],
                 candidates=workload["final_candidate_count"],
                 zones=workload["final_observed_zone_count"],
                 touches=workload["total_independent_zone_touches"],
+                cluster_calls=workload["clustering_call_count"],
+                observer_calls=workload["zone_observer_call_count"],
+                scanned_rows=workload["cumulative_zone_observer_scanned_rows"],
             )
         )
+        lines.append(
+            "  structure internals: name calls median_total_ms "
+            "structure_share"
+        )
+        for segment in cast(
+            list[dict[str, object]],
+            scenario["structure_internal_segments"],
+        ):
+            lines.append(
+                "    {name} {calls:>5} {total:>15.3f} {share:>15.1%}".format(
+                    name=segment["name"],
+                    calls=segment["call_count"],
+                    total=_ns_to_ms(cast(int, segment["median_total_ns"])),
+                    share=cast(float, segment["structure_precompute_share"]),
+                )
+            )
         serialization = cast(dict[str, dict[str, object]], scenario["serialization"])
         lines.append("  serialization: name median_ms")
         for name in SERIALIZATION_ITEMS:
