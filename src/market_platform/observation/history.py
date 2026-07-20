@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from numbers import Real
 
@@ -46,9 +47,13 @@ def build_historical_market_observation(
 
     normalized_as_of = _normalize_timestamp(as_of, "as_of")
     normalized = _normalize_price_prefix(prices, normalized_as_of)
-    normalized_symbol = _normalize_required_text(symbol, "symbol").upper()
-    normalized_interval = _normalize_required_text(interval, "interval")
-    normalized_provider = _normalize_required_text(provider, "provider")
+    normalized_symbol, normalized_interval, normalized_provider = (
+        _normalize_observation_metadata(
+            symbol=symbol,
+            interval=interval,
+            provider=provider,
+        )
+    )
     if not isinstance(signal_snapshot, MarketSignalSnapshot):
         raise TypeError("signal_snapshot must be a MarketSignalSnapshot")
     if not isinstance(structure_snapshot, PriceStructureSnapshot):
@@ -61,33 +66,96 @@ def build_historical_market_observation(
     if providers != {normalized_provider}:
         raise ValueError("price prefix provider must match provider")
 
-    window_start = _to_datetime(normalized.iloc[0]["timestamp"])
-    window_end = _to_datetime(normalized.iloc[-1]["timestamp"])
-    latest_price = _normalize_positive_price(normalized.iloc[-1]["close"])
-    fingerprint = _historical_observation_fingerprint(
-        prices=normalized,
-        symbol=normalized_symbol,
-        interval=normalized_interval,
-        as_of=normalized_as_of,
-        provider=normalized_provider,
-    )
-
-    return build_market_observation(
-        ObservationIdentity(
+    return _construct_historical_observation(
+        identity=_build_observation_identity(
             symbol=normalized_symbol,
             interval=normalized_interval,
             as_of=normalized_as_of,
-            window_start=window_start,
-            window_end=window_end,
+            prices=normalized,
         ),
-        ObservationProvenance(
+        provenance=_build_observation_provenance(
+            prices=normalized,
+            symbol=normalized_symbol,
+            interval=normalized_interval,
+            as_of=normalized_as_of,
             provider=normalized_provider,
-            methodology="historical_replay_observation",
-            methodology_version="1.0.0",
-            parameters={"interval": normalized_interval},
-            input_fingerprint=fingerprint,
         ),
-        price_facts=PriceFacts(latest_price=latest_price, observed_at=window_end),
+        price_facts=_build_price_facts(normalized),
+        signal_snapshot=signal_snapshot,
+        structure_snapshot=structure_snapshot,
+    )
+
+
+def _normalize_observation_metadata(
+    *,
+    symbol: str,
+    interval: str,
+    provider: str,
+) -> tuple[str, str, str]:
+    return (
+        _normalize_required_text(symbol, "symbol").upper(),
+        _normalize_required_text(interval, "interval"),
+        _normalize_required_text(provider, "provider"),
+    )
+
+
+def _build_observation_identity(
+    *,
+    symbol: str,
+    interval: str,
+    as_of: datetime,
+    prices: pd.DataFrame,
+) -> ObservationIdentity:
+    return ObservationIdentity(
+        symbol=symbol,
+        interval=interval,
+        as_of=as_of,
+        window_start=_to_datetime(prices.iloc[0]["timestamp"]),
+        window_end=_to_datetime(prices.iloc[-1]["timestamp"]),
+    )
+
+
+def _build_price_facts(prices: pd.DataFrame) -> PriceFacts:
+    window_end = _to_datetime(prices.iloc[-1]["timestamp"])
+    latest_price = _normalize_positive_price(prices.iloc[-1]["close"])
+    return PriceFacts(latest_price=latest_price, observed_at=window_end)
+
+
+def _build_observation_provenance(
+    *,
+    prices: pd.DataFrame,
+    symbol: str,
+    interval: str,
+    as_of: datetime,
+    provider: str,
+) -> ObservationProvenance:
+    return ObservationProvenance(
+        provider=provider,
+        methodology="historical_replay_observation",
+        methodology_version="1.0.0",
+        parameters={"interval": interval},
+        input_fingerprint=_historical_observation_fingerprint(
+            prices=prices,
+            symbol=symbol,
+            interval=interval,
+            as_of=as_of,
+            provider=provider,
+        ),
+    )
+
+
+def _construct_historical_observation(
+    *,
+    identity: ObservationIdentity,
+    provenance: ObservationProvenance,
+    price_facts: PriceFacts,
+    signal_snapshot: MarketSignalSnapshot,
+    structure_snapshot: PriceStructureSnapshot,
+) -> MarketObservation:
+    return build_market_observation(
+        identity,
+        provenance,
+        price_facts=price_facts,
         signal_snapshot=signal_snapshot,
         structure_snapshot=structure_snapshot,
     )
@@ -126,7 +194,38 @@ def _historical_observation_fingerprint(
     as_of: datetime,
     provider: str,
 ) -> str:
-    rows = []
+    payload = _historical_observation_fingerprint_payload(
+        prices=prices,
+        symbol=symbol,
+        interval=interval,
+        as_of=as_of,
+        provider=provider,
+    )
+    canonical = _canonicalize_historical_observation_fingerprint_payload(payload)
+    return _hash_historical_observation_fingerprint(canonical)
+
+
+def _historical_observation_fingerprint_payload(
+    *,
+    prices: pd.DataFrame,
+    symbol: str,
+    interval: str,
+    as_of: datetime,
+    provider: str,
+) -> dict[str, object]:
+    return {
+        "as_of": as_of.isoformat(),
+        "interval": interval,
+        "provider": provider,
+        "rows": _historical_observation_fingerprint_rows(prices),
+        "symbol": symbol,
+    }
+
+
+def _historical_observation_fingerprint_rows(
+    prices: pd.DataFrame,
+) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
     for row in prices.itertuples(index=False):
         rows.append(
             {
@@ -140,16 +239,16 @@ def _historical_observation_fingerprint(
                 "provider": str(row.provider),
             }
         )
-    payload = {
-        "as_of": as_of.isoformat(),
-        "interval": interval,
-        "provider": provider,
-        "rows": rows,
-        "symbol": symbol,
-    }
-    canonical = json.dumps(
-        payload, allow_nan=False, separators=(",", ":"), sort_keys=True
-    )
+    return rows
+
+
+def _canonicalize_historical_observation_fingerprint_payload(
+    payload: Mapping[str, object],
+) -> str:
+    return json.dumps(payload, allow_nan=False, separators=(",", ":"), sort_keys=True)
+
+
+def _hash_historical_observation_fingerprint(canonical: str) -> str:
     return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
