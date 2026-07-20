@@ -106,15 +106,20 @@ def test_instrumented_call_counts_for_start_end_subwindow() -> None:
     assert counts["structure_precompute"] == 1
     assert counts["structure_analysis"] == 0
     assert counts["observation_construction"] == 3
-    assert result.to_dict()["steps"] == HistoricalReplayService().run(
-        prices,
-        symbol=benchmark_replay.SYMBOL,
-        interval=benchmark_replay.INTERVAL,
-        strategies=benchmark_replay.default_strategies(),
-        state_model=BaselineMarketStateModel(),
-        start=start,
-        end=end,
-    ).to_dict()["steps"]
+    assert (
+        result.to_dict()["steps"]
+        == HistoricalReplayService()
+        .run(
+            prices,
+            symbol=benchmark_replay.SYMBOL,
+            interval=benchmark_replay.INTERVAL,
+            strategies=benchmark_replay.default_strategies(),
+            state_model=BaselineMarketStateModel(),
+            start=start,
+            end=end,
+        )
+        .to_dict()["steps"]
+    )
 
 
 def test_instrumented_call_counts_for_empty_strategy_collection() -> None:
@@ -170,11 +175,12 @@ def test_instrumentation_restores_patches_and_does_not_swallow_exceptions(
     original_touch_lookup = structure_precompute._touch_observation_at_position
     original_normalize = replay_service._normalize_replay_prices
 
-    with pytest.raises(
-        RuntimeError,
-        match="boom",
-    ), benchmark_replay._instrument_replay_bindings(
-        benchmark_replay.TimingRecorder()
+    with (
+        pytest.raises(
+            RuntimeError,
+            match="boom",
+        ),
+        benchmark_replay._instrument_replay_bindings(benchmark_replay.TimingRecorder()),
     ):
         assert replay_service._copy_replay_prefix is not original_prefix
         raise RuntimeError("boom")
@@ -356,8 +362,7 @@ def test_segment_totals_are_not_double_counted() -> None:
     )
 
     measured_total = sum(
-        recorders[0].total_ns(segment)
-        for segment in benchmark_replay.SEGMENT_NAMES
+        recorders[0].total_ns(segment) for segment in benchmark_replay.SEGMENT_NAMES
     )
 
     assert measured_total <= samples[0]
@@ -381,8 +386,6 @@ def test_scenario_reports_structure_workload_from_instrumented_snapshots() -> No
     assert "touch_state_builds" in workload
     assert "touch_state_lookups" in workload
     assert "logical_prefix_rows_avoided" in workload
-
-
 
 
 def test_touch_optimization_workload_metrics_are_consistent() -> None:
@@ -410,6 +413,8 @@ def test_touch_optimization_workload_metrics_are_consistent() -> None:
     expected_reuse = 0.0 if logical_calls == 0 else 1 - builds / logical_calls
     assert workload["touch_key_reuse_ratio"] == pytest.approx(expected_reuse)
     assert workload["touch_state_array_bytes"] >= 0
+
+
 def test_structure_internal_attribution_records_real_call_counts() -> None:
     result, _samples, recorders = benchmark_replay.run_instrumented_samples(
         _prices(30),
@@ -437,22 +442,21 @@ def test_structure_internal_attribution_records_real_call_counts() -> None:
         == logical_touch_observations
     )
     assert (
-        recorder.call_count("structure_touch_state_build")
-        <= logical_touch_observations
+        recorder.call_count("structure_touch_state_build") <= logical_touch_observations
     )
     assert recorder.call_count("structure_fallback_public_observer") == 0
     assert len(set(recorder.structure_touch_keys)) == recorder.call_count(
         "structure_touch_state_build"
     )
     assert (
-        sum(recorder.structure_touch_logical_prefix_rows)
-        >= logical_touch_observations
+        sum(recorder.structure_touch_logical_prefix_rows) >= logical_touch_observations
     )
     assert sum(recorder.structure_touch_physical_rows) >= recorder.call_count(
         "structure_touch_state_build"
     )
     assert sum(recorder.structure_touch_array_bytes) >= 0
     assert internal_by_name["structure_precompute_residual"].median_total_ns >= 0
+
 
 def test_structure_internal_segments_are_not_counted_in_replay_residual() -> None:
     _result, samples, recorders = benchmark_replay.run_instrumented_samples(
@@ -461,8 +465,7 @@ def test_structure_internal_segments_are_not_counted_in_replay_residual() -> Non
         warmups=0,
     )
     top_level_total = sum(
-        recorders[0].total_ns(segment)
-        for segment in benchmark_replay.SEGMENT_NAMES
+        recorders[0].total_ns(segment) for segment in benchmark_replay.SEGMENT_NAMES
     )
     with_internal_total = top_level_total + sum(
         recorders[0].total_ns(segment)
@@ -479,3 +482,152 @@ def test_benchmark_harness_does_not_copy_production_replay_loop() -> None:
     assert "for position in replay_positions" not in source
     assert "HistoricalReplayService(" in source
     assert ".run(" in source
+
+
+def test_observation_internal_attribution_metrics_are_consistent() -> None:
+    result, _samples, recorders = benchmark_replay.run_instrumented_samples(
+        _prices(20),
+        runs=1,
+        warmups=0,
+    )
+    recorder = recorders[0]
+    scenario = benchmark_replay.run_scenario(
+        20,
+        runs=1,
+        warmups=0,
+        seed=7,
+    ).to_dict()
+
+    assert recorder.call_count("observation_prefix_preparation") == result.step_count
+    assert recorder.call_count("observation_metadata") == result.step_count
+    assert recorder.call_count("observation_identity") == result.step_count
+    assert recorder.call_count("observation_price_facts") == result.step_count
+    assert recorder.call_count("observation_fingerprint_rows") == result.step_count
+    assert recorder.call_count("observation_fingerprint_canonical_json") == (
+        result.step_count
+    )
+    assert recorder.call_count("observation_fingerprint_hash") == result.step_count
+    assert recorder.call_count("observation_provenance") == result.step_count
+    assert recorder.call_count("observation_signal_facts") == result.step_count
+    assert recorder.call_count("observation_structure_facts") == result.step_count
+    assert recorder.call_count("observation_model_construction") == result.step_count
+    assert sum(recorder.observation_prefix_lengths) == sum(
+        range(1, result.step_count + 1)
+    )
+    assert sum(recorder.observation_fingerprint_rows) == sum(
+        range(1, result.step_count + 1)
+    )
+    assert sum(recorder.observation_signal_counts) == result.step_count * 5
+
+    observation_attribution = scenario["observation_attribution"]
+    assert {segment["name"] for segment in scenario["observation_segments"]} == set(
+        benchmark_replay.OBSERVATION_INTERNAL_SEGMENT_NAMES
+    )
+    assert observation_attribution["residual"]["median_ns"] >= 0
+    for segment in observation_attribution["segments"]:
+        assert segment["median_total_ns"] >= 0
+        assert segment["median_per_call_ns"] >= 0
+        assert segment["timing_mode"] == "exclusive"
+    assert scenario["observation_workload"]["builder_calls"] == scenario["step_count"]
+    assert (
+        scenario["fingerprint_workload"]["fingerprint_calls"] == scenario["step_count"]
+    )
+    assert scenario["fingerprint_workload"]["canonicalized_row_count"] == sum(
+        range(1, scenario["step_count"] + 1)
+    )
+    assert (
+        scenario["canonicalization_workload"]["canonicalization_calls"]
+        == (scenario["step_count"])
+    )
+    assert (
+        scenario["canonicalization_workload"]["canonicalized_chars"]
+        == scenario["fingerprint_workload"]["hash_input_bytes"]
+    )
+
+
+def test_observation_instrumentation_restores_private_helper_patches() -> None:
+    original_prefix = benchmark_replay.observation_history._normalize_price_prefix
+    original_rows = (
+        benchmark_replay.observation_history._historical_observation_fingerprint_rows
+    )
+    original_signal = benchmark_replay.observation_builder.build_signal_facts
+    original_structure = benchmark_replay.observation_builder.build_structure_facts
+
+    with (
+        pytest.raises(
+            RuntimeError,
+            match="boom",
+        ),
+        benchmark_replay._instrument_replay_bindings(benchmark_replay.TimingRecorder()),
+    ):
+        assert benchmark_replay.observation_history._normalize_price_prefix is not (
+            original_prefix
+        )
+        assert benchmark_replay.observation_builder.build_signal_facts is not (
+            original_signal
+        )
+        raise RuntimeError("boom")
+
+    assert (
+        benchmark_replay.observation_history._normalize_price_prefix is original_prefix
+    )
+    assert (
+        benchmark_replay.observation_history._historical_observation_fingerprint_rows
+        is original_rows
+    )
+    assert benchmark_replay.observation_builder.build_signal_facts is original_signal
+    assert (
+        benchmark_replay.observation_builder.build_structure_facts is original_structure
+    )
+
+
+def test_instrumented_observations_match_normal_observations_exactly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prices = _prices(24)
+    normal_observations = []
+    instrumented_observations = []
+    original = replay_service.build_historical_market_observation
+
+    def recording_normal(*args, **kwargs):
+        observation = original(*args, **kwargs)
+        normal_observations.append(observation)
+        return observation
+
+    monkeypatch.setattr(
+        replay_service,
+        "build_historical_market_observation",
+        recording_normal,
+    )
+    normal_result = benchmark_replay._run_replay(prices)
+
+    def recording_instrumented(*args, **kwargs):
+        observation = original(*args, **kwargs)
+        instrumented_observations.append(observation)
+        return observation
+
+    monkeypatch.setattr(
+        replay_service,
+        "build_historical_market_observation",
+        recording_instrumented,
+    )
+    instrumented_result = benchmark_replay._run_instrumented_replay(prices)
+
+    assert instrumented_result.to_dict() == normal_result.to_dict()
+    assert len(instrumented_observations) == len(normal_observations) == 24
+    for instrumented, normal in zip(
+        instrumented_observations,
+        normal_observations,
+        strict=True,
+    ):
+        assert instrumented == normal
+        assert instrumented.to_dict() == normal.to_dict()
+        assert json.dumps(instrumented.to_dict(), sort_keys=True) == json.dumps(
+            normal.to_dict(),
+            sort_keys=True,
+        )
+        assert (
+            instrumented.provenance.input_fingerprint
+            == normal.provenance.input_fingerprint
+        )
+        assert instrumented.provenance == normal.provenance

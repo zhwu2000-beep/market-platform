@@ -20,6 +20,8 @@ from typing import Any, cast
 
 import pandas as pd
 
+import market_platform.observation.builder as observation_builder
+import market_platform.observation.history as observation_history
 import market_platform.replay.service as replay_service
 import market_platform.structure.precompute as structure_precompute
 import market_platform.structure.service as structure_service
@@ -88,6 +90,20 @@ STRUCTURE_INTERNAL_SEGMENT_NAMES = (
     "structure_fallback_public_observer",
 )
 
+OBSERVATION_INTERNAL_SEGMENT_NAMES = (
+    "observation_prefix_preparation",
+    "observation_metadata",
+    "observation_identity",
+    "observation_price_facts",
+    "observation_fingerprint_rows",
+    "observation_fingerprint_canonical_json",
+    "observation_fingerprint_hash",
+    "observation_provenance",
+    "observation_signal_facts",
+    "observation_structure_facts",
+    "observation_model_construction",
+)
+
 SERIALIZATION_ITEMS = (
     "result_to_dict",
     "result_json_dumps",
@@ -116,6 +132,14 @@ class TimingRecorder:
     structure_touch_array_bytes: list[int] = field(default_factory=list)
     structure_zone_observation_scanned_rows: list[int] = field(default_factory=list)
     structure_zone_observation_touch_counts: list[int] = field(default_factory=list)
+    observation_prefix_lengths: list[int] = field(default_factory=list)
+    observation_fingerprint_rows: list[int] = field(default_factory=list)
+    observation_canonical_chars: list[int] = field(default_factory=list)
+    observation_hash_input_bytes: list[int] = field(default_factory=list)
+    observation_signal_counts: list[int] = field(default_factory=list)
+    observation_candidate_counts: list[int] = field(default_factory=list)
+    observation_zone_counts: list[int] = field(default_factory=list)
+    observation_touch_counts: list[int] = field(default_factory=list)
 
     @contextmanager
     def measure(self, segment: str) -> Iterator[None]:
@@ -123,9 +147,10 @@ class TimingRecorder:
         try:
             yield
         finally:
-            self.durations_ns.setdefault(segment, []).append(
-                perf_counter_ns() - start
-            )
+            self.durations_ns.setdefault(segment, []).append(perf_counter_ns() - start)
+
+    def record_duration(self, segment: str, duration_ns: int) -> None:
+        self.durations_ns.setdefault(segment, []).append(max(0, duration_ns))
 
     def total_ns(self, segment: str) -> int:
         return sum(self.durations_ns.get(segment, ()))
@@ -177,6 +202,30 @@ class StructureInternalAggregate:
 
 
 @dataclass(frozen=True, slots=True)
+class ObservationInternalAggregate:
+    name: str
+    total_samples_ns: tuple[int, ...]
+    median_total_ns: int
+    call_count: int
+    median_per_call_ns: int
+    observation_construction_share: float
+    production_share: float
+    timing_mode: str
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "name": self.name,
+            "total_samples_ns": list(self.total_samples_ns),
+            "median_total_ns": self.median_total_ns,
+            "call_count": self.call_count,
+            "median_per_call_ns": self.median_per_call_ns,
+            "observation_construction_share": self.observation_construction_share,
+            "production_share": self.production_share,
+            "timing_mode": self.timing_mode,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class BenchmarkScenarioResult:
     bars: int
     step_count: int
@@ -188,6 +237,12 @@ class BenchmarkScenarioResult:
     overhead_ratio: float
     segments: tuple[SegmentAggregate, ...]
     structure_internal_segments: tuple[StructureInternalAggregate, ...]
+    observation_internal_segments: tuple[ObservationInternalAggregate, ...]
+    observation_residual_samples_ns: tuple[int, ...]
+    observation_residual_median_ns: int
+    observation_workload: Mapping[str, object]
+    fingerprint_workload: Mapping[str, object]
+    canonicalization_workload: Mapping[str, object]
     residual_samples_ns: tuple[int, ...]
     residual_median_ns: int
     residual_production_share: float
@@ -217,14 +272,45 @@ class BenchmarkScenarioResult:
             "structure_internal_segments": [
                 segment.to_dict() for segment in self.structure_internal_segments
             ],
+            "observation_attribution": {
+                "segments": [
+                    segment.to_dict() for segment in self.observation_internal_segments
+                ],
+                "residual": {
+                    "samples_ns": list(self.observation_residual_samples_ns),
+                    "median_ns": self.observation_residual_median_ns,
+                    "meaning": (
+                        "observation orchestration/model/unattributed residual "
+                        "after measured exclusive child segments"
+                    ),
+                    "timing_mode": "exclusive_residual",
+                },
+                "workload": dict(self.observation_workload),
+                "fingerprint_workload": dict(self.fingerprint_workload),
+                "canonicalization_workload": dict(self.canonicalization_workload),
+            },
+            "observation_segments": [
+                segment.to_dict() for segment in self.observation_internal_segments
+            ],
+            "observation_call_counts": {
+                segment.name: segment.call_count
+                for segment in self.observation_internal_segments
+            },
+            "observation_workload": dict(self.observation_workload),
+            "fingerprint_workload": dict(self.fingerprint_workload),
+            "canonicalization_workload": dict(self.canonicalization_workload),
+            "observation_residual": {
+                "samples_ns": list(self.observation_residual_samples_ns),
+                "median_ns": self.observation_residual_median_ns,
+                "timing_mode": "exclusive_residual",
+            },
             "residual": {
                 "samples_ns": list(self.residual_samples_ns),
                 "median_ns": self.residual_median_ns,
                 "production_share": self.residual_production_share,
                 "instrumented_share": self.residual_instrumented_share,
                 "meaning": (
-                    "instrumented orchestration/model/residual after "
-                    "measured segments"
+                    "instrumented orchestration/model/residual after measured segments"
                 ),
             },
             "serialization": self.serialization,
@@ -322,6 +408,34 @@ def _instrument_replay_bindings(recorder: TimingRecorder) -> Iterator[None]:
     original_prefix = cast(Any, replay_service._copy_replay_prefix)
     original_structure_precompute = getattr(replay_service, _STRUCTURE_PRECOMPUTE_ATTR)
     original_observation = getattr(replay_service, _OBSERVATION_ATTR)
+    observation_history_module = cast(Any, observation_history)
+    observation_builder_module = cast(Any, observation_builder)
+    original_observation_prefix = observation_history_module._normalize_price_prefix
+    original_observation_metadata = (
+        observation_history_module._normalize_observation_metadata
+    )
+    original_observation_identity = (
+        observation_history_module._build_observation_identity
+    )
+    original_observation_price_facts = observation_history_module._build_price_facts
+    original_observation_provenance = (
+        observation_history_module._build_observation_provenance
+    )
+    original_fingerprint_rows = (
+        observation_history_module._historical_observation_fingerprint_rows
+    )
+    original_fingerprint_canonical = (
+        observation_history_module
+        ._canonicalize_historical_observation_fingerprint_payload
+    )
+    original_fingerprint_hash = (
+        observation_history_module._hash_historical_observation_fingerprint
+    )
+    original_construct_observation = (
+        observation_history_module._construct_historical_observation
+    )
+    original_signal_facts = observation_builder_module.build_signal_facts
+    original_structure_facts = observation_builder_module.build_structure_facts
     structure_precompute_module = cast(Any, structure_precompute)
     structure_service_module = cast(Any, structure_service)
     original_structure_frame = structure_precompute_module._normalize_price_frame
@@ -452,9 +566,7 @@ def _instrument_replay_bindings(recorder: TimingRecorder) -> Iterator[None]:
                 PriceZoneObservation,
                 original_touch_lookup(series, timestamps, position),
             )
-        recorder.structure_zone_observation_touch_counts.append(
-            observation.touch_count
-        )
+        recorder.structure_zone_observation_touch_counts.append(observation.touch_count)
         return observation
 
     def timed_observe_zone(
@@ -468,10 +580,9 @@ def _instrument_replay_bindings(recorder: TimingRecorder) -> Iterator[None]:
                 PriceZoneObservation,
                 original_observe_zone(observer, prices, zone),
             )
-        recorder.structure_zone_observation_touch_counts.append(
-            observation.touch_count
-        )
+        recorder.structure_zone_observation_touch_counts.append(observation.touch_count)
         return observation
+
     def timed_structure_precompute(
         prices: pd.DataFrame,
     ) -> tuple[PriceStructureSnapshot, ...]:
@@ -482,6 +593,124 @@ def _instrument_replay_bindings(recorder: TimingRecorder) -> Iterator[None]:
             )
         recorder.structure_snapshots.extend(snapshots)
         return snapshots
+
+    def timed_observation_prefix(
+        prices: pd.DataFrame,
+        as_of: datetime,
+    ) -> pd.DataFrame:
+        recorder.observation_prefix_lengths.append(len(prices))
+        with recorder.measure("observation_prefix_preparation"):
+            return cast(pd.DataFrame, original_observation_prefix(prices, as_of))
+
+    def timed_observation_metadata(
+        *,
+        symbol: str,
+        interval: str,
+        provider: str,
+    ) -> tuple[str, str, str]:
+        with recorder.measure("observation_metadata"):
+            return cast(
+                tuple[str, str, str],
+                original_observation_metadata(
+                    symbol=symbol,
+                    interval=interval,
+                    provider=provider,
+                ),
+            )
+
+    def timed_observation_identity(*args: object, **kwargs: object) -> object:
+        with recorder.measure("observation_identity"):
+            return original_observation_identity(*args, **kwargs)
+
+    def timed_observation_price_facts(prices: pd.DataFrame) -> object:
+        with recorder.measure("observation_price_facts"):
+            return original_observation_price_facts(prices)
+
+    def timed_fingerprint_rows(prices: pd.DataFrame) -> list[dict[str, str]]:
+        with recorder.measure("observation_fingerprint_rows"):
+            rows = cast(list[dict[str, str]], original_fingerprint_rows(prices))
+        recorder.observation_fingerprint_rows.append(len(rows))
+        return rows
+
+    def timed_fingerprint_canonical(payload: Mapping[str, object]) -> str:
+        with recorder.measure("observation_fingerprint_canonical_json"):
+            canonical = cast(str, original_fingerprint_canonical(payload))
+        recorder.observation_canonical_chars.append(len(canonical))
+        return canonical
+
+    def timed_fingerprint_hash(canonical: str) -> str:
+        recorder.observation_hash_input_bytes.append(len(canonical.encode("utf-8")))
+        with recorder.measure("observation_fingerprint_hash"):
+            return cast(str, original_fingerprint_hash(canonical))
+
+    def timed_observation_provenance(*args: object, **kwargs: object) -> object:
+        child_before = sum(
+            recorder.total_ns(segment)
+            for segment in (
+                "observation_fingerprint_rows",
+                "observation_fingerprint_canonical_json",
+                "observation_fingerprint_hash",
+            )
+        )
+        start = perf_counter_ns()
+        try:
+            return original_observation_provenance(*args, **kwargs)
+        finally:
+            child_after = sum(
+                recorder.total_ns(segment)
+                for segment in (
+                    "observation_fingerprint_rows",
+                    "observation_fingerprint_canonical_json",
+                    "observation_fingerprint_hash",
+                )
+            )
+            recorder.record_duration(
+                "observation_provenance",
+                perf_counter_ns() - start - (child_after - child_before),
+            )
+
+    def timed_signal_facts(snapshot: MarketSignalSnapshot) -> object:
+        recorder.observation_signal_counts.append(len(snapshot.signals))
+        with recorder.measure("observation_signal_facts"):
+            return original_signal_facts(snapshot)
+
+    def timed_structure_facts(snapshot: PriceStructureSnapshot) -> object:
+        recorder.observation_candidate_counts.append(len(snapshot.candidates))
+        recorder.observation_zone_counts.append(len(snapshot.observed_zones))
+        recorder.observation_touch_counts.append(
+            sum(
+                observed.observation.touch_count for observed in snapshot.observed_zones
+            )
+        )
+        with recorder.measure("observation_structure_facts"):
+            return original_structure_facts(snapshot)
+
+    def timed_construct_observation(
+        *args: object,
+        **kwargs: object,
+    ) -> MarketObservation:
+        child_before = sum(
+            recorder.total_ns(segment)
+            for segment in ("observation_signal_facts", "observation_structure_facts")
+        )
+        start = perf_counter_ns()
+        try:
+            return cast(
+                MarketObservation,
+                original_construct_observation(*args, **kwargs),
+            )
+        finally:
+            child_after = sum(
+                recorder.total_ns(segment)
+                for segment in (
+                    "observation_signal_facts",
+                    "observation_structure_facts",
+                )
+            )
+            recorder.record_duration(
+                "observation_model_construction",
+                perf_counter_ns() - start - (child_after - child_before),
+            )
 
     def timed_observation(*args: object, **kwargs: object) -> MarketObservation:
         with recorder.measure("observation_construction"):
@@ -496,6 +725,45 @@ def _instrument_replay_bindings(recorder: TimingRecorder) -> Iterator[None]:
         (replay_service, "_copy_replay_prefix", timed_prefix),
         (replay_service, _STRUCTURE_PRECOMPUTE_ATTR, timed_structure_precompute),
         (replay_service, _OBSERVATION_ATTR, timed_observation),
+        (observation_history, "_normalize_price_prefix", timed_observation_prefix),
+        (
+            observation_history,
+            "_normalize_observation_metadata",
+            timed_observation_metadata,
+        ),
+        (
+            observation_history,
+            "_build_observation_identity",
+            timed_observation_identity,
+        ),
+        (observation_history, "_build_price_facts", timed_observation_price_facts),
+        (
+            observation_history,
+            "_build_observation_provenance",
+            timed_observation_provenance,
+        ),
+        (
+            observation_history,
+            "_historical_observation_fingerprint_rows",
+            timed_fingerprint_rows,
+        ),
+        (
+            observation_history,
+            "_canonicalize_historical_observation_fingerprint_payload",
+            timed_fingerprint_canonical,
+        ),
+        (
+            observation_history,
+            "_hash_historical_observation_fingerprint",
+            timed_fingerprint_hash,
+        ),
+        (
+            observation_history,
+            "_construct_historical_observation",
+            timed_construct_observation,
+        ),
+        (observation_builder, "build_signal_facts", timed_signal_facts),
+        (observation_builder, "build_structure_facts", timed_structure_facts),
         (structure_precompute, "_normalize_price_frame", timed_structure_frame),
         (structure_precompute, "_detect_swing_highs_normalized", timed_pivot_highs),
         (structure_precompute, "_detect_swing_lows_normalized", timed_pivot_lows),
@@ -518,6 +786,7 @@ def _instrument_replay_bindings(recorder: TimingRecorder) -> Iterator[None]:
         for target, name, replacement in patches:
             stack.enter_context(_patched_attribute(target, name, replacement))
         yield
+
 
 def build_price_frame(bars: int, *, seed: int = DEFAULT_SEED) -> pd.DataFrame:
     if bars <= 0:
@@ -556,8 +825,7 @@ def build_benchmark_frames(
     _validate_bars(bars)
     max_frame = build_price_frame(max(bars), seed=seed)
     return {
-        bar_count: _copy_benchmark_prefix(max_frame, bar_count)
-        for bar_count in bars
+        bar_count: _copy_benchmark_prefix(max_frame, bar_count) for bar_count in bars
     }
 
 
@@ -822,6 +1090,15 @@ def run_scenario(
     structure_internal_segments = _aggregate_structure_internal_segments(
         recorders,
     )
+    observation_internal_segments = _aggregate_observation_internal_segments(
+        recorders,
+        production_median_ns=production_median,
+    )
+    observation_residual_samples = _observation_residual_samples(recorders)
+    observation_residual_median = _median(observation_residual_samples)
+    observation_workload = _observation_workload_stats(recorders)
+    fingerprint_workload = _fingerprint_workload_stats(recorders)
+    canonicalization_workload = _canonicalization_workload_stats(recorders)
     residual_samples = tuple(
         max(0, total - sum(recorder.total_ns(segment) for segment in SEGMENT_NAMES))
         for total, recorder in zip(instrumented_samples, recorders, strict=True)
@@ -835,10 +1112,22 @@ def run_scenario(
     overhead_ratio = (
         instrumented_median / production_median if production_median else 0.0
     )
+    largest_observation_segment = max(
+        observation_internal_segments,
+        key=lambda segment: segment.median_total_ns,
+    )
     decision_inputs: dict[str, object] = {
         "structure_production_share": structure_share,
         "prefix_copy_production_share": prefix_share,
         "observation_production_share": observation_share,
+        "largest_observation_segment": largest_observation_segment.name,
+        "largest_observation_segment_median_ns": (
+            largest_observation_segment.median_total_ns
+        ),
+        "largest_observation_segment_observation_share": (
+            largest_observation_segment.observation_construction_share
+        ),
+        "observation_residual_median_ns": observation_residual_median,
         "instrumentation_overhead_ratio": overhead_ratio,
         "step_count": production_result.step_count,
         "strategy_count": len(production_result.strategies),
@@ -857,6 +1146,12 @@ def run_scenario(
         overhead_ratio=overhead_ratio,
         segments=segments,
         structure_internal_segments=structure_internal_segments,
+        observation_internal_segments=observation_internal_segments,
+        observation_residual_samples_ns=observation_residual_samples,
+        observation_residual_median_ns=observation_residual_median,
+        observation_workload=observation_workload,
+        fingerprint_workload=fingerprint_workload,
+        canonicalization_workload=canonicalization_workload,
         residual_samples_ns=residual_samples,
         residual_median_ns=residual_median,
         residual_production_share=_share(residual_median, production_median),
@@ -996,6 +1291,40 @@ def _aggregate_structure_internal_segments(
     return tuple(aggregates)
 
 
+def _aggregate_observation_internal_segments(
+    recorders: Sequence[TimingRecorder],
+    *,
+    production_median_ns: int,
+) -> tuple[ObservationInternalAggregate, ...]:
+    aggregates: list[ObservationInternalAggregate] = []
+    observation_totals = tuple(
+        recorder.total_ns("observation_construction") for recorder in recorders
+    )
+    observation_median = _median(observation_totals)
+    for name in OBSERVATION_INTERNAL_SEGMENT_NAMES:
+        total_samples = tuple(recorder.total_ns(name) for recorder in recorders)
+        call_counts = [recorder.call_count(name) for recorder in recorders]
+        median_total = _median(total_samples)
+        median_call_count = int(statistics.median(call_counts)) if call_counts else 0
+        median_per_call = median_total // median_call_count if median_call_count else 0
+        aggregates.append(
+            ObservationInternalAggregate(
+                name=name,
+                total_samples_ns=total_samples,
+                median_total_ns=median_total,
+                call_count=median_call_count,
+                median_per_call_ns=median_per_call,
+                observation_construction_share=_share(
+                    median_total,
+                    observation_median,
+                ),
+                production_share=_share(median_total, production_median_ns),
+                timing_mode="exclusive",
+            )
+        )
+    return tuple(aggregates)
+
+
 def _structure_internal_aggregate(
     name: str,
     total_samples: tuple[int, ...],
@@ -1015,6 +1344,117 @@ def _structure_internal_aggregate(
     )
 
 
+def _observation_residual_samples(
+    recorders: Sequence[TimingRecorder],
+) -> tuple[int, ...]:
+    return tuple(
+        max(
+            0,
+            recorder.total_ns("observation_construction")
+            - sum(
+                recorder.total_ns(segment)
+                for segment in OBSERVATION_INTERNAL_SEGMENT_NAMES
+            ),
+        )
+        for recorder in recorders
+    )
+
+
+def _observation_workload_stats(
+    recorders: Sequence[TimingRecorder],
+) -> dict[str, object]:
+    prefix_lengths = [
+        sum(recorder.observation_prefix_lengths) for recorder in recorders
+    ]
+    signal_counts = [sum(recorder.observation_signal_counts) for recorder in recorders]
+    candidate_counts = [
+        sum(recorder.observation_candidate_counts) for recorder in recorders
+    ]
+    zone_counts = [sum(recorder.observation_zone_counts) for recorder in recorders]
+    touch_counts = [sum(recorder.observation_touch_counts) for recorder in recorders]
+    return {
+        "source": (
+            "instrumented production-path observation helper calls; no extra "
+            "observation builder or fingerprint calls executed"
+        ),
+        "builder_calls": _median(
+            [recorder.call_count("observation_construction") for recorder in recorders]
+        ),
+        "prefix_length_cumulative": _median(prefix_lengths),
+        "prefix_length_min": min(recorders[0].observation_prefix_lengths)
+        if recorders and recorders[0].observation_prefix_lengths
+        else 0,
+        "prefix_length_max": max(recorders[0].observation_prefix_lengths)
+        if recorders and recorders[0].observation_prefix_lengths
+        else 0,
+        "price_fact_calls": _median(
+            [recorder.call_count("observation_price_facts") for recorder in recorders]
+        ),
+        "signal_fact_calls": _median(
+            [recorder.call_count("observation_signal_facts") for recorder in recorders]
+        ),
+        "structure_fact_calls": _median(
+            [
+                recorder.call_count("observation_structure_facts")
+                for recorder in recorders
+            ]
+        ),
+        "model_construction_calls": _median(
+            [
+                recorder.call_count("observation_model_construction")
+                for recorder in recorders
+            ]
+        ),
+        "signal_facts_converted": _median(signal_counts),
+        "structure_candidates_converted": _median(candidate_counts),
+        "structure_zones_converted": _median(zone_counts),
+        "structure_touch_count_payload": _median(touch_counts),
+        "observation_model_field_count": 5,
+    }
+
+
+def _fingerprint_workload_stats(
+    recorders: Sequence[TimingRecorder],
+) -> dict[str, object]:
+    rows = [sum(recorder.observation_fingerprint_rows) for recorder in recorders]
+    bytes_values = [
+        sum(recorder.observation_hash_input_bytes) for recorder in recorders
+    ]
+    return {
+        "fingerprint_calls": _median(
+            [
+                recorder.call_count("observation_fingerprint_hash")
+                for recorder in recorders
+            ]
+        ),
+        "canonicalized_row_count": _median(rows),
+        "hash_input_bytes": _median(bytes_values),
+        "hash_function": "sha256",
+        "includes_prefix_rows": True,
+        "includes_signal_snapshot": False,
+        "includes_structure_snapshot": False,
+        "includes_symbol_provider_interval_as_of": True,
+    }
+
+
+def _canonicalization_workload_stats(
+    recorders: Sequence[TimingRecorder],
+) -> dict[str, object]:
+    chars = [sum(recorder.observation_canonical_chars) for recorder in recorders]
+    return {
+        "canonicalization_calls": _median(
+            [
+                recorder.call_count("observation_fingerprint_canonical_json")
+                for recorder in recorders
+            ]
+        ),
+        "canonicalized_chars": _median(chars),
+        "sort_keys": True,
+        "allow_nan": False,
+        "separators": [",", ":"],
+    }
+
+
 def _structure_workload_stats(
     recorders: Sequence[TimingRecorder],
 ) -> dict[str, object]:
@@ -1029,17 +1469,14 @@ def _structure_workload_stats(
         total_candidate_count += len(snapshot.candidates)
         total_observed_zone_count += len(snapshot.observed_zones)
         total_independent_zone_touches += sum(
-            observed.observation.touch_count
-            for observed in snapshot.observed_zones
+            observed.observation.touch_count for observed in snapshot.observed_zones
         )
     final_snapshot = snapshots[-1] if snapshots else None
     logical_observer_calls = [
-        recorder.call_count("structure_touch_state_lookup")
-        for recorder in recorders
+        recorder.call_count("structure_touch_state_lookup") for recorder in recorders
     ]
     touch_state_builds = [
-        recorder.call_count("structure_touch_state_build")
-        for recorder in recorders
+        recorder.call_count("structure_touch_state_build") for recorder in recorders
     ]
     fallback_public_observer_calls = [
         recorder.call_count("structure_fallback_public_observer")
@@ -1050,28 +1487,22 @@ def _structure_workload_stats(
         for recorder in recorders
     ]
     logical_prefix_rows = [
-        sum(recorder.structure_touch_logical_prefix_rows)
-        for recorder in recorders
+        sum(recorder.structure_touch_logical_prefix_rows) for recorder in recorders
     ]
     physical_vector_rows = [
-        sum(recorder.structure_touch_physical_rows)
-        for recorder in recorders
+        sum(recorder.structure_touch_physical_rows) for recorder in recorders
     ]
     fallback_scanned_rows = [
-        sum(recorder.structure_zone_observation_scanned_rows)
-        for recorder in recorders
+        sum(recorder.structure_zone_observation_scanned_rows) for recorder in recorders
     ]
     touch_array_bytes = [
-        sum(recorder.structure_touch_array_bytes)
-        for recorder in recorders
+        sum(recorder.structure_touch_array_bytes) for recorder in recorders
     ]
     observed_touches = [
-        sum(recorder.structure_zone_observation_touch_counts)
-        for recorder in recorders
+        sum(recorder.structure_zone_observation_touch_counts) for recorder in recorders
     ]
     cluster_input_candidates = [
-        sum(recorder.structure_cluster_candidate_counts)
-        for recorder in recorders
+        sum(recorder.structure_cluster_candidate_counts) for recorder in recorders
     ]
     median_logical_calls = _median(logical_observer_calls)
     median_builds = _median(touch_state_builds)
@@ -1120,15 +1551,14 @@ def _structure_workload_stats(
         "touch_state_array_bytes": _median(touch_array_bytes),
     }
 
+
 def _call_counts(
     recorders: Sequence[TimingRecorder],
     result: HistoricalReplayResult,
 ) -> dict[str, int]:
     counts = {
         name: int(
-            statistics.median(
-                [recorder.call_count(name) for recorder in recorders]
-            )
+            statistics.median([recorder.call_count(name) for recorder in recorders])
         )
         for name in SEGMENT_NAMES
     }
@@ -1206,6 +1636,12 @@ def _overall_decision_inputs(
         ],
         "largest_prefix_copy_production_share": largest.decision_inputs[
             "prefix_copy_production_share"
+        ],
+        "largest_observation_segment": largest.decision_inputs[
+            "largest_observation_segment"
+        ],
+        "largest_observation_segment_observation_share": largest.decision_inputs[
+            "largest_observation_segment_observation_share"
         ],
         "production_growth_ratio_first_to_largest": growth_ratio,
         "decision_note": (
@@ -1301,8 +1737,7 @@ def render_table(payload: Mapping[str, object]) -> str:
             )
         )
         lines.append(
-            "  structure internals: name calls median_total_ms "
-            "structure_share"
+            "  structure internals: name calls median_total_ms structure_share"
         )
         for segment in cast(
             list[dict[str, object]],
