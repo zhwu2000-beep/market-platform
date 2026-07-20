@@ -83,7 +83,9 @@ STRUCTURE_INTERNAL_SEGMENT_NAMES = (
     "structure_atr_series",
     "structure_candidate_visibility",
     "structure_clustering_and_zone_construction",
-    "structure_touch_observation",
+    "structure_touch_state_build",
+    "structure_touch_state_lookup",
+    "structure_fallback_public_observer",
 )
 
 SERIALIZATION_ITEMS = (
@@ -108,6 +110,10 @@ class TimingRecorder:
     durations_ns: dict[str, list[int]] = field(default_factory=dict)
     structure_snapshots: list[PriceStructureSnapshot] = field(default_factory=list)
     structure_cluster_candidate_counts: list[int] = field(default_factory=list)
+    structure_touch_keys: list[tuple[float, float]] = field(default_factory=list)
+    structure_touch_logical_prefix_rows: list[int] = field(default_factory=list)
+    structure_touch_physical_rows: list[int] = field(default_factory=list)
+    structure_touch_array_bytes: list[int] = field(default_factory=list)
     structure_zone_observation_scanned_rows: list[int] = field(default_factory=list)
     structure_zone_observation_touch_counts: list[int] = field(default_factory=list)
 
@@ -323,8 +329,10 @@ def _instrument_replay_bindings(recorder: TimingRecorder) -> Iterator[None]:
     original_pivot_lows = structure_precompute_module._detect_swing_lows_normalized
     original_atr_series = structure_precompute_module._calculate_atr_series_normalized
     original_cluster = structure_precompute_module.cluster_price_levels
-    original_filter_candidates = structure_service_module.filter_confirmed_pivots
+    original_filter_candidates = structure_precompute_module.filter_confirmed_pivots
     original_observe_zone = structure_service_module._observe_zone
+    original_touch_build = structure_precompute_module._build_touch_observation_series
+    original_touch_lookup = structure_precompute_module._touch_observation_at_position
 
     def timed_normalize(prices: pd.DataFrame, symbol: str) -> pd.DataFrame:
         with recorder.measure("price_normalization"):
@@ -416,13 +424,46 @@ def _instrument_replay_bindings(recorder: TimingRecorder) -> Iterator[None]:
                 ),
             )
 
+    def timed_touch_build(
+        prices: pd.DataFrame,
+        *,
+        lower_bound: float,
+        upper_bound: float,
+    ) -> object:
+        recorder.structure_touch_keys.append((float(lower_bound), float(upper_bound)))
+        recorder.structure_touch_physical_rows.append(len(prices))
+        with recorder.measure("structure_touch_state_build"):
+            series = original_touch_build(
+                prices,
+                lower_bound=lower_bound,
+                upper_bound=upper_bound,
+            )
+        recorder.structure_touch_array_bytes.append(int(series.array_bytes))
+        return series
+
+    def timed_touch_lookup(
+        series: object,
+        timestamps: tuple[datetime, ...],
+        position: int,
+    ) -> PriceZoneObservation:
+        recorder.structure_touch_logical_prefix_rows.append(position + 1)
+        with recorder.measure("structure_touch_state_lookup"):
+            observation = cast(
+                PriceZoneObservation,
+                original_touch_lookup(series, timestamps, position),
+            )
+        recorder.structure_zone_observation_touch_counts.append(
+            observation.touch_count
+        )
+        return observation
+
     def timed_observe_zone(
         observer: Any,
         prices: pd.DataFrame,
         zone: PriceZone,
     ) -> PriceZoneObservation:
         recorder.structure_zone_observation_scanned_rows.append(len(prices))
-        with recorder.measure("structure_touch_observation"):
+        with recorder.measure("structure_fallback_public_observer"):
             observation = cast(
                 PriceZoneObservation,
                 original_observe_zone(observer, prices, zone),
@@ -431,7 +472,6 @@ def _instrument_replay_bindings(recorder: TimingRecorder) -> Iterator[None]:
             observation.touch_count
         )
         return observation
-
     def timed_structure_precompute(
         prices: pd.DataFrame,
     ) -> tuple[PriceStructureSnapshot, ...]:
@@ -461,7 +501,17 @@ def _instrument_replay_bindings(recorder: TimingRecorder) -> Iterator[None]:
         (structure_precompute, "_detect_swing_lows_normalized", timed_pivot_lows),
         (structure_precompute, "_calculate_atr_series_normalized", timed_atr_series),
         (structure_precompute, "cluster_price_levels", timed_cluster),
-        (structure_service, "filter_confirmed_pivots", timed_filter_candidates),
+        (
+            structure_precompute,
+            "_build_touch_observation_series",
+            timed_touch_build,
+        ),
+        (
+            structure_precompute,
+            "_touch_observation_at_position",
+            timed_touch_lookup,
+        ),
+        (structure_precompute, "filter_confirmed_pivots", timed_filter_candidates),
         (structure_service, "_observe_zone", timed_observe_zone),
     )
     with ExitStack() as stack:
@@ -983,16 +1033,36 @@ def _structure_workload_stats(
             for observed in snapshot.observed_zones
         )
     final_snapshot = snapshots[-1] if snapshots else None
-    zone_observer_calls = [
-        recorder.call_count("structure_touch_observation")
+    logical_observer_calls = [
+        recorder.call_count("structure_touch_state_lookup")
+        for recorder in recorders
+    ]
+    touch_state_builds = [
+        recorder.call_count("structure_touch_state_build")
+        for recorder in recorders
+    ]
+    fallback_public_observer_calls = [
+        recorder.call_count("structure_fallback_public_observer")
         for recorder in recorders
     ]
     clustering_calls = [
         recorder.call_count("structure_clustering_and_zone_construction")
         for recorder in recorders
     ]
-    scanned_rows = [
+    logical_prefix_rows = [
+        sum(recorder.structure_touch_logical_prefix_rows)
+        for recorder in recorders
+    ]
+    physical_vector_rows = [
+        sum(recorder.structure_touch_physical_rows)
+        for recorder in recorders
+    ]
+    fallback_scanned_rows = [
         sum(recorder.structure_zone_observation_scanned_rows)
+        for recorder in recorders
+    ]
+    touch_array_bytes = [
+        sum(recorder.structure_touch_array_bytes)
         for recorder in recorders
     ]
     observed_touches = [
@@ -1003,6 +1073,10 @@ def _structure_workload_stats(
         sum(recorder.structure_cluster_candidate_counts)
         for recorder in recorders
     ]
+    median_logical_calls = _median(logical_observer_calls)
+    median_builds = _median(touch_state_builds)
+    median_logical_rows = _median(logical_prefix_rows)
+    median_physical_rows = _median(physical_vector_rows)
     return {
         "source": (
             "first measured instrumented run PriceStructureSnapshot returns and "
@@ -1022,12 +1096,29 @@ def _structure_workload_stats(
         ),
         "total_independent_zone_touches": total_independent_zone_touches,
         "clustering_call_count": _median(clustering_calls),
-        "zone_observer_call_count": _median(zone_observer_calls),
-        "cumulative_zone_observer_scanned_rows": _median(scanned_rows),
+        "zone_observer_call_count": median_logical_calls,
+        "cumulative_zone_observer_scanned_rows": median_logical_rows,
         "zone_observer_observed_touch_count": _median(observed_touches),
         "cumulative_cluster_input_candidates": _median(cluster_input_candidates),
+        "logical_observer_calls": median_logical_calls,
+        "logical_prefix_rows": median_logical_rows,
+        "touch_state_builds": median_builds,
+        "touch_state_lookups": median_logical_calls,
+        "unique_touch_keys": median_builds,
+        "touch_key_reuse_ratio": (
+            0.0
+            if median_logical_calls == 0
+            else (median_logical_calls - median_builds) / median_logical_calls
+        ),
+        "fallback_public_observer_calls": _median(fallback_public_observer_calls),
+        "fallback_public_observer_rows": _median(fallback_scanned_rows),
+        "physical_vector_rows_processed": median_physical_rows,
+        "logical_prefix_rows_avoided": max(
+            0,
+            median_logical_rows - median_physical_rows,
+        ),
+        "touch_state_array_bytes": _median(touch_array_bytes),
     }
-
 
 def _call_counts(
     recorders: Sequence[TimingRecorder],
@@ -1191,14 +1282,22 @@ def render_table(payload: Mapping[str, object]) -> str:
             "  structure workload: available_steps={available} "
             "final_candidates={candidates} final_zones={zones} "
             "total_touches={touches} cluster_calls={cluster_calls} "
-            "zone_observer_calls={observer_calls} scanned_rows={scanned_rows}".format(
+            "logical_touch_calls={observer_calls} touch_builds={builds} "
+            "reuse={reuse:.1%} logical_rows={logical_rows} "
+            "physical_rows={physical_rows} avoided_rows={avoided_rows} "
+            "array_bytes={array_bytes}".format(
                 available=workload["structure_available_step_count"],
                 candidates=workload["final_candidate_count"],
                 zones=workload["final_observed_zone_count"],
                 touches=workload["total_independent_zone_touches"],
                 cluster_calls=workload["clustering_call_count"],
-                observer_calls=workload["zone_observer_call_count"],
-                scanned_rows=workload["cumulative_zone_observer_scanned_rows"],
+                observer_calls=workload["logical_observer_calls"],
+                builds=workload["touch_state_builds"],
+                reuse=cast(float, workload["touch_key_reuse_ratio"]),
+                logical_rows=workload["logical_prefix_rows"],
+                physical_rows=workload["physical_vector_rows_processed"],
+                avoided_rows=workload["logical_prefix_rows_avoided"],
+                array_bytes=workload["touch_state_array_bytes"],
             )
         )
         lines.append(
