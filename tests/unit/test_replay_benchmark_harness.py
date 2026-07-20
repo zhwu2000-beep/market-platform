@@ -166,6 +166,8 @@ def test_instrumentation_restores_patches_and_does_not_swallow_exceptions(
     original_structure_precompute = replay_service.precompute_price_structure_snapshots
     original_structure_frame = structure_precompute._normalize_price_frame
     original_observe_zone = structure_service._observe_zone
+    original_touch_build = structure_precompute._build_touch_observation_series
+    original_touch_lookup = structure_precompute._touch_observation_at_position
     original_normalize = replay_service._normalize_replay_prices
 
     with pytest.raises(
@@ -184,6 +186,8 @@ def test_instrumentation_restores_patches_and_does_not_swallow_exceptions(
     )
     assert structure_precompute._normalize_price_frame is original_structure_frame
     assert structure_service._observe_zone is original_observe_zone
+    assert structure_precompute._build_touch_observation_series is original_touch_build
+    assert structure_precompute._touch_observation_at_position is original_touch_lookup
 
     def exploding_normalize(prices: pd.DataFrame, symbol: str) -> pd.DataFrame:
         raise ValueError("bad frame")
@@ -374,8 +378,38 @@ def test_scenario_reports_structure_workload_from_instrumented_snapshots() -> No
     assert "final_candidate_count" in workload
     assert "final_observed_zone_count" in workload
     assert "total_independent_zone_touches" in workload
+    assert "touch_state_builds" in workload
+    assert "touch_state_lookups" in workload
+    assert "logical_prefix_rows_avoided" in workload
 
 
+
+
+def test_touch_optimization_workload_metrics_are_consistent() -> None:
+    scenario = benchmark_replay.run_scenario(
+        30,
+        runs=1,
+        warmups=0,
+        seed=31,
+    ).to_dict()
+    workload = scenario["structure_workload"]
+    logical_calls = workload["logical_observer_calls"]
+    builds = workload["touch_state_builds"]
+    physical_rows = workload["physical_vector_rows_processed"]
+    logical_rows = workload["logical_prefix_rows"]
+
+    assert workload["touch_state_lookups"] == logical_calls
+    assert workload["unique_touch_keys"] == builds
+    assert builds <= logical_calls
+    assert workload["fallback_public_observer_calls"] == 0
+    assert physical_rows == builds * scenario["bars"]
+    assert workload["logical_prefix_rows_avoided"] == max(
+        0,
+        logical_rows - physical_rows,
+    )
+    expected_reuse = 0.0 if logical_calls == 0 else 1 - builds / logical_calls
+    assert workload["touch_key_reuse_ratio"] == pytest.approx(expected_reuse)
+    assert workload["touch_state_array_bytes"] >= 0
 def test_structure_internal_attribution_records_real_call_counts() -> None:
     result, _samples, recorders = benchmark_replay.run_instrumented_samples(
         _prices(30),
@@ -395,15 +429,30 @@ def test_structure_internal_attribution_records_real_call_counts() -> None:
         recorder.call_count("structure_clustering_and_zone_construction")
         == result.step_count - 13
     )
-    assert recorder.call_count("structure_touch_observation") == sum(
+    logical_touch_observations = sum(
         len(snapshot.observed_zones) for snapshot in recorder.structure_snapshots
     )
     assert (
-        sum(recorder.structure_zone_observation_scanned_rows)
-        >= recorder.call_count("structure_touch_observation")
+        recorder.call_count("structure_touch_state_lookup")
+        == logical_touch_observations
     )
+    assert (
+        recorder.call_count("structure_touch_state_build")
+        <= logical_touch_observations
+    )
+    assert recorder.call_count("structure_fallback_public_observer") == 0
+    assert len(set(recorder.structure_touch_keys)) == recorder.call_count(
+        "structure_touch_state_build"
+    )
+    assert (
+        sum(recorder.structure_touch_logical_prefix_rows)
+        >= logical_touch_observations
+    )
+    assert sum(recorder.structure_touch_physical_rows) >= recorder.call_count(
+        "structure_touch_state_build"
+    )
+    assert sum(recorder.structure_touch_array_bytes) >= 0
     assert internal_by_name["structure_precompute_residual"].median_total_ns >= 0
-
 
 def test_structure_internal_segments_are_not_counted_in_replay_residual() -> None:
     _result, samples, recorders = benchmark_replay.run_instrumented_samples(
