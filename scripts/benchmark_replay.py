@@ -25,6 +25,7 @@ import market_platform.observation.history as observation_history
 import market_platform.replay.service as replay_service
 import market_platform.structure.precompute as structure_precompute
 import market_platform.structure.service as structure_service
+from market_platform.data.historical import HistoricalPricePrefix, HistoricalPriceSeries
 from market_platform.observation.models import MarketObservation
 from market_platform.replay import (
     HistoricalReplayResult,
@@ -52,9 +53,9 @@ from market_platform.structure.models import (
     PriceZoneObservation,
 )
 
-SCHEMA_VERSION = "1.0.0"
+SCHEMA_VERSION = "1.1.0"
 _PRECOMPUTE_ATTR = "precompute_market_signal_snapshots"
-_OBSERVATION_ATTR = "build_historical_market_observation"
+_OBSERVATION_ATTR = "build_historical_market_observation_from_prefix"
 _STRUCTURE_PRECOMPUTE_ATTR = "precompute_price_structure_snapshots"
 DEFAULT_BARS = (100, 300, 500)
 DEFAULT_RUNS = 3
@@ -71,6 +72,9 @@ SEGMENT_NAMES = (
     "signal_precompute",
     "strategy_identity_construction",
     "prefix_slicing_copy",
+    "full_series_materialization",
+    "prefix_object_construction",
+    "prefix_dataframe_materialization",
     "structure_precompute",
     "structure_analysis",
     "observation_construction",
@@ -133,6 +137,11 @@ class TimingRecorder:
     structure_zone_observation_scanned_rows: list[int] = field(default_factory=list)
     structure_zone_observation_touch_counts: list[int] = field(default_factory=list)
     observation_prefix_lengths: list[int] = field(default_factory=list)
+    canonical_series_lengths: list[int] = field(default_factory=list)
+    full_series_materialization_lengths: list[int] = field(default_factory=list)
+    prefix_dataframe_materialization_lengths: list[int] = field(default_factory=list)
+    observation_raw_builder_calls: int = 0
+    observation_prefix_builder_calls: int = 0
     observation_fingerprint_rows: list[int] = field(default_factory=list)
     observation_canonical_chars: list[int] = field(default_factory=list)
     observation_hash_input_bytes: list[int] = field(default_factory=list)
@@ -400,17 +409,21 @@ def _patched_attribute(
 
 @contextmanager
 def _instrument_replay_bindings(recorder: TimingRecorder) -> Iterator[None]:
-    original_normalize = cast(Any, replay_service._normalize_replay_prices)
-    original_provider = cast(Any, replay_service._single_provider)
+    original_normalize = cast(Any, replay_service._build_historical_price_series)
     original_positions = cast(Any, replay_service._replay_positions)
     original_precompute = getattr(replay_service, _PRECOMPUTE_ATTR)
     original_identities = cast(Any, replay_service._strategy_identities)
-    original_prefix = cast(Any, replay_service._copy_replay_prefix)
+    original_full_materialization = HistoricalPriceSeries.to_dataframe
+    original_prefix = HistoricalPriceSeries.prefix_at
+    original_prefix_materialization = HistoricalPricePrefix.to_dataframe
     original_structure_precompute = getattr(replay_service, _STRUCTURE_PRECOMPUTE_ATTR)
     original_observation = getattr(replay_service, _OBSERVATION_ATTR)
+    original_raw_observation = cast(
+        Any,
+        observation_history.build_historical_market_observation,
+    )
     observation_history_module = cast(Any, observation_history)
     observation_builder_module = cast(Any, observation_builder)
-    original_observation_prefix = observation_history_module._normalize_price_prefix
     original_observation_metadata = (
         observation_history_module._normalize_observation_metadata
     )
@@ -448,16 +461,17 @@ def _instrument_replay_bindings(recorder: TimingRecorder) -> Iterator[None]:
     original_touch_build = structure_precompute_module._build_touch_observation_series
     original_touch_lookup = structure_precompute_module._touch_observation_at_position
 
-    def timed_normalize(prices: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    def timed_normalize(
+        prices: pd.DataFrame,
+        symbol: str,
+    ) -> HistoricalPriceSeries:
         with recorder.measure("price_normalization"):
-            return cast(pd.DataFrame, original_normalize(prices, symbol))
-
-    def timed_provider(prices: pd.DataFrame) -> str:
-        with recorder.measure("provider_extraction"):
-            return cast(str, original_provider(prices))
+            series = cast(HistoricalPriceSeries, original_normalize(prices, symbol))
+        recorder.canonical_series_lengths.append(len(series))
+        return series
 
     def timed_positions(
-        prices: pd.DataFrame,
+        series: HistoricalPriceSeries,
         *,
         start: datetime | None,
         end: datetime | None,
@@ -465,7 +479,7 @@ def _instrument_replay_bindings(recorder: TimingRecorder) -> Iterator[None]:
         with recorder.measure("replay_position_selection"):
             return cast(
                 tuple[int, ...],
-                original_positions(prices, start=start, end=end),
+                original_positions(series, start=start, end=end),
             )
 
     def timed_precompute(prices: pd.DataFrame) -> tuple[MarketSignalSnapshot, ...]:
@@ -476,9 +490,26 @@ def _instrument_replay_bindings(recorder: TimingRecorder) -> Iterator[None]:
         with recorder.measure("strategy_identity_construction"):
             return original_identities(strategies)
 
-    def timed_prefix(prices: pd.DataFrame, position: int) -> pd.DataFrame:
-        with recorder.measure("prefix_slicing_copy"):
-            return cast(pd.DataFrame, original_prefix(prices, position))
+    def timed_full_materialization(
+        series: HistoricalPriceSeries,
+    ) -> pd.DataFrame:
+        recorder.full_series_materialization_lengths.append(len(series))
+        with recorder.measure("full_series_materialization"):
+            return original_full_materialization(series)
+
+    def timed_prefix(
+        series: HistoricalPriceSeries,
+        position: int,
+    ) -> HistoricalPricePrefix:
+        with recorder.measure("prefix_object_construction"):
+            return original_prefix(series, position)
+
+    def timed_prefix_materialization(
+        prefix: HistoricalPricePrefix,
+    ) -> pd.DataFrame:
+        recorder.prefix_dataframe_materialization_lengths.append(len(prefix))
+        with recorder.measure("prefix_dataframe_materialization"):
+            return original_prefix_materialization(prefix)
 
     def timed_structure_frame(prices: pd.DataFrame) -> pd.DataFrame:
         with recorder.measure("structure_frame_preparation"):
@@ -594,14 +625,6 @@ def _instrument_replay_bindings(recorder: TimingRecorder) -> Iterator[None]:
         recorder.structure_snapshots.extend(snapshots)
         return snapshots
 
-    def timed_observation_prefix(
-        prices: pd.DataFrame,
-        as_of: datetime,
-    ) -> pd.DataFrame:
-        recorder.observation_prefix_lengths.append(len(prices))
-        with recorder.measure("observation_prefix_preparation"):
-            return cast(pd.DataFrame, original_observation_prefix(prices, as_of))
-
     def timed_observation_metadata(
         *,
         symbol: str,
@@ -622,13 +645,15 @@ def _instrument_replay_bindings(recorder: TimingRecorder) -> Iterator[None]:
         with recorder.measure("observation_identity"):
             return original_observation_identity(*args, **kwargs)
 
-    def timed_observation_price_facts(prices: pd.DataFrame) -> object:
+    def timed_observation_price_facts(prefix: HistoricalPricePrefix) -> object:
         with recorder.measure("observation_price_facts"):
-            return original_observation_price_facts(prices)
+            return original_observation_price_facts(prefix)
 
-    def timed_fingerprint_rows(prices: pd.DataFrame) -> list[dict[str, str]]:
+    def timed_fingerprint_rows(
+        prefix: HistoricalPricePrefix,
+    ) -> list[dict[str, str]]:
         with recorder.measure("observation_fingerprint_rows"):
-            rows = cast(list[dict[str, str]], original_fingerprint_rows(prices))
+            rows = cast(list[dict[str, str]], original_fingerprint_rows(prefix))
         recorder.observation_fingerprint_rows.append(len(rows))
         return rows
 
@@ -712,20 +737,45 @@ def _instrument_replay_bindings(recorder: TimingRecorder) -> Iterator[None]:
                 perf_counter_ns() - start - (child_after - child_before),
             )
 
-    def timed_observation(*args: object, **kwargs: object) -> MarketObservation:
+    def timed_raw_observation(
+        *args: object,
+        **kwargs: object,
+    ) -> MarketObservation:
+        recorder.observation_raw_builder_calls += 1
+        return cast(MarketObservation, original_raw_observation(*args, **kwargs))
+
+    def timed_observation(
+        prefix: HistoricalPricePrefix,
+        *args: object,
+        **kwargs: object,
+    ) -> MarketObservation:
+        recorder.observation_prefix_builder_calls += 1
+        recorder.observation_prefix_lengths.append(len(prefix))
         with recorder.measure("observation_construction"):
-            return cast(MarketObservation, original_observation(*args, **kwargs))
+            return cast(
+                MarketObservation,
+                original_observation(prefix, *args, **kwargs),
+            )
 
     patches = (
-        (replay_service, "_normalize_replay_prices", timed_normalize),
-        (replay_service, "_single_provider", timed_provider),
+        (replay_service, "_build_historical_price_series", timed_normalize),
         (replay_service, "_replay_positions", timed_positions),
         (replay_service, _PRECOMPUTE_ATTR, timed_precompute),
         (replay_service, "_strategy_identities", timed_identities),
-        (replay_service, "_copy_replay_prefix", timed_prefix),
+        (HistoricalPriceSeries, "to_dataframe", timed_full_materialization),
+        (HistoricalPriceSeries, "prefix_at", timed_prefix),
+        (
+            HistoricalPricePrefix,
+            "to_dataframe",
+            timed_prefix_materialization,
+        ),
         (replay_service, _STRUCTURE_PRECOMPUTE_ATTR, timed_structure_precompute),
         (replay_service, _OBSERVATION_ATTR, timed_observation),
-        (observation_history, "_normalize_price_prefix", timed_observation_prefix),
+        (
+            observation_history,
+            "build_historical_market_observation",
+            timed_raw_observation,
+        ),
         (
             observation_history,
             "_normalize_observation_metadata",
@@ -1107,7 +1157,7 @@ def run_scenario(
     serialization = measure_serialization(production_result, runs=runs)
     call_counts = _call_counts(recorders, production_result)
     structure_share = _segment_share(segments, "structure_precompute")
-    prefix_share = _segment_share(segments, "prefix_slicing_copy")
+    prefix_share = _segment_share(segments, "prefix_dataframe_materialization")
     observation_share = _segment_share(segments, "observation_construction")
     overhead_ratio = (
         instrumented_median / production_median if production_median else 0.0
@@ -1379,6 +1429,54 @@ def _observation_workload_stats(
         ),
         "builder_calls": _median(
             [recorder.call_count("observation_construction") for recorder in recorders]
+        ),
+        "canonical_series_normalizations": _median(
+            [recorder.call_count("price_normalization") for recorder in recorders]
+        ),
+        "canonical_series_rows": _median(
+            [sum(recorder.canonical_series_lengths) for recorder in recorders]
+        ),
+        "full_series_materializations": _median(
+            [
+                recorder.call_count("full_series_materialization")
+                for recorder in recorders
+            ]
+        ),
+        "full_series_materialized_rows": _median(
+            [
+                sum(recorder.full_series_materialization_lengths)
+                for recorder in recorders
+            ]
+        ),
+        "prefix_object_constructions": _median(
+            [
+                recorder.call_count("prefix_object_construction")
+                for recorder in recorders
+            ]
+        ),
+        "prefix_dataframe_materializations": _median(
+            [
+                recorder.call_count("prefix_dataframe_materialization")
+                for recorder in recorders
+            ]
+        ),
+        "prefix_dataframe_materialized_rows": _median(
+            [
+                sum(recorder.prefix_dataframe_materialization_lengths)
+                for recorder in recorders
+            ]
+        ),
+        "raw_dataframe_builder_calls": _median(
+            [recorder.observation_raw_builder_calls for recorder in recorders]
+        ),
+        "validated_prefix_builder_calls": _median(
+            [recorder.observation_prefix_builder_calls for recorder in recorders]
+        ),
+        "per_step_prefix_normalizations": _median(
+            [
+                recorder.call_count("observation_prefix_preparation")
+                for recorder in recorders
+            ]
         ),
         "prefix_length_cumulative": _median(prefix_lengths),
         "prefix_length_min": min(recorders[0].observation_prefix_lengths)

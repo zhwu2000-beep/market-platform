@@ -18,6 +18,7 @@ from market_platform.data.exceptions import (
     ProviderNotFoundError,
     RateLimitError,
 )
+from market_platform.data.historical import HistoricalPricePrefix, HistoricalPriceSeries
 from market_platform.data.http import HTTPClient, HttpClientConfig, create_http_client
 from market_platform.data.models import (
     HEALTH_CHECK_COLUMNS,
@@ -39,6 +40,8 @@ from market_platform.data.selection import ProviderCandidate, ProviderSelectionP
 from market_platform.data.service import MarketDataService
 
 __all__ = [
+    'HistoricalPricePrefix',
+    'HistoricalPriceSeries',
     "HEALTH_CHECK_COLUMNS",
     "LATEST_PRICE_COLUMNS",
     "PRICE_COLUMNS",

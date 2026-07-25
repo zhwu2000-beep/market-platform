@@ -13,9 +13,11 @@ from pandas.testing import assert_frame_equal
 import market_platform.replay.service as replay_service
 import market_platform.structure.precompute as structure_precompute
 import market_platform.structure.service as structure_service
+from market_platform.data import HistoricalPricePrefix, HistoricalPriceSeries
 from market_platform.replay import HistoricalReplayService
 from market_platform.state import BaselineMarketStateModel
 from market_platform.strategy import create_strategy_collection
+from market_platform.structure import PriceStructureService
 
 _SCRIPT_PATH = Path(__file__).resolve().parents[2] / "scripts" / "benchmark_replay.py"
 _SPEC = importlib.util.spec_from_file_location("benchmark_replay", _SCRIPT_PATH)
@@ -30,18 +32,20 @@ def _prices(count: int = 30) -> pd.DataFrame:
     return benchmark_replay.build_price_frame(count, seed=7)
 
 
-def test_copy_replay_prefix_matches_original_expression_and_deep_copies() -> None:
+def test_prefix_dataframe_materialization_is_canonical_and_isolated() -> None:
     prices = _prices(6).iloc[[3, 0, 5, 1, 4, 2]].reset_index(drop=True)
     before = prices.copy(deep=True)
+    series = HistoricalPriceSeries(prices)
+    canonical = series.to_dataframe()
 
-    prefix = replay_service._copy_replay_prefix(prices, 3)
-    expected = prices.iloc[:4].copy(deep=True)
+    prefix = series.prefix_at(3).to_dataframe()
+    expected = canonical.iloc[:4].copy(deep=True)
 
     assert_frame_equal(prefix, expected)
     prefix.loc[0, "close"] = 1.0
-    assert prices.loc[0, "close"] == before.loc[0, "close"]
+    assert_frame_equal(series.to_dataframe(), canonical)
     assert_frame_equal(prices, before)
-    assert list(prefix["timestamp"]) == list(prices.iloc[:4]["timestamp"])
+    assert list(prefix["timestamp"]) == list(canonical.iloc[:4]["timestamp"])
 
 
 def test_production_and_instrumented_replay_outputs_match_exactly() -> None:
@@ -73,11 +77,14 @@ def test_instrumented_call_counts_for_full_replay() -> None:
     counts = benchmark_replay._call_counts(recorders, result)
 
     assert counts["price_normalization"] == 1
-    assert counts["provider_extraction"] == 1
+    assert counts["provider_extraction"] == 0
     assert counts["replay_position_selection"] == 1
     assert counts["signal_precompute"] == 1
     assert counts["strategy_identity_construction"] == 1
-    assert counts["prefix_slicing_copy"] == result.step_count == 18
+    assert counts["prefix_slicing_copy"] == 0
+    assert counts["full_series_materialization"] == 1
+    assert counts["prefix_object_construction"] == result.step_count == 18
+    assert counts["prefix_dataframe_materialization"] == 0
     assert counts["structure_precompute"] == 1
     assert counts["structure_analysis"] == 0
     assert counts["observation_construction"] == result.step_count
@@ -102,7 +109,9 @@ def test_instrumented_call_counts_for_start_end_subwindow() -> None:
 
     assert result.step_count == 3
     assert counts["signal_precompute"] == 1
-    assert counts["prefix_slicing_copy"] == 3
+    assert counts["prefix_slicing_copy"] == 0
+    assert counts["prefix_object_construction"] == 3
+    assert counts["prefix_dataframe_materialization"] == 0
     assert counts["structure_precompute"] == 1
     assert counts["structure_analysis"] == 0
     assert counts["observation_construction"] == 3
@@ -142,6 +151,27 @@ def test_instrumented_call_counts_for_empty_strategy_collection() -> None:
     assert counts["strategy_evaluations"] == 0
 
 
+def test_custom_structure_prefix_materialization_is_counted_accurately() -> None:
+    class CompatibilityStructureService(PriceStructureService):
+        def _uses_default_components(self) -> bool:
+            return False
+
+    recorder = benchmark_replay.TimingRecorder()
+    prices = _prices(12)
+    with benchmark_replay._instrument_replay_bindings(recorder):
+        result = benchmark_replay._run_replay(
+            prices,
+            price_structure_service=CompatibilityStructureService(),
+        )
+
+    workload = benchmark_replay._observation_workload_stats((recorder,))
+    assert result.step_count == 12
+    assert recorder.call_count("prefix_dataframe_materialization") == 12
+    assert recorder.prefix_dataframe_materialization_lengths == list(range(1, 13))
+    assert workload["prefix_dataframe_materializations"] == 12
+    assert workload["prefix_dataframe_materialized_rows"] == sum(range(1, 13))
+
+
 def test_signal_precompute_is_patched_at_replay_service_binding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -167,13 +197,14 @@ def test_signal_precompute_is_patched_at_replay_service_binding(
 def test_instrumentation_restores_patches_and_does_not_swallow_exceptions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    original_prefix = replay_service._copy_replay_prefix
+    original_prefix = HistoricalPriceSeries.prefix_at
+    original_materialization = HistoricalPricePrefix.to_dataframe
     original_structure_precompute = replay_service.precompute_price_structure_snapshots
     original_structure_frame = structure_precompute._normalize_price_frame
     original_observe_zone = structure_service._observe_zone
     original_touch_build = structure_precompute._build_touch_observation_series
     original_touch_lookup = structure_precompute._touch_observation_at_position
-    original_normalize = replay_service._normalize_replay_prices
+    original_normalize = replay_service._build_historical_price_series
 
     with (
         pytest.raises(
@@ -182,10 +213,12 @@ def test_instrumentation_restores_patches_and_does_not_swallow_exceptions(
         ),
         benchmark_replay._instrument_replay_bindings(benchmark_replay.TimingRecorder()),
     ):
-        assert replay_service._copy_replay_prefix is not original_prefix
+        assert HistoricalPriceSeries.prefix_at is not original_prefix
+        assert HistoricalPricePrefix.to_dataframe is not original_materialization
         raise RuntimeError("boom")
 
-    assert replay_service._copy_replay_prefix is original_prefix
+    assert HistoricalPriceSeries.prefix_at is original_prefix
+    assert HistoricalPricePrefix.to_dataframe is original_materialization
     assert (
         replay_service.precompute_price_structure_snapshots
         is original_structure_precompute
@@ -195,14 +228,25 @@ def test_instrumentation_restores_patches_and_does_not_swallow_exceptions(
     assert structure_precompute._build_touch_observation_series is original_touch_build
     assert structure_precompute._touch_observation_at_position is original_touch_lookup
 
-    def exploding_normalize(prices: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    def exploding_normalize(
+        prices: pd.DataFrame,
+        symbol: str,
+    ) -> HistoricalPriceSeries:
         raise ValueError("bad frame")
 
-    monkeypatch.setattr(replay_service, "_normalize_replay_prices", exploding_normalize)
+    monkeypatch.setattr(
+        replay_service,
+        "_build_historical_price_series",
+        exploding_normalize,
+    )
     with pytest.raises(ValueError, match="bad frame"):
         benchmark_replay._run_instrumented_replay(_prices(5))
-    assert replay_service._normalize_replay_prices is exploding_normalize
-    monkeypatch.setattr(replay_service, "_normalize_replay_prices", original_normalize)
+    assert replay_service._build_historical_price_series is exploding_normalize
+    monkeypatch.setattr(
+        replay_service,
+        "_build_historical_price_series",
+        original_normalize,
+    )
 
 
 def test_serialization_is_measured_separately_and_stably() -> None:
@@ -498,7 +542,7 @@ def test_observation_internal_attribution_metrics_are_consistent() -> None:
         seed=7,
     ).to_dict()
 
-    assert recorder.call_count("observation_prefix_preparation") == result.step_count
+    assert recorder.call_count("observation_prefix_preparation") == 0
     assert recorder.call_count("observation_metadata") == result.step_count
     assert recorder.call_count("observation_identity") == result.step_count
     assert recorder.call_count("observation_price_facts") == result.step_count
@@ -529,6 +573,17 @@ def test_observation_internal_attribution_metrics_are_consistent() -> None:
         assert segment["median_per_call_ns"] >= 0
         assert segment["timing_mode"] == "exclusive"
     assert scenario["observation_workload"]["builder_calls"] == scenario["step_count"]
+    workload = scenario["observation_workload"]
+    assert workload["canonical_series_normalizations"] == 1
+    assert workload["canonical_series_rows"] == scenario["bars"]
+    assert workload["full_series_materializations"] == 1
+    assert workload["full_series_materialized_rows"] == scenario["bars"]
+    assert workload["prefix_object_constructions"] == scenario["step_count"]
+    assert workload["prefix_dataframe_materializations"] == 0
+    assert workload["prefix_dataframe_materialized_rows"] == 0
+    assert workload["raw_dataframe_builder_calls"] == 0
+    assert workload["validated_prefix_builder_calls"] == scenario["step_count"]
+    assert workload["per_step_prefix_normalizations"] == 0
     assert (
         scenario["fingerprint_workload"]["fingerprint_calls"] == scenario["step_count"]
     )
@@ -546,7 +601,9 @@ def test_observation_internal_attribution_metrics_are_consistent() -> None:
 
 
 def test_observation_instrumentation_restores_private_helper_patches() -> None:
-    original_prefix = benchmark_replay.observation_history._normalize_price_prefix
+    original_metadata = (
+        benchmark_replay.observation_history._normalize_observation_metadata
+    )
     original_rows = (
         benchmark_replay.observation_history._historical_observation_fingerprint_rows
     )
@@ -560,8 +617,9 @@ def test_observation_instrumentation_restores_private_helper_patches() -> None:
         ),
         benchmark_replay._instrument_replay_bindings(benchmark_replay.TimingRecorder()),
     ):
-        assert benchmark_replay.observation_history._normalize_price_prefix is not (
-            original_prefix
+        assert (
+            benchmark_replay.observation_history._normalize_observation_metadata
+            is not original_metadata
         )
         assert benchmark_replay.observation_builder.build_signal_facts is not (
             original_signal
@@ -569,7 +627,8 @@ def test_observation_instrumentation_restores_private_helper_patches() -> None:
         raise RuntimeError("boom")
 
     assert (
-        benchmark_replay.observation_history._normalize_price_prefix is original_prefix
+        benchmark_replay.observation_history._normalize_observation_metadata
+        is original_metadata
     )
     assert (
         benchmark_replay.observation_history._historical_observation_fingerprint_rows
@@ -587,7 +646,7 @@ def test_instrumented_observations_match_normal_observations_exactly(
     prices = _prices(24)
     normal_observations = []
     instrumented_observations = []
-    original = replay_service.build_historical_market_observation
+    original = replay_service.build_historical_market_observation_from_prefix
 
     def recording_normal(*args, **kwargs):
         observation = original(*args, **kwargs)
@@ -596,7 +655,7 @@ def test_instrumented_observations_match_normal_observations_exactly(
 
     monkeypatch.setattr(
         replay_service,
-        "build_historical_market_observation",
+        "build_historical_market_observation_from_prefix",
         recording_normal,
     )
     normal_result = benchmark_replay._run_replay(prices)
@@ -608,7 +667,7 @@ def test_instrumented_observations_match_normal_observations_exactly(
 
     monkeypatch.setattr(
         replay_service,
-        "build_historical_market_observation",
+        "build_historical_market_observation_from_prefix",
         recording_instrumented,
     )
     instrumented_result = benchmark_replay._run_instrumented_replay(prices)
