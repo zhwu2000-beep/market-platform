@@ -45,3 +45,15 @@ Remove-Item -LiteralPath tmp\smoke_twelve_data -Recurse -Force
 ```
 
 If the smoke passes, continue with merge, tag, and push for the release.
+## Historical replay context window
+
+`--start` and `--end` are inclusive evaluation dates. Use `--context-start` to
+acquire and retain earlier daily bars for signal and structure context without
+creating replay steps before `--start`:
+
+```powershell
+uv run market-platform replay run --symbol MSFT --context-start 2026-01-01 --start 2026-03-01 --end 2026-03-31 --format json
+```
+
+When `--context-start` is omitted it defaults to `--start`. `--max-bars` limits
+only evaluation-window rows; context rows do not consume that limit.

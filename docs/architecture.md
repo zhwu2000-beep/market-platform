@@ -33,4 +33,24 @@ concrete providers such as `PolygonProvider`.
   API or the public validated-prefix API. Both share identity, price facts,
   provenance, fingerprinting, and final model construction.
 - See `docs/adr/0004-canonical-historical-input.md`.
-
+## Replay Specification and Windows
+- `HistoricalReplaySpecification` is the immutable application request for one
+  symbol and interval with explicit UTC `context_start`, `evaluation_start`, and
+  `evaluation_end` values. It enforces
+  `context_start <= evaluation_start <= evaluation_end`.
+- `HistoricalReplayService.run_with_specification()` retains analytical data only
+  inside `[context_start, evaluation_end]`, precomputes signals and default price
+  structure across that complete retained context, and creates steps only inside
+  the inclusive evaluation window.
+- Requested boundaries do not imply exact bar coverage. A context window may have
+  no returned pre-evaluation bars; execution requires only eligible evaluation
+  rows.
+- Legacy `HistoricalReplayService.run()` continues to treat its complete supplied
+  DataFrame as context and optional `start`/`end` as inclusive evaluation bounds.
+- The CLI keeps `--start`/`--end` as evaluation dates and adds optional
+  `--context-start`, defaulting to `--start`. `--max-bars` counts evaluation rows,
+  not retained context rows.
+- Acquisition policy and provider selection remain interface concerns. Actual
+  dataset coverage, run manifests, persistence, automatic warm-up, and exchange
+  calendars are not part of this boundary.
+- See `docs/adr/0005-replay-specification-context-window.md`.

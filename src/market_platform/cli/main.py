@@ -36,6 +36,7 @@ from market_platform.logging import configure_logging, get_logger
 from market_platform.replay import (
     HistoricalReplayResult,
     HistoricalReplayService,
+    HistoricalReplaySpecification,
     HistoricalReplaySummary,
     summarize_historical_replay,
 )
@@ -289,6 +290,15 @@ def build_parser() -> argparse.ArgumentParser:
         type=_parse_iso_date,
         required=True,
         help="Replay end date, YYYY-MM-DD, inclusive.",
+    )
+    replay_run_parser.add_argument(
+        "--context-start",
+        type=_parse_iso_date,
+        default=None,
+        help=(
+            "Context acquisition start date, YYYY-MM-DD, inclusive. "
+            "Defaults to --start."
+        ),
     )
     replay_run_parser.add_argument(
         "--provider",
@@ -595,6 +605,15 @@ def _handle_replay_run(args: argparse.Namespace) -> int:
     if not symbol:
         print("error: symbol must not be empty.", file=sys.stderr)
         return 2
+    context_start_date = (
+        args.start if args.context_start is None else args.context_start
+    )
+    if context_start_date > args.start:
+        print(
+            "error: context start date must be earlier than or equal to start date.",
+            file=sys.stderr,
+        )
+        return 2
     if args.start > args.end:
         print(
             "error: start date must be earlier than or equal to end date.",
@@ -608,39 +627,49 @@ def _handle_replay_run(args: argparse.Namespace) -> int:
         )
         return 2
 
+    context_start = _start_of_utc_day(context_start_date)
     replay_start = _start_of_utc_day(args.start)
     replay_end = _end_of_utc_day(args.end)
     fetch_end = args.end + timedelta(days=1)
+    specification = HistoricalReplaySpecification(
+        symbol=symbol,
+        interval=_REPLAY_DAILY_INTERVAL,
+        context_start=context_start,
+        evaluation_start=replay_start,
+        evaluation_end=replay_end,
+    )
     service = create_default_market_data_service()
     try:
         frame = asyncio.run(
             service.get_daily_prices(
                 symbol=symbol,
-                start=args.start,
+                start=context_start_date,
                 end=fetch_end,
                 provider=args.provider,
             )
         )
-        replay_frame = _filter_replay_price_window(
+        context_frame = _filter_replay_price_window(
             frame,
+            start=context_start,
+            end=replay_end,
+        )
+        evaluation_frame = _filter_replay_price_window(
+            context_frame,
             start=replay_start,
             end=replay_end,
         )
-        if len(replay_frame) > args.max_bars:
+        if len(evaluation_frame) > args.max_bars:
             print(
                 "error: replay would process "
-                f"{len(replay_frame)} bars, exceeding --max-bars {args.max_bars}.",
+                f"{len(evaluation_frame)} bars, exceeding --max-bars {args.max_bars}.",
                 file=sys.stderr,
             )
             return 2
-        replay_result = HistoricalReplayService().run(
-            replay_frame,
-            symbol=symbol,
-            interval=_REPLAY_DAILY_INTERVAL,
+        replay_result = HistoricalReplayService().run_with_specification(
+            context_frame,
+            specification,
             strategies=_default_replay_strategy_collection(),
             state_model=BaselineMarketStateModel(),
-            start=replay_start,
-            end=replay_end,
         )
     except ConfigurationError as exc:
         logger.error("Failed to run historical replay: %s", exc)
