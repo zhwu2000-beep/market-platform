@@ -6,6 +6,7 @@ from market_platform.replay.models import (
     ReplayStrategyIdentity,
 )
 from market_platform.replay.service import HistoricalReplayService
+from market_platform.replay.specification import HistoricalReplaySpecification
 from market_platform.replay.summary import (
     HistoricalReplaySummary,
     StrategyReplaySummary,
@@ -15,6 +16,7 @@ from market_platform.replay.summary import (
 __all__ = [
     "HistoricalReplayResult",
     "HistoricalReplayService",
+    "HistoricalReplaySpecification",
     "HistoricalReplayStep",
     "HistoricalReplaySummary",
     "ReplayStrategyIdentity",

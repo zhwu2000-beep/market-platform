@@ -48,7 +48,11 @@ class _ExplodingReplayService:
 
 
 class _ContractFailingReplayService:
-    def run(self, *args: object, **kwargs: object) -> object:
+    def run_with_specification(
+        self,
+        *args: object,
+        **kwargs: object,
+    ) -> object:
         raise ValueError("replay contract violation")
 
 
@@ -172,6 +176,7 @@ def test_parser_registers_replay_run() -> None:
     assert args.replay_command == "run"
     assert args.view == "summary"
     assert args.format == "table"
+    assert args.context_start is None
 
 
 def test_replay_parser_does_not_register_strategy_argument(
@@ -831,3 +836,124 @@ def test_replay_real_sys_argv_path(
     assert excinfo.value.code == 0
     assert payload["symbol"] == "MSFT"
     assert _summary_strategy_ids(payload) == _EXPECTED_REPLAY_STRATEGY_IDS
+
+
+def test_replay_context_start_changes_acquisition_and_preserves_context(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    service = _FakeDailyService(_prices(80), [])
+    _install_service(monkeypatch, service)
+
+    exit_code = cli_main.run(
+        [
+            "replay",
+            "run",
+            "--symbol",
+            "MSFT",
+            "--context-start",
+            "2026-01-01",
+            "--start",
+            "2026-03-01",
+            "--end",
+            "2026-03-03",
+            "--max-bars",
+            "3",
+            "--view",
+            "steps",
+            "--format",
+            "json",
+        ]
+    )
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 0
+    assert service.calls == [
+        ("MSFT", date(2026, 1, 1), date(2026, 3, 4), None)
+    ]
+    assert len(payload["steps"]) == 3
+    assert payload["start_as_of"].startswith("2026-03-01")
+    assert payload["end_as_of"].startswith("2026-03-03")
+    assert payload["steps"][0]["state"]["trend_regime"] != "unavailable"
+
+
+def test_replay_context_start_after_evaluation_start_exits_2(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    service = _FakeDailyService(_prices(), [])
+    _install_service(monkeypatch, service)
+
+    exit_code = cli_main.run(
+        [
+            "replay",
+            "run",
+            "--symbol",
+            "MSFT",
+            "--context-start",
+            "2026-01-03",
+            "--start",
+            "2026-01-02",
+            "--end",
+            "2026-01-04",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 2
+    assert service.calls == []
+    assert "context start date" in captured.err
+
+
+def test_replay_max_bars_counts_only_evaluation_rows(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    service = _FakeDailyService(_prices(80), [])
+    _install_service(monkeypatch, service)
+
+    permitted = cli_main.run(
+        [
+            "replay",
+            "run",
+            "--symbol",
+            "MSFT",
+            "--context-start",
+            "2026-01-01",
+            "--start",
+            "2026-03-01",
+            "--end",
+            "2026-03-03",
+            "--max-bars",
+            "3",
+            "--format",
+            "json",
+        ]
+    )
+    permitted_payload = json.loads(capsys.readouterr().out)
+
+    assert permitted == 0
+    assert permitted_payload["step_count"] == 3
+
+    rejected = cli_main.run(
+        [
+            "replay",
+            "run",
+            "--symbol",
+            "MSFT",
+            "--context-start",
+            "2026-01-01",
+            "--start",
+            "2026-03-01",
+            "--end",
+            "2026-03-04",
+            "--max-bars",
+            "3",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert rejected == 2
+    assert "would process 4 bars" in captured.err
+    assert "exceeding --max-bars 3" in captured.err

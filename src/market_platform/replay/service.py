@@ -15,6 +15,7 @@ from market_platform.replay.models import (
     HistoricalReplayStep,
     ReplayStrategyIdentity,
 )
+from market_platform.replay.specification import HistoricalReplaySpecification
 from market_platform.signals.service import precompute_market_signal_snapshots
 from market_platform.state.models import MarketState
 from market_platform.state.protocol import MarketStateModel
@@ -57,10 +58,7 @@ class HistoricalReplayService:
     ) -> HistoricalReplayResult:
         """Replay each historical bar in the inclusive start/end range."""
 
-        if not isinstance(strategies, StrategyCollection):
-            raise TypeError("strategies must be a StrategyCollection")
-        if not isinstance(state_model, MarketStateModel):
-            raise TypeError("state_model must implement MarketStateModel")
+        _validate_execution_inputs(strategies, state_model)
         normalized_symbol = _normalize_symbol(symbol)
         normalized_interval = _normalize_required_text(interval, "interval")
         normalized_start = _normalize_optional_timestamp(start, "start")
@@ -73,11 +71,57 @@ class HistoricalReplayService:
             raise ValueError("start must be earlier than or equal to end")
 
         series = _build_historical_price_series(prices, normalized_symbol)
-        replay_positions = _replay_positions(
+        return self._run_canonical_series(
             series,
+            interval=normalized_interval,
+            strategies=strategies,
+            state_model=state_model,
             start=normalized_start,
             end=normalized_end,
         )
+
+    def run_with_specification(
+        self,
+        prices: pd.DataFrame,
+        specification: HistoricalReplaySpecification,
+        *,
+        strategies: StrategyCollection,
+        state_model: MarketStateModel,
+    ) -> HistoricalReplayResult:
+        """Replay retained context within an explicit evaluation window."""
+
+        if not isinstance(specification, HistoricalReplaySpecification):
+            raise TypeError(
+                "specification must be a HistoricalReplaySpecification"
+            )
+        _validate_execution_inputs(strategies, state_model)
+        context_prices = _filter_specification_context(prices, specification)
+        if not prices.empty and context_prices.empty:
+            raise ValueError("no replay timestamps found in requested range")
+        series = _build_historical_price_series(
+            context_prices,
+            specification.symbol,
+        )
+        return self._run_canonical_series(
+            series,
+            interval=specification.interval,
+            strategies=strategies,
+            state_model=state_model,
+            start=specification.evaluation_start,
+            end=specification.evaluation_end,
+        )
+
+    def _run_canonical_series(
+        self,
+        series: HistoricalPriceSeries,
+        *,
+        interval: str,
+        strategies: StrategyCollection,
+        state_model: MarketStateModel,
+        start: datetime | None,
+        end: datetime | None,
+    ) -> HistoricalReplayResult:
+        replay_positions = _replay_positions(series, start=start, end=end)
         if not replay_positions:
             raise ValueError("no replay timestamps found in requested range")
 
@@ -104,7 +148,7 @@ class HistoricalReplayService:
             observation = build_historical_market_observation_from_prefix(
                 prefix,
                 symbol=series.symbol,
-                interval=normalized_interval,
+                interval=interval,
                 as_of=as_of,
                 provider=series.provider,
                 signal_snapshot=signal_snapshot,
@@ -120,7 +164,7 @@ class HistoricalReplayService:
             steps.append(
                 HistoricalReplayStep(
                     symbol=series.symbol,
-                    interval=normalized_interval,
+                    interval=interval,
                     as_of=as_of,
                     observation_fingerprint=observation.provenance.input_fingerprint,
                     state=state,
@@ -131,7 +175,7 @@ class HistoricalReplayService:
         step_tuple = tuple(steps)
         return HistoricalReplayResult(
             symbol=series.symbol,
-            interval=normalized_interval,
+            interval=interval,
             start_as_of=step_tuple[0].as_of,
             end_as_of=step_tuple[-1].as_of,
             steps=step_tuple,
@@ -139,6 +183,45 @@ class HistoricalReplayService:
             state_model_version=state_model.model_version,
             strategies=strategy_identities,
         )
+
+
+def _validate_execution_inputs(
+    strategies: StrategyCollection,
+    state_model: MarketStateModel,
+) -> None:
+    if not isinstance(strategies, StrategyCollection):
+        raise TypeError("strategies must be a StrategyCollection")
+    if not isinstance(state_model, MarketStateModel):
+        raise TypeError("state_model must implement MarketStateModel")
+
+
+def _filter_specification_context(
+    prices: pd.DataFrame,
+    specification: HistoricalReplaySpecification,
+) -> pd.DataFrame:
+    if not isinstance(prices, pd.DataFrame):
+        raise TypeError("prices must be a pandas DataFrame")
+    if "timestamp" not in prices.columns:
+        return prices.copy(deep=True)
+
+    retained = prices.copy(deep=True)
+    timestamps: list[pd.Timestamp] = []
+    for value in retained["timestamp"]:
+        timestamp = pd.Timestamp(value)
+        if pd.isna(timestamp):
+            raise ValueError("timestamp values must not be missing")
+        if timestamp.tzinfo is None:
+            raise ValueError("timestamp values must be timezone-aware")
+        timestamps.append(timestamp.tz_convert(UTC))
+    retained["timestamp"] = pd.Series(
+        timestamps,
+        index=retained.index,
+        dtype="datetime64[ns, UTC]",
+    )
+    mask = (retained["timestamp"] >= specification.context_start) & (
+        retained["timestamp"] <= specification.evaluation_end
+    )
+    return retained.loc[mask].copy(deep=True).reset_index(drop=True)
 
 
 def _build_historical_price_series(
