@@ -1,4 +1,4 @@
-"""Historical observation construction from point-in-time price prefixes."""
+"""Historical observation construction from canonical price prefixes."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from numbers import Real
 
 import pandas as pd
 
+from market_platform.data.historical import HistoricalPricePrefix, HistoricalPriceSeries
 from market_platform.observation.builder import build_market_observation
 from market_platform.observation.models import (
     MarketObservation,
@@ -20,17 +21,6 @@ from market_platform.observation.models import (
 )
 from market_platform.signals.models import MarketSignalSnapshot
 from market_platform.structure.models import PriceStructureSnapshot
-
-_PRICE_COLUMNS = (
-    "symbol",
-    "timestamp",
-    "open",
-    "high",
-    "low",
-    "close",
-    "volume",
-    "provider",
-)
 
 
 def build_historical_market_observation(
@@ -43,10 +33,9 @@ def build_historical_market_observation(
     signal_snapshot: MarketSignalSnapshot,
     structure_snapshot: PriceStructureSnapshot,
 ) -> MarketObservation:
-    """Build an observation from prices available no later than as_of."""
+    """Build an observation from a raw historical price DataFrame."""
 
     normalized_as_of = _normalize_timestamp(as_of, "as_of")
-    normalized = _normalize_price_prefix(prices, normalized_as_of)
     normalized_symbol, normalized_interval, normalized_provider = (
         _normalize_observation_metadata(
             symbol=symbol,
@@ -54,33 +43,76 @@ def build_historical_market_observation(
             provider=provider,
         )
     )
+    series = HistoricalPriceSeries(
+        prices,
+    )
+    if series.symbol != normalized_symbol:
+        raise ValueError("price prefix symbol must match symbol")
+    if series.provider != normalized_provider:
+        raise ValueError("price prefix provider must match provider")
+    if series.as_of > normalized_as_of:
+        raise ValueError("price prefix must not contain timestamps later than as_of")
+    return build_historical_market_observation_from_prefix(
+        series.full_prefix(),
+        symbol=normalized_symbol,
+        interval=normalized_interval,
+        as_of=normalized_as_of,
+        provider=normalized_provider,
+        signal_snapshot=signal_snapshot,
+        structure_snapshot=structure_snapshot,
+    )
+
+
+def build_historical_market_observation_from_prefix(
+    prefix: HistoricalPricePrefix,
+    *,
+    symbol: str,
+    interval: str,
+    as_of: datetime,
+    provider: str,
+    signal_snapshot: MarketSignalSnapshot,
+    structure_snapshot: PriceStructureSnapshot,
+) -> MarketObservation:
+    """Build an observation from an already validated historical prefix."""
+
+    if not isinstance(prefix, HistoricalPricePrefix):
+        raise TypeError("prefix must be a HistoricalPricePrefix")
+    normalized_as_of = _normalize_timestamp(as_of, "as_of")
+    normalized_symbol, normalized_interval, normalized_provider = (
+        _normalize_observation_metadata(
+            symbol=symbol,
+            interval=interval,
+            provider=provider,
+        )
+    )
+    if prefix.symbol != normalized_symbol:
+        raise ValueError("historical prefix symbol must match symbol")
+    if prefix.provider != normalized_provider:
+        raise ValueError("historical prefix provider must match provider")
+    if prefix.as_of > normalized_as_of:
+        raise ValueError("as_of must not be earlier than historical prefix endpoint")
     if not isinstance(signal_snapshot, MarketSignalSnapshot):
         raise TypeError("signal_snapshot must be a MarketSignalSnapshot")
     if not isinstance(structure_snapshot, PriceStructureSnapshot):
         raise TypeError("structure_snapshot must be a PriceStructureSnapshot")
-
-    symbols = set(normalized["symbol"].astype("string"))
-    if symbols != {normalized_symbol}:
-        raise ValueError("price prefix symbol must match symbol")
-    providers = set(normalized["provider"].astype("string"))
-    if providers != {normalized_provider}:
-        raise ValueError("price prefix provider must match provider")
+    if signal_snapshot.symbol != normalized_symbol:
+        raise ValueError("signal_snapshot symbol must match historical prefix")
 
     return _construct_historical_observation(
         identity=_build_observation_identity(
             symbol=normalized_symbol,
             interval=normalized_interval,
             as_of=normalized_as_of,
-            prices=normalized,
+            prefix=prefix,
         ),
         provenance=_build_observation_provenance(
-            prices=normalized,
+            prefix=prefix,
             symbol=normalized_symbol,
             interval=normalized_interval,
             as_of=normalized_as_of,
             provider=normalized_provider,
         ),
-        price_facts=_build_price_facts(normalized),
+        price_facts=_build_price_facts(prefix),
         signal_snapshot=signal_snapshot,
         structure_snapshot=structure_snapshot,
     )
@@ -104,26 +136,27 @@ def _build_observation_identity(
     symbol: str,
     interval: str,
     as_of: datetime,
-    prices: pd.DataFrame,
+    prefix: HistoricalPricePrefix,
 ) -> ObservationIdentity:
     return ObservationIdentity(
         symbol=symbol,
         interval=interval,
         as_of=as_of,
-        window_start=_to_datetime(prices.iloc[0]["timestamp"]),
-        window_end=_to_datetime(prices.iloc[-1]["timestamp"]),
+        window_start=prefix.window_start,
+        window_end=prefix.as_of,
     )
 
 
-def _build_price_facts(prices: pd.DataFrame) -> PriceFacts:
-    window_end = _to_datetime(prices.iloc[-1]["timestamp"])
-    latest_price = _normalize_positive_price(prices.iloc[-1]["close"])
-    return PriceFacts(latest_price=latest_price, observed_at=window_end)
+def _build_price_facts(prefix: HistoricalPricePrefix) -> PriceFacts:
+    return PriceFacts(
+        latest_price=_normalize_positive_price(prefix.latest_close),
+        observed_at=prefix.as_of,
+    )
 
 
 def _build_observation_provenance(
     *,
-    prices: pd.DataFrame,
+    prefix: HistoricalPricePrefix,
     symbol: str,
     interval: str,
     as_of: datetime,
@@ -135,7 +168,7 @@ def _build_observation_provenance(
         methodology_version="1.0.0",
         parameters={"interval": interval},
         input_fingerprint=_historical_observation_fingerprint(
-            prices=prices,
+            prefix=prefix,
             symbol=symbol,
             interval=interval,
             as_of=as_of,
@@ -161,41 +194,16 @@ def _construct_historical_observation(
     )
 
 
-def _normalize_price_prefix(prices: pd.DataFrame, as_of: datetime) -> pd.DataFrame:
-    if not isinstance(prices, pd.DataFrame):
-        raise TypeError("prices must be a pandas DataFrame")
-    if prices.empty:
-        raise ValueError("price prefix must not be empty")
-    missing = [column for column in _PRICE_COLUMNS if column not in prices.columns]
-    if missing:
-        raise ValueError("price prefix missing required columns: " + ", ".join(missing))
-
-    normalized = prices.loc[:, list(_PRICE_COLUMNS)].copy()
-    normalized["symbol"] = _normalize_text_series(normalized["symbol"], "symbol")
-    normalized["provider"] = _normalize_text_series(normalized["provider"], "provider")
-    normalized["timestamp"] = _normalize_aware_timestamp_series(normalized["timestamp"])
-    if (normalized["timestamp"] > pd.Timestamp(as_of)).any():
-        raise ValueError("price prefix must not contain timestamps later than as_of")
-    for column in ("open", "high", "low", "close", "volume"):
-        normalized[column] = _normalize_numeric_series(normalized[column], column)
-    if (normalized["high"] < normalized["low"]).any():
-        raise ValueError("high must be greater than or equal to low")
-    normalized = normalized.sort_values("timestamp", kind="stable", ignore_index=True)
-    if normalized["timestamp"].duplicated().any():
-        raise ValueError("price prefix must not contain duplicate timestamps")
-    return normalized
-
-
 def _historical_observation_fingerprint(
     *,
-    prices: pd.DataFrame,
+    prefix: HistoricalPricePrefix,
     symbol: str,
     interval: str,
     as_of: datetime,
     provider: str,
 ) -> str:
     payload = _historical_observation_fingerprint_payload(
-        prices=prices,
+        prefix=prefix,
         symbol=symbol,
         interval=interval,
         as_of=as_of,
@@ -207,7 +215,7 @@ def _historical_observation_fingerprint(
 
 def _historical_observation_fingerprint_payload(
     *,
-    prices: pd.DataFrame,
+    prefix: HistoricalPricePrefix,
     symbol: str,
     interval: str,
     as_of: datetime,
@@ -217,26 +225,28 @@ def _historical_observation_fingerprint_payload(
         "as_of": as_of.isoformat(),
         "interval": interval,
         "provider": provider,
-        "rows": _historical_observation_fingerprint_rows(prices),
+        "rows": _historical_observation_fingerprint_rows(prefix),
         "symbol": symbol,
     }
 
 
 def _historical_observation_fingerprint_rows(
-    prices: pd.DataFrame,
+    prefix: HistoricalPricePrefix,
 ) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
-    for row in prices.itertuples(index=False):
+    for symbol, timestamp, open_, high, low, close, volume, provider in (
+        prefix.iter_rows()
+    ):
         rows.append(
             {
-                "symbol": str(row.symbol),
-                "timestamp": _to_datetime(row.timestamp).isoformat(),
-                "open": _fingerprint_number(row.open),
-                "high": _fingerprint_number(row.high),
-                "low": _fingerprint_number(row.low),
-                "close": _fingerprint_number(row.close),
-                "volume": _fingerprint_number(row.volume),
-                "provider": str(row.provider),
+                "symbol": symbol,
+                "timestamp": timestamp.isoformat(),
+                "open": _fingerprint_number(open_),
+                "high": _fingerprint_number(high),
+                "low": _fingerprint_number(low),
+                "close": _fingerprint_number(close),
+                "volume": _fingerprint_number(volume),
+                "provider": provider,
             }
         )
     return rows
@@ -259,38 +269,6 @@ def _normalize_required_text(value: object, field_name: str) -> str:
     if not text:
         raise ValueError(f"{field_name} must not be empty")
     return text
-
-
-def _normalize_text_series(series: pd.Series, field_name: str) -> pd.Series:
-    if series.isna().any():
-        raise ValueError(f"{field_name} must not contain missing values")
-    normalized = series.map(lambda item: _normalize_required_text(item, field_name))
-    if field_name == "symbol":
-        normalized = normalized.map(str.upper)
-    return normalized.astype("string")
-
-
-def _normalize_aware_timestamp_series(series: pd.Series) -> pd.Series:
-    values: list[pd.Timestamp] = []
-    for item in series:
-        timestamp = pd.Timestamp(item)
-        if pd.isna(timestamp):
-            raise ValueError("timestamp must not contain missing values")
-        if timestamp.tzinfo is None:
-            raise ValueError("timestamp must be timezone-aware")
-        values.append(timestamp.tz_convert(UTC))
-    return pd.Series(values, index=series.index, dtype="datetime64[ns, UTC]")
-
-
-def _normalize_numeric_series(series: pd.Series, field_name: str) -> pd.Series:
-    if series.map(lambda value: isinstance(value, bool)).any():
-        raise TypeError(f"{field_name} must be numeric")
-    numeric = pd.to_numeric(series, errors="coerce")
-    if numeric.isna().any():
-        raise ValueError(f"{field_name} must not contain invalid values")
-    if not numeric.map(math.isfinite).all():
-        raise ValueError(f"{field_name} must be finite")
-    return numeric.astype(float)
 
 
 def _normalize_timestamp(value: object, field_name: str) -> datetime:
@@ -319,12 +297,7 @@ def _fingerprint_number(value: object) -> str:
     return repr(numeric)
 
 
-def _to_datetime(value: object) -> datetime:
-    if isinstance(value, pd.Timestamp):
-        return value.to_pydatetime().astimezone(UTC)
-    if isinstance(value, datetime):
-        return _normalize_timestamp(value, "timestamp")
-    raise TypeError("timestamp must be a datetime")
-
-
-__all__ = ["build_historical_market_observation"]
+__all__ = [
+    "build_historical_market_observation",
+    "build_historical_market_observation_from_prefix",
+]

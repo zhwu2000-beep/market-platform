@@ -6,7 +6,10 @@ from market_platform.observation.builder import (
     build_signal_facts,
     build_structure_facts,
 )
-from market_platform.observation.history import build_historical_market_observation
+from market_platform.observation.history import (
+    build_historical_market_observation,
+    build_historical_market_observation_from_prefix,
+)
 from market_platform.observation.models import (
     MarketObservation,
     ObservationIdentity,
@@ -24,6 +27,7 @@ __all__ = [
     "SignalFacts",
     "StructureFacts",
     "build_historical_market_observation",
+    "build_historical_market_observation_from_prefix",
     "build_market_observation",
     "build_observation",
     "build_signal_facts",

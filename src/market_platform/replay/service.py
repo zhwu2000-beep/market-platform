@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-import math
 from datetime import UTC, datetime
 
 import pandas as pd
 
-from market_platform.observation.history import build_historical_market_observation
+from market_platform.data.historical import HistoricalPriceSeries
+from market_platform.observation.history import (
+    build_historical_market_observation_from_prefix,
+)
 from market_platform.replay.models import (
     HistoricalReplayResult,
     HistoricalReplayStep,
@@ -22,17 +24,6 @@ from market_platform.strategy.runner import StrategyRunner
 from market_platform.structure.models import PriceStructureSnapshot
 from market_platform.structure.precompute import precompute_price_structure_snapshots
 from market_platform.structure.service import PriceStructureService
-
-_PRICE_COLUMNS = (
-    "symbol",
-    "timestamp",
-    "open",
-    "high",
-    "low",
-    "close",
-    "volume",
-    "provider",
-)
 
 
 class HistoricalReplayService:
@@ -81,38 +72,41 @@ class HistoricalReplayService:
         ):
             raise ValueError("start must be earlier than or equal to end")
 
-        normalized = _normalize_replay_prices(prices, normalized_symbol)
-        provider = _single_provider(normalized)
+        series = _build_historical_price_series(prices, normalized_symbol)
         replay_positions = _replay_positions(
-            normalized,
+            series,
             start=normalized_start,
             end=normalized_end,
         )
         if not replay_positions:
             raise ValueError("no replay timestamps found in requested range")
 
-        signal_snapshots = precompute_market_signal_snapshots(normalized)
+        full_prices = series.to_dataframe()
+        signal_snapshots = precompute_market_signal_snapshots(full_prices)
         structure_snapshots = _precompute_default_structure_snapshots(
             self._price_structure_service,
-            normalized,
+            full_prices,
         )
         strategy_identities = _strategy_identities(strategies)
         steps: list[HistoricalReplayStep] = []
         for position in replay_positions:
-            prefix = _copy_replay_prefix(normalized, position)
-            as_of = _to_datetime(normalized.iloc[position]["timestamp"])
+            prefix = series.prefix_at(position)
+            as_of = prefix.as_of
             signal_snapshot = signal_snapshots[position]
             structure_snapshot = (
                 structure_snapshots[position]
                 if structure_snapshots is not None
-                else self._price_structure_service.analyze(prefix, as_of=as_of)
+                else self._price_structure_service.analyze(
+                    prefix.to_dataframe(),
+                    as_of=as_of,
+                )
             )
-            observation = build_historical_market_observation(
+            observation = build_historical_market_observation_from_prefix(
                 prefix,
-                symbol=normalized_symbol,
+                symbol=series.symbol,
                 interval=normalized_interval,
                 as_of=as_of,
-                provider=provider,
+                provider=series.provider,
                 signal_snapshot=signal_snapshot,
                 structure_snapshot=structure_snapshot,
             )
@@ -125,7 +119,7 @@ class HistoricalReplayService:
             )
             steps.append(
                 HistoricalReplayStep(
-                    symbol=normalized_symbol,
+                    symbol=series.symbol,
                     interval=normalized_interval,
                     as_of=as_of,
                     observation_fingerprint=observation.provenance.input_fingerprint,
@@ -136,7 +130,7 @@ class HistoricalReplayService:
 
         step_tuple = tuple(steps)
         return HistoricalReplayResult(
-            symbol=normalized_symbol,
+            symbol=series.symbol,
             interval=normalized_interval,
             start_as_of=step_tuple[0].as_of,
             end_as_of=step_tuple[-1].as_of,
@@ -145,6 +139,13 @@ class HistoricalReplayService:
             state_model_version=state_model.model_version,
             strategies=strategy_identities,
         )
+
+
+def _build_historical_price_series(
+    prices: pd.DataFrame,
+    symbol: str,
+) -> HistoricalPriceSeries:
+    return HistoricalPriceSeries(prices, symbol=symbol)
 
 
 def _precompute_default_structure_snapshots(
@@ -156,50 +157,15 @@ def _precompute_default_structure_snapshots(
     return precompute_price_structure_snapshots(prices)
 
 
-def _copy_replay_prefix(prices: pd.DataFrame, position: int) -> pd.DataFrame:
-    return prices.iloc[: position + 1].copy(deep=True)
-
-
-def _normalize_replay_prices(prices: pd.DataFrame, symbol: str) -> pd.DataFrame:
-    if not isinstance(prices, pd.DataFrame):
-        raise TypeError("prices must be a pandas DataFrame")
-    if prices.empty:
-        raise ValueError("prices must not be empty")
-    missing = [column for column in _PRICE_COLUMNS if column not in prices.columns]
-    if missing:
-        raise ValueError("prices missing required columns: " + ", ".join(missing))
-
-    normalized = prices.loc[:, list(_PRICE_COLUMNS)].copy()
-    normalized["symbol"] = _normalize_text_series(normalized["symbol"], "symbol")
-    normalized["provider"] = _normalize_text_series(normalized["provider"], "provider")
-    if set(normalized["symbol"].astype("string")) != {symbol}:
-        raise ValueError("prices must contain exactly one matching symbol")
-    if len(set(normalized["provider"].astype("string"))) != 1:
-        raise ValueError("prices must contain exactly one provider")
-    normalized["timestamp"] = _normalize_aware_timestamp_series(normalized["timestamp"])
-    for column in ("open", "high", "low", "close", "volume"):
-        normalized[column] = _normalize_numeric_series(normalized[column], column)
-    if (normalized["high"] < normalized["low"]).any():
-        raise ValueError("high must be greater than or equal to low")
-    if (normalized[["open", "high", "low", "close"]] <= 0.0).any().any():
-        raise ValueError("OHLC prices must be positive")
-    if (normalized["volume"] < 0.0).any():
-        raise ValueError("volume must not be negative")
-    normalized = normalized.sort_values("timestamp", kind="stable", ignore_index=True)
-    if normalized["timestamp"].duplicated().any():
-        raise ValueError("prices must not contain duplicate timestamps")
-    return normalized
-
-
 def _replay_positions(
-    prices: pd.DataFrame,
+    series: HistoricalPriceSeries,
     *,
     start: datetime | None,
     end: datetime | None,
 ) -> tuple[int, ...]:
     positions: list[int] = []
-    for position, timestamp in enumerate(prices["timestamp"]):
-        as_of = _to_datetime(timestamp)
+    for position in range(len(series)):
+        as_of = series.timestamp_at(position)
         if start is not None and as_of < start:
             continue
         if end is not None and as_of > end:
@@ -241,13 +207,6 @@ def _validate_state_model_output(
         )
 
 
-def _single_provider(prices: pd.DataFrame) -> str:
-    providers = tuple(str(provider) for provider in prices["provider"].unique())
-    if len(providers) != 1:
-        raise ValueError("prices must contain exactly one provider")
-    return providers[0]
-
-
 def _normalize_symbol(value: object) -> str:
     return _normalize_required_text(value, "symbol").upper()
 
@@ -261,38 +220,6 @@ def _normalize_required_text(value: object, field_name: str) -> str:
     return text
 
 
-def _normalize_text_series(series: pd.Series, field_name: str) -> pd.Series:
-    if series.isna().any():
-        raise ValueError(f"{field_name} must not contain missing values")
-    normalized = series.map(lambda item: _normalize_required_text(item, field_name))
-    if field_name == "symbol":
-        normalized = normalized.map(str.upper)
-    return normalized.astype("string")
-
-
-def _normalize_aware_timestamp_series(series: pd.Series) -> pd.Series:
-    values: list[pd.Timestamp] = []
-    for item in series:
-        timestamp = pd.Timestamp(item)
-        if pd.isna(timestamp):
-            raise ValueError("timestamp must not contain missing values")
-        if timestamp.tzinfo is None:
-            raise ValueError("timestamp must be timezone-aware")
-        values.append(timestamp.tz_convert(UTC))
-    return pd.Series(values, index=series.index, dtype="datetime64[ns, UTC]")
-
-
-def _normalize_numeric_series(series: pd.Series, field_name: str) -> pd.Series:
-    if series.map(lambda value: isinstance(value, bool)).any():
-        raise TypeError(f"{field_name} must be numeric")
-    numeric = pd.to_numeric(series, errors="coerce")
-    if numeric.isna().any():
-        raise ValueError(f"{field_name} must not contain invalid values")
-    if not numeric.map(math.isfinite).all():
-        raise ValueError(f"{field_name} must be finite")
-    return numeric.astype(float)
-
-
 def _normalize_optional_timestamp(value: object, field_name: str) -> datetime | None:
     if value is None:
         return None
@@ -301,16 +228,6 @@ def _normalize_optional_timestamp(value: object, field_name: str) -> datetime | 
     if value.tzinfo is None:
         raise ValueError(f"{field_name} must be timezone-aware")
     return value.astimezone(UTC)
-
-
-def _to_datetime(value: object) -> datetime:
-    if isinstance(value, pd.Timestamp):
-        return value.to_pydatetime().astimezone(UTC)
-    if isinstance(value, datetime):
-        if value.tzinfo is None:
-            raise ValueError("timestamp must be timezone-aware")
-        return value.astimezone(UTC)
-    raise TypeError("timestamp must be a datetime")
 
 
 __all__ = ["HistoricalReplayService"]
