@@ -53,6 +53,34 @@ def test_specification_is_immutable_normalized_and_deterministic() -> None:
         specification.symbol = "AAPL"  # type: ignore[misc]
 
 
+def test_specification_fingerprint_normalizes_semantic_equivalents() -> None:
+    offset = timezone(timedelta(hours=8))
+    equivalent = _specification(
+        context_start=_START.astimezone(offset),
+        evaluation_start=_START.astimezone(offset),
+        evaluation_end=(_START + timedelta(days=2)).astimezone(offset),
+    )
+
+    assert equivalent.fingerprint == _specification().fingerprint
+    assert equivalent.fingerprint.startswith("sha256:")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("context_start", _START - timedelta(days=1)),
+        ("evaluation_start", _START + timedelta(hours=1)),
+        ("evaluation_end", _START + timedelta(days=3)),
+        ("interval", "1hour"),
+    ],
+)
+def test_specification_semantic_changes_change_fingerprint(
+    field: str,
+    value: object,
+) -> None:
+    assert _specification(**{field: value}).fingerprint != _specification().fingerprint
+
+
 def test_context_may_equal_or_precede_evaluation_start() -> None:
     assert _specification().context_start == _specification().evaluation_start
     earlier = _specification(

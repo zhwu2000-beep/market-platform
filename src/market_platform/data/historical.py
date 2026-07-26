@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 
 import pandas as pd
 
+from market_platform._fingerprint import canonical_fingerprint, canonical_float
 from market_platform.data.models import PRICE_COLUMNS
 
 HistoricalPriceRow = tuple[
@@ -26,7 +27,7 @@ HistoricalPriceRow = tuple[
 class HistoricalPriceSeries:
     """Defensively owned, replay-grade historical OHLCV series."""
 
-    __slots__ = ("_frame", "_provider", "_symbol")
+    __slots__ = ("_content_fingerprint", "_frame", "_provider", "_symbol")
 
     def __init__(
         self,
@@ -45,6 +46,7 @@ class HistoricalPriceSeries:
         self._frame = frame
         self._symbol = str(frame.iloc[0]["symbol"])
         self._provider = str(frame.iloc[0]["provider"])
+        self._content_fingerprint: str | None = None
 
     @property
     def symbol(self) -> str:
@@ -57,6 +59,16 @@ class HistoricalPriceSeries:
         """Return the single normalized series provider."""
 
         return self._provider
+
+    @property
+    def content_fingerprint(self) -> str:
+        """Return the provider-independent identity of the canonical rows."""
+
+        fingerprint = self._content_fingerprint
+        if fingerprint is None:
+            fingerprint = _historical_price_content_fingerprint(self)
+            self._content_fingerprint = fingerprint
+        return fingerprint
 
     @property
     def as_of(self) -> datetime:
@@ -103,6 +115,31 @@ class HistoricalPriceSeries:
 
     def _materialize_prefix(self, stop: int) -> pd.DataFrame:
         return self._frame.iloc[:stop].copy(deep=True)
+
+
+def _historical_price_content_fingerprint(series: HistoricalPriceSeries) -> str:
+    rows: list[dict[str, str]] = []
+    for symbol, timestamp, open_, high, low, close, volume, _provider in (
+        series._iter_rows(len(series))
+    ):
+        rows.append(
+            {
+                "symbol": symbol,
+                "timestamp": timestamp.isoformat(),
+                "open": canonical_float(open_),
+                "high": canonical_float(high),
+                "low": canonical_float(low),
+                "close": canonical_float(close),
+                "volume": canonical_float(volume),
+            }
+        )
+    return canonical_fingerprint(
+        {
+            "schema_version": "historical_price_series_content/v1",
+            "symbol": series.symbol,
+            "rows": rows,
+        }
+    )
 
 
 @dataclass(frozen=True, slots=True, init=False)

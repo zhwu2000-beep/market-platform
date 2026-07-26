@@ -15,6 +15,14 @@ from market_platform.replay.models import (
     HistoricalReplayStep,
     ReplayStrategyIdentity,
 )
+from market_platform.replay.provenance import (
+    HistoricalReplayExecution,
+    HistoricalReplayRunProvenance,
+    ReplayStructureDerivationIdentity,
+    SoftwareRevision,
+    default_replay_signal_derivation_identity,
+    default_replay_structure_derivation_identity,
+)
 from market_platform.replay.specification import HistoricalReplaySpecification
 from market_platform.signals.service import precompute_market_signal_snapshots
 from market_platform.state.models import MarketState
@@ -95,13 +103,7 @@ class HistoricalReplayService:
                 "specification must be a HistoricalReplaySpecification"
             )
         _validate_execution_inputs(strategies, state_model)
-        context_prices = _filter_specification_context(prices, specification)
-        if not prices.empty and context_prices.empty:
-            raise ValueError("no replay timestamps found in requested range")
-        series = _build_historical_price_series(
-            context_prices,
-            specification.symbol,
-        )
+        series = _prepare_specification_series(prices, specification)
         return self._run_canonical_series(
             series,
             interval=specification.interval,
@@ -110,6 +112,64 @@ class HistoricalReplayService:
             start=specification.evaluation_start,
             end=specification.evaluation_end,
         )
+
+    def run_execution(
+        self,
+        prices: pd.DataFrame,
+        specification: HistoricalReplaySpecification,
+        *,
+        strategies: StrategyCollection,
+        state_model: MarketStateModel,
+        software_revision: SoftwareRevision,
+        structure_derivation: ReplayStructureDerivationIdentity | None = None,
+        state_model_configuration_fingerprint: str | None = None,
+    ) -> HistoricalReplayExecution:
+        """Replay with deterministic requested and resolved provenance."""
+
+        if not isinstance(specification, HistoricalReplaySpecification):
+            raise TypeError(
+                "specification must be a HistoricalReplaySpecification"
+            )
+        if not isinstance(software_revision, SoftwareRevision):
+            raise TypeError("software_revision must be a SoftwareRevision")
+        _validate_execution_inputs(strategies, state_model)
+        resolved_structure_derivation = _resolve_structure_derivation_identity(
+            self._price_structure_service,
+            structure_derivation,
+        )
+        series = _prepare_specification_series(prices, specification)
+        result = self._run_canonical_series(
+            series,
+            interval=specification.interval,
+            strategies=strategies,
+            state_model=state_model,
+            start=specification.evaluation_start,
+            end=specification.evaluation_end,
+        )
+        if result.start_as_of is None or result.end_as_of is None:
+            raise ValueError("provenance execution requires replay steps")
+        provenance = HistoricalReplayRunProvenance(
+            specification=specification,
+            specification_fingerprint=specification.fingerprint,
+            dataset_content_fingerprint=series.content_fingerprint,
+            provider=series.provider,
+            context_start=series.timestamp_at(0),
+            context_end=series.as_of,
+            context_row_count=len(series),
+            evaluation_start=result.start_as_of,
+            evaluation_end=result.end_as_of,
+            evaluation_step_count=result.step_count,
+            signal_derivation=default_replay_signal_derivation_identity(),
+            structure_derivation=resolved_structure_derivation,
+            state_model_id=result.state_model_id,
+            state_model_version=result.state_model_version,
+            state_model_configuration_fingerprint=(
+                state_model_configuration_fingerprint
+            ),
+            strategies=result.strategies,
+            software_revision=software_revision,
+        )
+        return HistoricalReplayExecution(result=result, provenance=provenance)
 
     def _run_canonical_series(
         self,
@@ -224,6 +284,16 @@ def _filter_specification_context(
     return retained.loc[mask].copy(deep=True).reset_index(drop=True)
 
 
+def _prepare_specification_series(
+    prices: pd.DataFrame,
+    specification: HistoricalReplaySpecification,
+) -> HistoricalPriceSeries:
+    context_prices = _filter_specification_context(prices, specification)
+    if not prices.empty and context_prices.empty:
+        raise ValueError("no replay timestamps found in requested range")
+    return _build_historical_price_series(context_prices, specification.symbol)
+
+
 def _build_historical_price_series(
     prices: pd.DataFrame,
     symbol: str,
@@ -238,6 +308,31 @@ def _precompute_default_structure_snapshots(
     if not service._uses_default_components():
         return None
     return precompute_price_structure_snapshots(prices)
+
+
+def _resolve_structure_derivation_identity(
+    service: PriceStructureService,
+    supplied: ReplayStructureDerivationIdentity | None,
+) -> ReplayStructureDerivationIdentity:
+    if supplied is not None and not isinstance(
+        supplied,
+        ReplayStructureDerivationIdentity,
+    ):
+        raise TypeError(
+            "structure_derivation must be a ReplayStructureDerivationIdentity"
+        )
+    if service._uses_default_components():
+        built_in = default_replay_structure_derivation_identity()
+        if supplied is not None and supplied != built_in:
+            raise ValueError(
+                "structure_derivation must match the built-in structure service"
+            )
+        return built_in
+    if supplied is None:
+        raise ValueError(
+            "structure_derivation is required for a custom structure service"
+        )
+    return supplied
 
 
 def _replay_positions(

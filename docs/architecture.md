@@ -54,3 +54,23 @@ concrete providers such as `PolygonProvider`.
   dataset coverage, run manifests, persistence, automatic warm-up, and exchange
   calendars are not part of this boundary.
 - See `docs/adr/0005-replay-specification-context-window.md`.
+
+## Replay Run Identity and Provenance
+- `HistoricalReplaySpecification.fingerprint` identifies normalized requested
+  instrument and temporal intent without changing its existing serialization.
+- `HistoricalPriceSeries.content_fingerprint` identifies retained canonical
+  symbol/timestamp/OHLCV contents. Provider and interval remain separate: provider
+  is an actual provenance fact and interval belongs to Replay intent.
+- `HistoricalReplayService.run_execution()` returns `HistoricalReplayExecution`,
+  which wraps the unchanged result with immutable `HistoricalReplayRunProvenance`
+  and a deterministic run fingerprint.
+- Provenance records requested specification, actual retained context and evaluated
+  bounds/counts, actual provider, signal/structure derivations, state model, ordered
+  strategies, and caller-supplied software revision.
+- The run fingerprint covers canonical execution inputs and resolved facts only.
+  It excludes Replay outputs, timing, rendering, cache paths, and random values.
+- Custom structure services require explicit derivation identity only through the
+  provenance-producing API; legacy replay remains compatible.
+- Provenance is an in-memory audit boundary, not a manifest, persisted artifact, or
+  guarantee that provider data can later be recovered.
+- See `docs/adr/0006-replay-run-identity-provenance.md`.

@@ -5,6 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from market_platform._fingerprint import canonical_fingerprint
+
+_FINGERPRINT_SCHEMA_VERSION = "historical_replay_specification/v1"
+
 
 @dataclass(frozen=True, slots=True)
 class HistoricalReplaySpecification:
@@ -49,6 +53,17 @@ class HistoricalReplaySpecification:
             "evaluation_start": self.evaluation_start.isoformat(),
             "evaluation_end": self.evaluation_end.isoformat(),
         }
+
+    @property
+    def fingerprint(self) -> str:
+        """Return the deterministic identity of normalized replay intent."""
+
+        return canonical_fingerprint(
+            {
+                "schema_version": _FINGERPRINT_SCHEMA_VERSION,
+                **self.to_dict(),
+            }
+        )
 
 
 def _normalize_required_text(value: object, field_name: str) -> str:
