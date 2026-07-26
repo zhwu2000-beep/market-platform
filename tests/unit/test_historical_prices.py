@@ -81,6 +81,82 @@ def test_historical_series_stably_sorts_without_mutating_input() -> None:
     assert_frame_equal(prices, before)
 
 
+def test_historical_series_content_fingerprint_is_canonical_and_provider_free() -> None:
+    prices = _prices()
+    permuted = prices.iloc[[3, 0, 2, 1]].reset_index(drop=True)
+    integer_equivalent = prices.copy(deep=True)
+    integer_equivalent["volume"] = integer_equivalent["volume"].astype(int)
+    other_provider = prices.copy(deep=True)
+    other_provider["provider"] = "other-provider"
+    offset_equivalent = prices.copy(deep=True)
+    offset = timezone(timedelta(hours=8))
+    offset_equivalent["timestamp"] = offset_equivalent["timestamp"].map(
+        lambda value: value.to_pydatetime().astimezone(offset)
+    )
+
+    expected = HistoricalPriceSeries(prices).content_fingerprint
+
+    assert HistoricalPriceSeries(permuted).content_fingerprint == expected
+    assert HistoricalPriceSeries(integer_equivalent).content_fingerprint == expected
+    assert HistoricalPriceSeries(other_provider).content_fingerprint == expected
+    assert HistoricalPriceSeries(offset_equivalent).content_fingerprint == expected
+
+
+def test_historical_series_content_fingerprint_covers_every_owned_row() -> None:
+    prices = _prices()
+    series = HistoricalPriceSeries(prices)
+    expected = series.content_fingerprint
+    changed = prices.copy(deep=True)
+    changed.loc[1, "close"] += 0.5
+    changed.loc[1, "high"] += 0.5
+
+    prices.loc[1, "close"] = 9_999.0
+
+    assert series.content_fingerprint == expected
+    assert HistoricalPriceSeries(changed).content_fingerprint != expected
+    assert HistoricalPriceSeries(_prices(3)).content_fingerprint != expected
+
+
+@pytest.mark.parametrize("column", ["open", "high", "low", "close", "volume"])
+def test_historical_series_middle_value_changes_content_fingerprint(
+    column: str,
+) -> None:
+    prices = _prices()
+    changed = prices.copy(deep=True)
+    changed.loc[1, column] += 0.25
+    if column == "low":
+        changed.loc[1, "high"] += 0.25
+
+    assert (
+        HistoricalPriceSeries(changed).content_fingerprint
+        != HistoricalPriceSeries(prices).content_fingerprint
+    )
+
+
+def test_historical_series_symbol_changes_content_fingerprint() -> None:
+    changed = _prices()
+    changed["symbol"] = "AAPL"
+
+    assert (
+        HistoricalPriceSeries(changed).content_fingerprint
+        != HistoricalPriceSeries(_prices()).content_fingerprint
+    )
+
+
+def test_historical_series_normalizes_signed_zero_volume_identity() -> None:
+    fingerprints: set[str] = set()
+    for value in (0, 0.0, -0.0):
+        prices = _prices()
+        prices.loc[1, "volume"] = value
+        fingerprints.add(HistoricalPriceSeries(prices).content_fingerprint)
+
+    changed = _prices()
+    changed.loc[1, "volume"] = 1.0
+
+    assert len(fingerprints) == 1
+    assert HistoricalPriceSeries(changed).content_fingerprint not in fingerprints
+
+
 def test_historical_series_rejects_duplicate_timestamps() -> None:
     prices = _prices()
     prices.loc[1, "timestamp"] = prices.loc[0, "timestamp"]
