@@ -62,3 +62,10 @@ Replay provenance is an additive programmatic boundary. The existing CLI table,
 JSON, and CSV schemas intentionally remain result-only; callers that require run
 identity use `HistoricalReplayService.run_execution()` with an explicit
 `SoftwareRevision`.
+
+Versioned Replay artifacts are also programmatic in v0.50.0. Construct an
+`HistoricalReplayArtifact` from that execution and use
+`save_historical_replay_artifact()`, `load_historical_replay_artifact()`, or
+`verify_historical_replay_artifact()`. The CLI has no artifact flags or commands,
+and existing smoke output is unchanged. Artifact files contain Replay results and
+provenance but do not contain canonical OHLCV rows.

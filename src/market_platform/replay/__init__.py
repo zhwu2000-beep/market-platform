@@ -1,5 +1,18 @@
 """Historical replay foundation."""
 
+from market_platform.replay.artifact import (
+    HistoricalReplayArtifact,
+    HistoricalReplayArtifactError,
+    HistoricalReplayArtifactIntegrityError,
+)
+from market_platform.replay.artifact_file import (
+    load_historical_replay_artifact,
+    save_historical_replay_artifact,
+    verify_historical_replay_artifact,
+)
+from market_platform.replay.artifact_serialization import (
+    historical_replay_result_fingerprint,
+)
 from market_platform.replay.models import (
     HistoricalReplayResult,
     HistoricalReplayStep,
@@ -23,6 +36,9 @@ from market_platform.replay.summary import (
 )
 
 __all__ = [
+    "HistoricalReplayArtifact",
+    "HistoricalReplayArtifactError",
+    "HistoricalReplayArtifactIntegrityError",
     "HistoricalReplayExecution",
     "HistoricalReplayResult",
     "HistoricalReplayRunProvenance",
@@ -37,5 +53,9 @@ __all__ = [
     "StrategyReplaySummary",
     "default_replay_signal_derivation_identity",
     "default_replay_structure_derivation_identity",
+    "historical_replay_result_fingerprint",
+    "load_historical_replay_artifact",
+    "save_historical_replay_artifact",
     "summarize_historical_replay",
+    "verify_historical_replay_artifact",
 ]
