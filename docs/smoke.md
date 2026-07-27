@@ -69,3 +69,9 @@ Versioned Replay artifacts are also programmatic in v0.50.0. Construct an
 `verify_historical_replay_artifact()`. The CLI has no artifact flags or commands,
 and existing smoke output is unchanged. Artifact files contain Replay results and
 provenance but do not contain canonical OHLCV rows.
+
+Historical Replay experiments are programmatic and in-memory in v0.51.0. Load or
+construct verified Artifacts separately, create an
+`HistoricalReplayExperimentSpecification`, and call
+`create_historical_replay_experiment()`. Comparison performs no provider access,
+Replay execution, or file I/O. Existing CLI and smoke output remain unchanged.
