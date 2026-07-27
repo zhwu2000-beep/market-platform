@@ -74,3 +74,25 @@ concrete providers such as `PolygonProvider`.
 - Provenance is an in-memory audit boundary, not a manifest, persisted artifact, or
   guarantee that provider data can later be recovered.
 - See `docs/adr/0006-replay-run-identity-provenance.md`.
+
+## Versioned Historical Replay Artifacts
+- `HistoricalReplayArtifact` is the immutable durable envelope for one
+  `HistoricalReplayExecution`. It stores the complete typed Replay result once,
+  execution provenance, the existing run fingerprint, a production result
+  fingerprint, and a semantic integrity checksum.
+- The artifact codec is separate from `HistoricalReplayResult.to_dict()`, whose
+  presentation and CLI contract remains unchanged. Strict field-directed decoding
+  reconstructs public immutable Replay, state, and strategy models.
+- Run, result, dataset, and integrity identities remain distinct. The result
+  fingerprint covers typed output content; the integrity checksum covers the
+  complete semantic envelope except its own value.
+- V1 artifacts are result-only: provider and dataset content identity remain in
+  provenance, but canonical OHLCV rows are not stored and cannot be recovered.
+- Local persistence writes deterministic UTF-8 JSON through an fsynced temporary
+  file and atomic replacement. Loading always verifies schemas, checksum,
+  fingerprints, and execution consistency.
+- Checksums detect corruption and inconsistent edits, not authenticity. V1 is
+  intended for locally generated, trusted-size files and provides no signatures or
+  denial-of-service limits.
+- Artifact CLI commands, repositories, dataset storage, and migrations are
+  deferred. See `docs/adr/0007-versioned-historical-replay-artifact.md`.
