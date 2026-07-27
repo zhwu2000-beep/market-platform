@@ -13,6 +13,22 @@ from market_platform.replay.artifact_file import (
 from market_platform.replay.artifact_serialization import (
     historical_replay_result_fingerprint,
 )
+from market_platform.replay.experiment import (
+    HistoricalReplayChangedStep,
+    HistoricalReplayComparisonCompatibility,
+    HistoricalReplayComparisonIncompatibilityReason,
+    HistoricalReplayComparisonResult,
+    HistoricalReplayComparisonSummary,
+    HistoricalReplayExecutionDifference,
+    HistoricalReplayExperiment,
+    HistoricalReplayExperimentSpecification,
+    HistoricalReplayStateDifference,
+    HistoricalReplayStrategyDifference,
+    HistoricalReplayStrategyMemberKey,
+    HistoricalReplayStrategyMemberSummary,
+    compare_historical_replay_artifacts,
+    create_historical_replay_experiment,
+)
 from market_platform.replay.models import (
     HistoricalReplayResult,
     HistoricalReplayStep,
@@ -36,6 +52,20 @@ from market_platform.replay.summary import (
 )
 
 __all__ = [
+    'HistoricalReplayChangedStep',
+    'HistoricalReplayComparisonCompatibility',
+    'HistoricalReplayComparisonIncompatibilityReason',
+    'HistoricalReplayComparisonResult',
+    'HistoricalReplayComparisonSummary',
+    'HistoricalReplayExecutionDifference',
+    'HistoricalReplayExperiment',
+    'HistoricalReplayExperimentSpecification',
+    'HistoricalReplayStateDifference',
+    'HistoricalReplayStrategyDifference',
+    'HistoricalReplayStrategyMemberKey',
+    'HistoricalReplayStrategyMemberSummary',
+    'compare_historical_replay_artifacts',
+    'create_historical_replay_experiment',
     "HistoricalReplayArtifact",
     "HistoricalReplayArtifactError",
     "HistoricalReplayArtifactIntegrityError",

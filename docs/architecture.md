@@ -96,3 +96,22 @@ concrete providers such as `PolygonProvider`.
   denial-of-service limits.
 - Artifact CLI commands, repositories, dataset storage, and migrations are
   deferred. See `docs/adr/0007-versioned-historical-replay-artifact.md`.
+
+## Historical Replay Experiments and Structural Comparison
+- `HistoricalReplayExperimentSpecification` owns one verified baseline Artifact,
+  one or more ordered verified candidates, caller-supplied comparison software
+  revision, and a deterministic experiment fingerprint.
+- V1 compatibility requires exact symbol, interval, retained dataset content
+  fingerprint, ordered evaluation timestamps, and ordered per-step observation
+  fingerprints. Incompatible valid Artifacts return ordered reason codes and no
+  aligned detail.
+- Compatible state comparison is field-directed across regimes, quality, and
+  missing inputs, with separate provenance and evaluation-evidence indicators.
+  Strategies align by strategy ID plus occurrence index so reordered and duplicate
+  IDs remain deterministic.
+- Pairwise comparison retains changed steps only and complete aggregate counts.
+  Results describe structural output differences without attributing causality or
+  representing returns, P&L, portfolios, orders, fills, or execution quality.
+- Experiment comparison accepts loaded Artifacts and performs no Replay execution,
+  filesystem I/O, persistence, CLI behavior, or batch orchestration. See
+  `docs/adr/0008-historical-replay-experiment-comparison.md`.
