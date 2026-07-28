@@ -33,6 +33,28 @@ concrete providers such as `PolygonProvider`.
   API or the public validated-prefix API. Both share identity, price facts,
   provenance, fingerprinting, and final model construction.
 - See `docs/adr/0004-canonical-historical-input.md`.
+
+## Observation Fingerprint Precomputation
+- Historical observation fingerprint semantics remain the legacy compact sorted
+  JSON contract. Provider and every ordered prefix OHLCV row participate; signal
+  and structure snapshots do not. Row numerics retain `repr(float(value))`, so
+  observation identity continues to distinguish `0.0` from `-0.0`.
+- `HistoricalObservationFingerprintPrecompute` is a short-lived immutable
+  observation-domain value bound to one exact `HistoricalPriceSeries`, interval,
+  provider, and ordered set of evaluation positions. It is not serialized or
+  included in any identity.
+- Preparation projects and JSON-encodes required rows once into one transient
+  linear byte stream. Each evaluation digest hashes the exact legacy header, the
+  applicable byte-stream prefix, and the exact legacy suffix; Replay then performs
+  one validated lookup per step.
+- Standalone raw and validated-prefix observation construction retain the shared
+  fallback. The optimized and fallback paths use one canonical byte-generation
+  source of truth and produce identical observations.
+- Row projection and encoding are linear through the maximum evaluation position.
+  Total exact legacy SHA-256 input remains quadratic across full-prefix Replay
+  because changing `as_of` precedes `rows` in the canonical stream.
+- See `docs/adr/0009-observation-fingerprint-precomputation.md`.
+
 ## Replay Specification and Windows
 - `HistoricalReplaySpecification` is the immutable application request for one
   symbol and interval with explicit UTC `context_start`, `evaluation_start`, and

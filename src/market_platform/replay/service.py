@@ -7,6 +7,9 @@ from datetime import UTC, datetime
 import pandas as pd
 
 from market_platform.data.historical import HistoricalPriceSeries
+from market_platform.observation.fingerprint import (
+    prepare_historical_observation_fingerprints,
+)
 from market_platform.observation.history import (
     build_historical_market_observation_from_prefix,
 )
@@ -185,6 +188,11 @@ class HistoricalReplayService:
         if not replay_positions:
             raise ValueError("no replay timestamps found in requested range")
 
+        fingerprint_precompute = prepare_historical_observation_fingerprints(
+            series,
+            replay_positions,
+            interval=interval,
+        )
         full_prices = series.to_dataframe()
         signal_snapshots = precompute_market_signal_snapshots(full_prices)
         structure_snapshots = _precompute_default_structure_snapshots(
@@ -213,6 +221,7 @@ class HistoricalReplayService:
                 provider=series.provider,
                 signal_snapshot=signal_snapshot,
                 structure_snapshot=structure_snapshot,
+                fingerprint_precompute=fingerprint_precompute,
             )
             state = state_model.evaluate(observation)
             _validate_state_model_output(state, state_model)

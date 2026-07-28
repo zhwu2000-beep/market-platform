@@ -75,3 +75,11 @@ construct verified Artifacts separately, create an
 `HistoricalReplayExperimentSpecification`, and call
 `create_historical_replay_experiment()`. Comparison performs no provider access,
 Replay execution, or file I/O. Existing CLI and smoke output remain unchanged.
+
+Historical Replay internally precomputes exact observation fingerprints in
+v0.52.0. Required rows are projected and JSON-encoded once, while the complete
+legacy SHA-256 byte stream is still hashed for each evaluated prefix. This changes
+no CLI option, output schema, observation digest, Replay result, Artifact, or
+experiment behavior. Benchmark validation should continue to use an output path
+outside the repository and must confirm the established 100/300/500-bar result
+fingerprints and exact production/instrumented parity.
