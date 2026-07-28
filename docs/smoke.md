@@ -83,3 +83,12 @@ no CLI option, output schema, observation digest, Replay result, Artifact, or
 experiment behavior. Benchmark validation should continue to use an output path
 outside the repository and must confirm the established 100/300/500-bar result
 fingerprints and exact production/instrumented parity.
+
+Historical Replay research workflows are synchronous, programmatic, and
+in-memory in v0.53.0. Construct explicit member and workflow specifications from
+one `HistoricalPriceSeries`, inject `HistoricalReplayService`, and call
+`HistoricalReplayResearchWorkflowService.run()`. The workflow creates existing
+Replay Artifacts and, when all requested candidates succeed, the existing
+Historical Replay Experiment. It performs no provider access or file I/O and adds
+no CLI command or smoke output. Existing provider-facing `research run` behavior
+is unchanged.

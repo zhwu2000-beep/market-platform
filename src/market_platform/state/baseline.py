@@ -90,6 +90,12 @@ class BaselineMarketStateModel:
 
         return _MODEL_VERSION
 
+    @property
+    def configuration_fingerprint(self) -> None:
+        """Return no configuration identity for this stateless model."""
+
+        return None
+
     def evaluate(self, observation: MarketObservation) -> MarketState:
         """Return state derived only from the supplied point-in-time facts."""
 
