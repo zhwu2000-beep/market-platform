@@ -21,11 +21,19 @@ from typing import Any, cast
 import pandas as pd
 
 import market_platform.observation.builder as observation_builder
+import market_platform.observation.fingerprint as observation_fingerprint
 import market_platform.observation.history as observation_history
 import market_platform.replay.service as replay_service
 import market_platform.structure.precompute as structure_precompute
 import market_platform.structure.service as structure_service
-from market_platform.data.historical import HistoricalPricePrefix, HistoricalPriceSeries
+from market_platform.data.historical import (
+    HistoricalPricePrefix,
+    HistoricalPriceRow,
+    HistoricalPriceSeries,
+)
+from market_platform.observation.fingerprint import (
+    HistoricalObservationFingerprintPrecompute,
+)
 from market_platform.observation.models import MarketObservation
 from market_platform.replay import (
     HistoricalReplayResult,
@@ -55,6 +63,7 @@ from market_platform.structure.models import (
 
 SCHEMA_VERSION = "1.1.0"
 _PRECOMPUTE_ATTR = "precompute_market_signal_snapshots"
+_FINGERPRINT_PRECOMPUTE_ATTR = "prepare_historical_observation_fingerprints"
 _OBSERVATION_ATTR = "build_historical_market_observation_from_prefix"
 _STRUCTURE_PRECOMPUTE_ATTR = "precompute_price_structure_snapshots"
 DEFAULT_BARS = (100, 300, 500)
@@ -142,6 +151,10 @@ class TimingRecorder:
     prefix_dataframe_materialization_lengths: list[int] = field(default_factory=list)
     observation_raw_builder_calls: int = 0
     observation_prefix_builder_calls: int = 0
+    observation_fingerprint_precompute_calls: int = 0
+    observation_fingerprint_precompute_ns: int = 0
+    observation_fingerprint_lookup_calls: int = 0
+    observation_fingerprint_fallback_calls: int = 0
     observation_fingerprint_rows: list[int] = field(default_factory=list)
     observation_canonical_chars: list[int] = field(default_factory=list)
     observation_hash_input_bytes: list[int] = field(default_factory=list)
@@ -412,6 +425,10 @@ def _instrument_replay_bindings(recorder: TimingRecorder) -> Iterator[None]:
     original_normalize = cast(Any, replay_service._build_historical_price_series)
     original_positions = cast(Any, replay_service._replay_positions)
     original_precompute = getattr(replay_service, _PRECOMPUTE_ATTR)
+    original_fingerprint_precompute = getattr(
+        replay_service,
+        _FINGERPRINT_PRECOMPUTE_ATTR,
+    )
     original_identities = cast(Any, replay_service._strategy_identities)
     original_full_materialization = HistoricalPriceSeries.to_dataframe
     original_prefix = HistoricalPriceSeries.prefix_at
@@ -434,15 +451,25 @@ def _instrument_replay_bindings(recorder: TimingRecorder) -> Iterator[None]:
     original_observation_provenance = (
         observation_history_module._build_observation_provenance
     )
-    original_fingerprint_rows = (
-        observation_history_module._historical_observation_fingerprint_rows
+    observation_fingerprint_module = cast(Any, observation_fingerprint)
+    original_fingerprint_row = (
+        observation_fingerprint_module._historical_observation_fingerprint_row
     )
-    original_fingerprint_canonical = (
-        observation_history_module
-        ._canonicalize_historical_observation_fingerprint_payload
+    original_fingerprint_encode = (
+        observation_fingerprint_module
+        ._encode_historical_observation_fingerprint_row
     )
     original_fingerprint_hash = (
-        observation_history_module._hash_historical_observation_fingerprint
+        observation_fingerprint_module
+        ._hash_historical_observation_fingerprint_parts
+    )
+    original_fingerprint_lookup = cast(
+        Any,
+        HistoricalObservationFingerprintPrecompute
+        .fingerprint_for_validated_prefix,
+    )
+    original_fingerprint_fallback = (
+        observation_history_module._historical_observation_fingerprint
     )
     original_construct_observation = (
         observation_history_module._construct_historical_observation
@@ -485,6 +512,28 @@ def _instrument_replay_bindings(recorder: TimingRecorder) -> Iterator[None]:
     def timed_precompute(prices: pd.DataFrame) -> tuple[MarketSignalSnapshot, ...]:
         with recorder.measure("signal_precompute"):
             return cast(tuple[MarketSignalSnapshot, ...], original_precompute(prices))
+
+    def timed_fingerprint_precompute(
+        series: HistoricalPriceSeries,
+        evaluation_positions: tuple[int, ...],
+        *,
+        interval: str,
+    ) -> HistoricalObservationFingerprintPrecompute:
+        recorder.observation_fingerprint_precompute_calls += 1
+        start = perf_counter_ns()
+        try:
+            return cast(
+                HistoricalObservationFingerprintPrecompute,
+                original_fingerprint_precompute(
+                    series,
+                    evaluation_positions,
+                    interval=interval,
+                ),
+            )
+        finally:
+            recorder.observation_fingerprint_precompute_ns += (
+                perf_counter_ns() - start
+            )
 
     def timed_identities(strategies: StrategyCollection) -> object:
         with recorder.measure("strategy_identity_construction"):
@@ -649,24 +698,42 @@ def _instrument_replay_bindings(recorder: TimingRecorder) -> Iterator[None]:
         with recorder.measure("observation_price_facts"):
             return original_observation_price_facts(prefix)
 
-    def timed_fingerprint_rows(
-        prefix: HistoricalPricePrefix,
-    ) -> list[dict[str, str]]:
+    def timed_fingerprint_row(row: HistoricalPriceRow) -> dict[str, str]:
         with recorder.measure("observation_fingerprint_rows"):
-            rows = cast(list[dict[str, str]], original_fingerprint_rows(prefix))
-        recorder.observation_fingerprint_rows.append(len(rows))
-        return rows
+            projected = cast(dict[str, str], original_fingerprint_row(row))
+        recorder.observation_fingerprint_rows.append(1)
+        return projected
 
-    def timed_fingerprint_canonical(payload: Mapping[str, object]) -> str:
-        with recorder.measure("observation_fingerprint_canonical_json"):
-            canonical = cast(str, original_fingerprint_canonical(payload))
-        recorder.observation_canonical_chars.append(len(canonical))
-        return canonical
+    def timed_fingerprint_encode(row: HistoricalPriceRow) -> bytes:
+        child_before = recorder.total_ns("observation_fingerprint_rows")
+        start = perf_counter_ns()
+        try:
+            return cast(bytes, original_fingerprint_encode(row))
+        finally:
+            child_after = recorder.total_ns("observation_fingerprint_rows")
+            recorder.record_duration(
+                "observation_fingerprint_canonical_json",
+                perf_counter_ns() - start - (child_after - child_before),
+            )
 
-    def timed_fingerprint_hash(canonical: str) -> str:
-        recorder.observation_hash_input_bytes.append(len(canonical.encode("utf-8")))
+    def timed_fingerprint_hash(*parts: bytes | memoryview) -> str:
+        input_bytes = sum(len(part) for part in parts)
+        recorder.observation_hash_input_bytes.append(input_bytes)
+        recorder.observation_canonical_chars.append(input_bytes)
         with recorder.measure("observation_fingerprint_hash"):
-            return cast(str, original_fingerprint_hash(canonical))
+            return cast(str, original_fingerprint_hash(*parts))
+
+    def timed_fingerprint_lookup(
+        precompute: HistoricalObservationFingerprintPrecompute,
+        *args: object,
+        **kwargs: object,
+    ) -> str:
+        recorder.observation_fingerprint_lookup_calls += 1
+        return cast(str, original_fingerprint_lookup(precompute, *args, **kwargs))
+
+    def timed_fingerprint_fallback(*args: object, **kwargs: object) -> str:
+        recorder.observation_fingerprint_fallback_calls += 1
+        return cast(str, original_fingerprint_fallback(*args, **kwargs))
 
     def timed_observation_provenance(*args: object, **kwargs: object) -> object:
         child_before = sum(
@@ -751,16 +818,28 @@ def _instrument_replay_bindings(recorder: TimingRecorder) -> Iterator[None]:
     ) -> MarketObservation:
         recorder.observation_prefix_builder_calls += 1
         recorder.observation_prefix_lengths.append(len(prefix))
-        with recorder.measure("observation_construction"):
+        start = perf_counter_ns()
+        try:
             return cast(
                 MarketObservation,
                 original_observation(prefix, *args, **kwargs),
             )
+        finally:
+            duration = perf_counter_ns() - start
+            if recorder.observation_fingerprint_precompute_ns:
+                duration += recorder.observation_fingerprint_precompute_ns
+                recorder.observation_fingerprint_precompute_ns = 0
+            recorder.record_duration("observation_construction", duration)
 
     patches = (
         (replay_service, "_build_historical_price_series", timed_normalize),
         (replay_service, "_replay_positions", timed_positions),
         (replay_service, _PRECOMPUTE_ATTR, timed_precompute),
+        (
+            replay_service,
+            _FINGERPRINT_PRECOMPUTE_ATTR,
+            timed_fingerprint_precompute,
+        ),
         (replay_service, "_strategy_identities", timed_identities),
         (HistoricalPriceSeries, "to_dataframe", timed_full_materialization),
         (HistoricalPriceSeries, "prefix_at", timed_prefix),
@@ -793,19 +872,29 @@ def _instrument_replay_bindings(recorder: TimingRecorder) -> Iterator[None]:
             timed_observation_provenance,
         ),
         (
-            observation_history,
-            "_historical_observation_fingerprint_rows",
-            timed_fingerprint_rows,
+            observation_fingerprint,
+            "_historical_observation_fingerprint_row",
+            timed_fingerprint_row,
         ),
         (
-            observation_history,
-            "_canonicalize_historical_observation_fingerprint_payload",
-            timed_fingerprint_canonical,
+            observation_fingerprint,
+            "_encode_historical_observation_fingerprint_row",
+            timed_fingerprint_encode,
         ),
         (
-            observation_history,
-            "_hash_historical_observation_fingerprint",
+            observation_fingerprint,
+            "_hash_historical_observation_fingerprint_parts",
             timed_fingerprint_hash,
+        ),
+        (
+            HistoricalObservationFingerprintPrecompute,
+            "fingerprint_for_validated_prefix",
+            timed_fingerprint_lookup,
+        ),
+        (
+            observation_history,
+            "_historical_observation_fingerprint",
+            timed_fingerprint_fallback,
         ),
         (
             observation_history,

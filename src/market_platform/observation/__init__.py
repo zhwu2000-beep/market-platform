@@ -6,6 +6,10 @@ from market_platform.observation.builder import (
     build_signal_facts,
     build_structure_facts,
 )
+from market_platform.observation.fingerprint import (
+    HistoricalObservationFingerprintPrecompute,
+    prepare_historical_observation_fingerprints,
+)
 from market_platform.observation.history import (
     build_historical_market_observation,
     build_historical_market_observation_from_prefix,
@@ -21,6 +25,7 @@ from market_platform.observation.models import (
 
 __all__ = [
     "MarketObservation",
+    "HistoricalObservationFingerprintPrecompute",
     "ObservationIdentity",
     "ObservationProvenance",
     "PriceFacts",
@@ -32,4 +37,5 @@ __all__ = [
     "build_observation",
     "build_signal_facts",
     "build_structure_facts",
+    "prepare_historical_observation_fingerprints",
 ]

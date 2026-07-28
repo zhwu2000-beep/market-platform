@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 from collections.abc import Mapping
@@ -13,6 +12,12 @@ import pandas as pd
 
 from market_platform.data.historical import HistoricalPricePrefix, HistoricalPriceSeries
 from market_platform.observation.builder import build_market_observation
+from market_platform.observation.fingerprint import (
+    HistoricalObservationFingerprintPrecompute,
+    _hash_historical_observation_fingerprint_bytes,
+    _historical_observation_fingerprint_bytes,
+    _historical_observation_fingerprint_row,
+)
 from market_platform.observation.models import (
     MarketObservation,
     ObservationIdentity,
@@ -72,6 +77,7 @@ def build_historical_market_observation_from_prefix(
     provider: str,
     signal_snapshot: MarketSignalSnapshot,
     structure_snapshot: PriceStructureSnapshot,
+    fingerprint_precompute: HistoricalObservationFingerprintPrecompute | None = None,
 ) -> MarketObservation:
     """Build an observation from an already validated historical prefix."""
 
@@ -97,6 +103,14 @@ def build_historical_market_observation_from_prefix(
         raise TypeError("structure_snapshot must be a PriceStructureSnapshot")
     if signal_snapshot.symbol != normalized_symbol:
         raise ValueError("signal_snapshot symbol must match historical prefix")
+    if fingerprint_precompute is not None and not isinstance(
+        fingerprint_precompute,
+        HistoricalObservationFingerprintPrecompute,
+    ):
+        raise TypeError(
+            "fingerprint_precompute must be a "
+            "HistoricalObservationFingerprintPrecompute or None"
+        )
 
     return _construct_historical_observation(
         identity=_build_observation_identity(
@@ -111,6 +125,7 @@ def build_historical_market_observation_from_prefix(
             interval=normalized_interval,
             as_of=normalized_as_of,
             provider=normalized_provider,
+            fingerprint_precompute=fingerprint_precompute,
         ),
         price_facts=_build_price_facts(prefix),
         signal_snapshot=signal_snapshot,
@@ -161,19 +176,31 @@ def _build_observation_provenance(
     interval: str,
     as_of: datetime,
     provider: str,
+    fingerprint_precompute: HistoricalObservationFingerprintPrecompute | None = None,
 ) -> ObservationProvenance:
-    return ObservationProvenance(
-        provider=provider,
-        methodology="historical_replay_observation",
-        methodology_version="1.0.0",
-        parameters={"interval": interval},
-        input_fingerprint=_historical_observation_fingerprint(
+    input_fingerprint = (
+        _historical_observation_fingerprint(
             prefix=prefix,
             symbol=symbol,
             interval=interval,
             as_of=as_of,
             provider=provider,
-        ),
+        )
+        if fingerprint_precompute is None
+        else fingerprint_precompute.fingerprint_for_validated_prefix(
+            prefix,
+            symbol=symbol,
+            interval=interval,
+            provider=provider,
+            as_of=as_of,
+        )
+    )
+    return ObservationProvenance(
+        provider=provider,
+        methodology="historical_replay_observation",
+        methodology_version="1.0.0",
+        parameters={"interval": interval},
+        input_fingerprint=input_fingerprint,
     )
 
 
@@ -202,15 +229,14 @@ def _historical_observation_fingerprint(
     as_of: datetime,
     provider: str,
 ) -> str:
-    payload = _historical_observation_fingerprint_payload(
+    canonical = _historical_observation_fingerprint_bytes(
         prefix=prefix,
         symbol=symbol,
         interval=interval,
         as_of=as_of,
         provider=provider,
     )
-    canonical = _canonicalize_historical_observation_fingerprint_payload(payload)
-    return _hash_historical_observation_fingerprint(canonical)
+    return _hash_historical_observation_fingerprint_bytes(canonical)
 
 
 def _historical_observation_fingerprint_payload(
@@ -234,21 +260,8 @@ def _historical_observation_fingerprint_rows(
     prefix: HistoricalPricePrefix,
 ) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
-    for symbol, timestamp, open_, high, low, close, volume, provider in (
-        prefix.iter_rows()
-    ):
-        rows.append(
-            {
-                "symbol": symbol,
-                "timestamp": timestamp.isoformat(),
-                "open": _fingerprint_number(open_),
-                "high": _fingerprint_number(high),
-                "low": _fingerprint_number(low),
-                "close": _fingerprint_number(close),
-                "volume": _fingerprint_number(volume),
-                "provider": provider,
-            }
-        )
+    for row in prefix.iter_rows():
+        rows.append(_historical_observation_fingerprint_row(row))
     return rows
 
 
@@ -259,7 +272,7 @@ def _canonicalize_historical_observation_fingerprint_payload(
 
 
 def _hash_historical_observation_fingerprint(canonical: str) -> str:
-    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return _hash_historical_observation_fingerprint_bytes(canonical.encode("utf-8"))
 
 
 def _normalize_required_text(value: object, field_name: str) -> str:
@@ -286,15 +299,6 @@ def _normalize_positive_price(value: object) -> float:
     if not math.isfinite(numeric) or numeric <= 0.0:
         raise ValueError("latest close must be a positive finite number")
     return numeric
-
-
-def _fingerprint_number(value: object) -> str:
-    if isinstance(value, bool) or not isinstance(value, Real):
-        raise TypeError("fingerprint value must be numeric")
-    numeric = float(value)
-    if not math.isfinite(numeric):
-        raise ValueError("fingerprint value must be finite")
-    return repr(numeric)
 
 
 __all__ = [

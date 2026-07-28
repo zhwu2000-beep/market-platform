@@ -558,9 +558,10 @@ def test_observation_internal_attribution_metrics_are_consistent() -> None:
     assert sum(recorder.observation_prefix_lengths) == sum(
         range(1, result.step_count + 1)
     )
-    assert sum(recorder.observation_fingerprint_rows) == sum(
-        range(1, result.step_count + 1)
-    )
+    assert sum(recorder.observation_fingerprint_rows) == result.step_count
+    assert recorder.observation_fingerprint_precompute_calls == 1
+    assert recorder.observation_fingerprint_lookup_calls == result.step_count
+    assert recorder.observation_fingerprint_fallback_calls == 0
     assert sum(recorder.observation_signal_counts) == result.step_count * 5
 
     observation_attribution = scenario["observation_attribution"]
@@ -587,8 +588,9 @@ def test_observation_internal_attribution_metrics_are_consistent() -> None:
     assert (
         scenario["fingerprint_workload"]["fingerprint_calls"] == scenario["step_count"]
     )
-    assert scenario["fingerprint_workload"]["canonicalized_row_count"] == sum(
-        range(1, scenario["step_count"] + 1)
+    assert (
+        scenario["fingerprint_workload"]["canonicalized_row_count"]
+        == scenario["step_count"]
     )
     assert (
         scenario["canonicalization_workload"]["canonicalization_calls"]
@@ -605,7 +607,8 @@ def test_observation_instrumentation_restores_private_helper_patches() -> None:
         benchmark_replay.observation_history._normalize_observation_metadata
     )
     original_rows = (
-        benchmark_replay.observation_history._historical_observation_fingerprint_rows
+        benchmark_replay.observation_fingerprint
+        ._historical_observation_fingerprint_row
     )
     original_signal = benchmark_replay.observation_builder.build_signal_facts
     original_structure = benchmark_replay.observation_builder.build_structure_facts
@@ -631,7 +634,8 @@ def test_observation_instrumentation_restores_private_helper_patches() -> None:
         is original_metadata
     )
     assert (
-        benchmark_replay.observation_history._historical_observation_fingerprint_rows
+        benchmark_replay.observation_fingerprint
+        ._historical_observation_fingerprint_row
         is original_rows
     )
     assert benchmark_replay.observation_builder.build_signal_facts is original_signal
