@@ -1,5 +1,21 @@
 """Research workflow package."""
 
+from market_platform.research.historical_replay_workflow import (
+    HistoricalReplayResearchMemberSpecification,
+    HistoricalReplayResearchStateModelInstance,
+    HistoricalReplayResearchWorkflowCandidateResult,
+    HistoricalReplayResearchWorkflowFailureCode,
+    HistoricalReplayResearchWorkflowResult,
+    HistoricalReplayResearchWorkflowSkipReason,
+    HistoricalReplayResearchWorkflowSpecification,
+    HistoricalReplayResearchWorkflowStatus,
+    HistoricalReplayResearchWorkflowStepKind,
+    HistoricalReplayResearchWorkflowStepResult,
+    HistoricalReplayResearchWorkflowStepStatus,
+)
+from market_platform.research.historical_replay_workflow_service import (
+    HistoricalReplayResearchWorkflowService,
+)
 from market_platform.research.interpretation import (
     DIRECTIONAL_CURRENT_DRAWDOWN_SCALE,
     DIRECTIONAL_DISTANCE_FROM_MOVING_AVERAGE_SCALE,
@@ -53,6 +69,18 @@ __all__ = [
     "InterpretedSignal",
     "InterpretedSignalState",
     "DefaultResearchWorkflow",
+    "HistoricalReplayResearchMemberSpecification",
+    "HistoricalReplayResearchStateModelInstance",
+    "HistoricalReplayResearchWorkflowCandidateResult",
+    "HistoricalReplayResearchWorkflowFailureCode",
+    "HistoricalReplayResearchWorkflowResult",
+    "HistoricalReplayResearchWorkflowService",
+    "HistoricalReplayResearchWorkflowSkipReason",
+    "HistoricalReplayResearchWorkflowSpecification",
+    "HistoricalReplayResearchWorkflowStatus",
+    "HistoricalReplayResearchWorkflowStepKind",
+    "HistoricalReplayResearchWorkflowStepResult",
+    "HistoricalReplayResearchWorkflowStepStatus",
     "MarketView",
     "PositionAction",
     "PositionContext",

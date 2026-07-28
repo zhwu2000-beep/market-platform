@@ -137,3 +137,29 @@ concrete providers such as `PolygonProvider`.
 - Experiment comparison accepts loaded Artifacts and performs no Replay execution,
   filesystem I/O, persistence, CLI behavior, or batch orchestration. See
   `docs/adr/0008-historical-replay-experiment-comparison.md`.
+
+## Historical Replay Research Workflows
+- The existing async `ResearchWorkflow` remains the provider-facing market
+  interpretation boundary. `HistoricalReplayResearchWorkflowService` is a
+  separate synchronous domain composition API over already supplied canonical
+  historical data.
+- A workflow specification owns one `HistoricalPriceSeries`, one baseline member,
+  zero or more ordered position-sensitive candidate members, and separate
+  caller-supplied Replay, comparison, and workflow software revisions.
+- Member identities snapshot Replay intent, a re-derivable state-model identity,
+  structure derivation, and ordered `StrategyInstance` identities. Executable
+  identities are re-derived immediately before and after every Replay; stale or
+  execution-mutated configuration is an invariant failure. Produced execution provenance is checked before
+  Artifact construction. Ordinary Replay retains its broader executable APIs.
+- Baseline failure skips all dependent work. After baseline success, candidates
+  continue independently. Successful candidate Artifacts are retained, but any
+  failed candidate prevents Experiment construction; the requested set is never
+  reduced.
+- Terminal status and the fixed Replay/Artifact/Experiment step projection are
+  derived. Only the dedicated `StrategyRunnerError` execution boundary is
+  captured; validation, invariant, Artifact, Experiment, and control-flow errors
+  propagate.
+- The result owns complete in-memory Replay Artifacts and an optional existing
+  Experiment. It performs no provider access, persistence, CLI behavior, async
+  work, retries, parallelism, scheduling, generic DAG, or Agent work. See
+  `docs/adr/0010-historical-replay-research-workflow.md`.
