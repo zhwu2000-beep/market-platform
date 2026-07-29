@@ -102,3 +102,12 @@ is a bounded identity/status summary; complete Artifacts and the optional
 Experiment remain accessible only through the typed in-memory workflow result.
 No CLI, provider, filesystem, HTTP, TradingView, Agent, or broker smoke behavior
 is added.
+
+The v0.55.0 trading-signal foundation is domain-only and programmatic. Construct
+a `TradingSignal` with explicit source event identity, venue-qualified
+instrument, exact `Decimal` target, and finite validity window. Evaluate it at an
+explicit time and call `create_order_intent_from_signal()` with the fixed
+`ExactTargetPositionIntentPolicy`. The result is a pre-risk target-position
+proposal, not authorization or a broker order. No CLI, provider, filesystem,
+network, HTTP, TradingView, account, risk, persistence, or execution smoke
+behavior is added.
