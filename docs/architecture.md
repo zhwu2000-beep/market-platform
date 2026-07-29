@@ -185,3 +185,23 @@ concrete providers such as `PolygonProvider`.
   idempotency/expiry/replay protection, and remain separated from Order Intent,
   Risk, and Broker Execution layers. See
   `docs/adr/0011-research-application-boundary.md`.
+
+## Trading Signal and Order Intent Domain
+- `market_platform.trading` is a separate domain from analytical
+  `market_platform.signals`. It defines immutable venue-qualified instruments,
+  signal producers, time-bounded exact target-position signals, and pre-risk
+  Order Intents.
+- A producer-owned source event ID plus source identity derives an idempotency
+  key. The complete canonical event derives a separate signal fingerprint, so
+  repeat delivery and conflicting content can be distinguished without storage.
+- Targets use long, flat, or short direction with exact canonical `Decimal`
+  units. Signals require a finite UTC validity window and are evaluated only at
+  an explicit caller-supplied time under `[valid_from, expires_at)` semantics.
+- The fixed exact-target policy copies one active signal target into a
+  factory-only Order Intent. The decision time participates in identity and the
+  intent expires with its signal.
+- Order Intent has no lifecycle status and is not risk authorization, a
+  transaction, or a broker order. Accounts, positions, risk decisions, broker
+  instructions, ingress receipts, persistence, TradingView/HTTP adapters, and
+  execution remain future layers. See
+  `docs/adr/0012-trading-signal-and-order-intent.md`.
