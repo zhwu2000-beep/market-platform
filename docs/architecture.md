@@ -205,3 +205,19 @@ concrete providers such as `PolygonProvider`.
   instructions, ingress receipts, persistence, TradingView/HTTP adapters, and
   execution remain future layers. See
   `docs/adr/0012-trading-signal-and-order-intent.md`.
+
+## Trading Signal Application Boundary
+- `market_platform.application` exposes separate synchronous operations for
+  constructing one canonical TradingSignal and for reconstructing one signal
+  and creating one pre-risk OrderIntent at an explicit decision time.
+- Strict exact-key dictionaries normalize fixed-point Decimal text, aware
+  RFC-3339 timestamps, visible-ASCII identities, canonical instruments, and
+  fixed resource limits before deriving operation-specific request fingerprints.
+- Factory-only responses retain complete domain objects while emitting bounded
+  JSON-safe projections. Complete correspondence validation prevents a request
+  fingerprint from being paired with an unrelated signal or intent.
+- Source identity remains trusted-local rather than authenticated. Idempotency
+  keys expose logical event identity without persistence or duplicate
+  suppression. TradingView/HTTP ingress, mapping, authentication, account and
+  market state, risk, persistence, and broker execution remain future layers.
+  See `docs/adr/0013-trading-signal-application-boundary.md`.
