@@ -111,3 +111,11 @@ explicit time and call `create_order_intent_from_signal()` with the fixed
 proposal, not authorization or a broker order. No CLI, provider, filesystem,
 network, HTTP, TradingView, account, risk, persistence, or execution smoke
 behavior is added.
+
+The v0.56.0 application boundary remains synchronous and programmatic. Decode a
+strict `TradingSignalApplicationRequest` or `OrderIntentApplicationRequest`, then
+invoke the corresponding explicit service. Inputs use bounded visible-ASCII
+identities, fixed-point Decimal text, and aware RFC-3339 timestamps; responses
+are bounded domain identity projections. This is not authenticated ingress or
+durable idempotent processing, and it adds no CLI, HTTP, TradingView, account,
+risk, persistence, broker, provider, filesystem, or network smoke behavior.
