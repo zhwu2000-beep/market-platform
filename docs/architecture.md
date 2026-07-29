@@ -163,3 +163,25 @@ concrete providers such as `PolygonProvider`.
   Experiment. It performs no provider access, persistence, CLI behavior, async
   work, retries, parallelism, scheduling, generic DAG, or Agent work. See
   `docs/adr/0010-historical-replay-research-workflow.md`.
+
+## Historical Research Application Boundary
+- `market_platform.application` is an additive transport-neutral layer over the
+  v0.53 workflow. Domain modules do not import it.
+- Its strict versioned request carries inline normalized OHLCV rows, exact Replay
+  member intent, passive strategy/state configuration, structure identities, and
+  three explicit software revisions. The existing `HistoricalPriceSeries`
+  constructor and v0.53 models remain authoritative after decoding.
+- Immutable injected resolvers use allow-listed factories and return fresh
+  executable instances. The service independently verifies runtime IDs, versions,
+  and configuration fingerprints before constructing domain members.
+- Application-request identity records normalized submitted intent; workflow
+  specification and result fingerprints retain their separate resolved-domain
+  meanings.
+- The typed response owns the complete in-memory workflow result while its
+  dictionary projection contains bounded status and identity summaries only.
+- This trusted local boundary adds no HTTP, CLI, persistence, Agent, TradingView,
+  broker, or provider integration. A future TradingView Signal Gateway must use a
+  separate live-event schema, authenticate ingress, acknowledge quickly, enforce
+  idempotency/expiry/replay protection, and remain separated from Order Intent,
+  Risk, and Broker Execution layers. See
+  `docs/adr/0011-research-application-boundary.md`.

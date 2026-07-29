@@ -92,3 +92,13 @@ Replay Artifacts and, when all requested candidates succeed, the existing
 Historical Replay Experiment. It performs no provider access or file I/O and adds
 no CLI command or smoke output. Existing provider-facing `research run` behavior
 is unchanged.
+
+The v0.54.0 historical research application boundary is also synchronous and
+programmatic. Decode a strict inline request through
+`HistoricalReplayResearchApplicationRequest.from_dict()`, inject the built-in or
+custom safe resolvers and the existing workflow service, then call
+`HistoricalReplayResearchApplicationService.execute()`. Its response dictionary
+is a bounded identity/status summary; complete Artifacts and the optional
+Experiment remain accessible only through the typed in-memory workflow result.
+No CLI, provider, filesystem, HTTP, TradingView, Agent, or broker smoke behavior
+is added.
