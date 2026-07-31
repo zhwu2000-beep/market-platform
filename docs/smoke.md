@@ -119,3 +119,11 @@ identities, fixed-point Decimal text, and aware RFC-3339 timestamps; responses
 are bounded domain identity projections. This is not authenticated ingress or
 durable idempotent processing, and it adds no CLI, HTTP, TradingView, account,
 risk, persistence, broker, provider, filesystem, or network smoke behavior.
+
+The v0.57.0 instrument foundation is also domain-only and programmatic.
+Construct bounded canonical, external, and mapping-source identities; create
+explicit UTC temporal mappings; and call `resolve_instrument_mapping()` with an
+explicit `as_of`. Resolution fails closed for duplicates, missing or inactive
+records, ambiguity, and conflict. It does not alter v0.56 requests and adds no
+snapshot, registry, persistence, provider, broker, TradingView, HTTP, account,
+risk, execution, CLI, Agent, filesystem, or network smoke behavior.
