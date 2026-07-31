@@ -221,3 +221,21 @@ concrete providers such as `PolygonProvider`.
   suppression. TradingView/HTTP ingress, mapping, authentication, account and
   market state, risk, persistence, and broker execution remain future layers.
   See `docs/adr/0013-trading-signal-application-boundary.md`.
+
+## Instrument Identity and Mapping Domain
+- `market_platform.instruments` adds stable opaque canonical instrument IDs
+  without changing the released symbol/venue `TradingInstrumentIdentity`.
+  Canonical descriptors are equity/ETF-only, retain that exact released
+  identity, and carry one explicit trading currency.
+- Exact external namespace identities map through immutable source-attributed
+  records with caller-supplied canonical UTC validity. Resolution is pure,
+  explicit-time, input-order-neutral, and fail-closed for duplicates, missing
+  or inactive records, ambiguity, and conflicts.
+- The boundary is additive:
+  external identity -> temporal mapping -> canonical instrument -> released
+  trading identity -> existing v0.56 application request. Mapping provenance
+  remains separate from released signal and application fingerprints.
+- No registry, persistence, provider/broker lookup, TradingView/HTTP adapter,
+  account or snapshot state, risk, execution, CLI, or Agent behavior is added.
+  Trading State Snapshot Foundation is tentative v0.58 work. See
+  `docs/adr/0014-instrument-identity-and-mapping.md`.
