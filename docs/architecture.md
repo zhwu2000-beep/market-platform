@@ -237,5 +237,38 @@ concrete providers such as `PolygonProvider`.
   remains separate from released signal and application fingerprints.
 - No registry, persistence, provider/broker lookup, TradingView/HTTP adapter,
   account or snapshot state, risk, execution, CLI, or Agent behavior is added.
-  Trading State Snapshot Foundation is tentative v0.58 work. See
+  See
   `docs/adr/0014-instrument-identity-and-mapping.md`.
+
+## Trading State Snapshot Domain
+- `market_platform.trading_state` adds four independent immutable evidence
+  families for account cash, positions, open-order exposure, and market quotes.
+  Account-owned snapshots retain a trusted-orchestration account identity with
+  exact `paper` or `live` environment; every snapshot retains separate source
+  provenance and one caller-supplied canonical UTC `as_of`.
+- Passive nested records use stable `CanonicalInstrumentId` values and exact
+  bounded fixed-point `Decimal` strings. Decimal size is projected before
+  formatting. Collection inputs are exact built-in lists or tuples, counts are
+  bounded, duplicates fail closed, and semantic sorting makes fingerprints
+  independent of caller insertion order.
+- Cash may be negative or zero. Position and open-order quantities are signed
+  and nonzero. Quotes contain at least one strictly positive bid, ask, or last;
+  bid cannot exceed ask. Empty snapshots are valid source-reported facts but do
+  not claim risk sufficiency.
+- Freshness and temporal skew are pure evaluations over explicit times and
+  caller-supplied nonnegative limits. Separate snapshot arrows do not imply
+  atomic capture:
+
+  broker/provider adapter
+      -> AccountCashSnapshot
+      -> PositionCollectionSnapshot
+      -> OpenOrderExposureSnapshot
+      -> MarketQuoteCollectionSnapshot
+      -> explicit freshness/skew evaluation
+      -> future RiskDecision application boundary
+
+- V0.58 adds no bundle or atomicity flag, cross-snapshot risk correspondence,
+  application service, persistence, adapter implementation, provider/broker
+  access, TradingView/HTTP behavior, authentication, risk decision, execution,
+  CLI, or Agent behavior. See
+  `docs/adr/0015-trading-state-snapshot-foundation.md`.

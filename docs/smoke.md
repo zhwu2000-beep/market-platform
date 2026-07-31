@@ -127,3 +127,14 @@ explicit `as_of`. Resolution fails closed for duplicates, missing or inactive
 records, ambiguity, and conflict. It does not alter v0.56 requests and adds no
 snapshot, registry, persistence, provider, broker, TradingView, HTTP, account,
 risk, execution, CLI, Agent, filesystem, or network smoke behavior.
+
+The v0.58.0 trading-state foundation is domain-only and programmatic. Construct
+explicit source and paper/live account identities, then construct independently
+timed immutable cash, position, open-order exposure, and market-quote snapshots.
+Collections accept exact built-in lists or tuples, enforce fixed count limits,
+sort by semantic identity, reject duplicates, and fingerprint exact canonical
+Decimal and UTC content. Freshness and skew evaluation require explicit times
+and limits and never consult a clock. Parallel snapshots do not imply atomic
+capture. This release adds no bundle, application command, persistence,
+provider/broker adapter, TradingView/HTTP behavior, risk decision, execution,
+CLI, Agent, filesystem, network, or real-provider smoke action.
