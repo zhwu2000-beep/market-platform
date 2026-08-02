@@ -159,3 +159,30 @@ application command, execution plan, CLI, Agent, filesystem, network, or
 real-provider smoke action. Its smoke coverage is the offline focused and
 compatibility test suites plus the unchanged Historical Replay fingerprint
 benchmark.
+
+The v0.60.0 position-target translation foundation is likewise domain-only and
+programmatic. Supply an exact approved `RiskEvaluationContext`, its corresponding
+`RiskDecision`, and the same canonical UTC evaluation time to
+`translate_position_target()`.
+
+Illustrative mechanical results are:
+
+| Target | Current complete-account position | Result |
+|---|---:|---|
+| long 10 | long 4 | target `10`, current `4`, delta `6`, `buy` |
+| flat | long 4 | target `0`, current `4`, delta `-4`, `sell` |
+| short 3 | short 3 | target `-3`, current `-3`, delta `0`, `no_action` |
+| long 10 | any target open-order exposure | unavailable; no netting |
+
+These are bounded audit translations, not orders or permission to trade or
+short. Planning at another time requires new evidence, context, risk decision,
+and translation. V0.60 adds no provider/broker call, filesystem behavior,
+application command, CLI, TradingView, approval, submission, or real-provider
+smoke action.
+
+V0.60 offline validation includes 197 focused translation tests, 870 focused
+v0.55-v0.60 compatibility tests, the reconciled 648-test wider compatibility
+selection, and 2,408 passed with one established skip repository-wide. Deleted
+or structurally fabricated retained snapshot headers and rows are translated at
+the narrow execution-planning correspondence boundary; unexpected programming
+exceptions continue to propagate.
