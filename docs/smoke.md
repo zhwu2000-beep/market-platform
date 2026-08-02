@@ -186,3 +186,31 @@ selection, and 2,408 passed with one established skip repository-wide. Deleted
 or structurally fabricated retained snapshot headers and rows are translated at
 the narrow execution-planning correspondence boundary; unexpected programming
 exceptions continue to propagate.
+
+The v0.61.0 broker-neutral execution-instruction foundation consumes one exact
+canonical `PositionTargetTranslation` through
+`derive_broker_neutral_execution_instruction()`:
+
+| Translation delta/action | Result |
+|---|---|
+| `+6`, `buy` | one `buy` instruction with positive quantity `6` |
+| `-4`, `sell` | one `sell` instruction with positive quantity `4` |
+| `0`, `no_action` | exactly `None`; the translation remains the audit artifact |
+
+The instruction projection contains side, positive fixed-point quantity, source
+translation fingerprint, canonical instrument evidence, account fingerprint,
+and copied `plan_as_of`. It contains no market/limit/stop field, price, TIF,
+route, broker symbol/account, or executable payload. No market-order default is
+implied.
+
+The instruction remains a non-executable acquisition/disposal proposal. It is
+not financial, short, compliance, human, or broker authorization and cannot be
+submitted. V0.61 adds no provider/broker call, filesystem, network, clock,
+persistence, application service, CLI, TradingView, or live-order behavior.
+
+V0.61 offline validation includes 85 focused instruction tests, 955 focused
+v0.55-v0.61 compatibility tests, the complete reconciled 648-test wider
+compatibility selection, and 2,493 passed with one established skip
+repository-wide. The current execution-planning API contains the original eight
+v0.60 exports plus exactly four v0.61 additions, for twelve exports total and
+exactly two fingerprint families.

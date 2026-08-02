@@ -342,7 +342,7 @@ def _foreign_row(family: str, kind: str) -> object:
 
 
 def test_exact_public_api() -> None:
-    assert execution_planning.__all__ == [
+    original_v060_exports = {
         "POSITION_TARGET_TRANSLATION_SCHEMA",
         "ExecutionPlanningCorrespondenceError",
         "ExecutionPlanningDomainError",
@@ -351,7 +351,24 @@ def test_exact_public_api() -> None:
         "PositionDeltaAction",
         "PositionTargetTranslation",
         "translate_position_target",
+    }
+
+    assert original_v060_exports <= set(execution_planning.__all__)
+    assert execution_planning.__all__ == [
+        "BROKER_NEUTRAL_EXECUTION_INSTRUCTION_SCHEMA",
+        "POSITION_TARGET_TRANSLATION_SCHEMA",
+        "BrokerNeutralExecutionInstruction",
+        "ExecutionPlanningCorrespondenceError",
+        "ExecutionPlanningDomainError",
+        "ExecutionPlanningUnavailableError",
+        "ExecutionPlanningValidationError",
+        "ExecutionInstructionSide",
+        "PositionDeltaAction",
+        "PositionTargetTranslation",
+        "derive_broker_neutral_execution_instruction",
+        "translate_position_target",
     ]
+    assert len(execution_planning.__all__) == 12
 
 
 def test_exact_schema_and_enum_inventory() -> None:

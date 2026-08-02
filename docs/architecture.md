@@ -331,16 +331,29 @@ concrete providers such as `PolygonProvider`.
   MarketQuoteCollectionSnapshot ----------------------+              |
                                                                      v
                                                         PositionTargetTranslation
-                                                                     :
-                                                  future Broker-Neutral Execution Plan
-                                                                     :
-                                                     future approval / submission
-                                                                     :
-                                                        future broker adapter
+                                                               | actionable
+                          no_action -> terminal audit           v
+                                                BrokerNeutralExecutionInstruction
+                                                               :
+                                      future Order Specification / Authorization
+                                                               :
+                                                future Broker Request / Submission
+                                                               :
+                                                future Live Order Reconciliation
 
-  Dotted `:` edges are future boundaries. Neither structural approval nor a
-  `buy`/`sell` translation triggers approval, submission, or broker activity.
+  Dotted `:` edges are future boundaries. Neither structural approval, a
+  `buy`/`sell` translation, nor an instruction triggers approval, submission,
+  or broker activity.
 - V0.60 adds only `position_target_translation/v1`. It adds no order instruction,
   order style, price, financial or short authorization, application operation,
   persistence, adapter, CLI, network, or execution behavior. See
   `docs/adr/0017-position-target-translation-foundation.md`.
+
+## Broker-Neutral Execution Instruction Domain
+- V0.61 converts one exact validated actionable `PositionTargetTranslation` into
+  one non-executable buy/sell instruction. Its positive quantity is the exact
+  absolute delta. A canonical `no_action` translation returns `None` and remains
+  the terminal audit artifact.
+- The instruction copies only the translation fingerprint, canonical instrument
+  evidence, account fingerprint, and exact `plan_as_of`. It adds exactly
+  `broker_neutral_execution_instruction/v1` and no plan wrapper or policy.
