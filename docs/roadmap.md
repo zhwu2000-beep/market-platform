@@ -27,3 +27,18 @@
 - daily price DataFrame comparison
 - provider-level daily price comparison
 - no fallback yet
+
+## Trading Domain Sequence
+
+- v0.55.0: Trading Signal and Order Intent Foundation
+- v0.56.0: Trading Signal Application Boundary
+- v0.57.0: Instrument Identity and Mapping
+- v0.58.0: Trading State Snapshot Foundation
+- v0.59.0: Structural Risk Decision Foundation
+- v0.60.0: Position Target Translation Foundation
+- future: Broker-Neutral Execution Plan, explicit approval/submission, and broker
+  adapter boundaries
+
+V0.60 deliberately stops at exact target/current/delta translation. Broker order
+style, price, time in force, financial and short authorization, approval,
+submission, persistence, and lifecycle reconciliation require later milestones.

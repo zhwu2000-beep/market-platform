@@ -310,3 +310,37 @@ concrete providers such as `PolygonProvider`.
   authorization, `valid_until`, or revalidation helper. A later answer requires
   a new context and evaluator run. See
   `docs/adr/0016-structural-risk-decision-foundation.md`.
+
+## Position Target Translation Domain
+- `market_platform.execution_planning` converts one exactly corresponding
+  approved structural-risk context and decision into one bounded signed
+  target/current/delta translation at the same explicit UTC evaluation time.
+- Complete-account position coverage makes an absent target row mean zero. Any
+  exact target-instrument open-order exposure blocks translation; v0.60 never
+  sums or nets exposure.
+- Exact fixed-point arithmetic is limited to direction signing, absent-position
+  zero, target-minus-current subtraction, and sign classification. A zero delta
+  is a normal fingerprinted `no_action` result.
+- The released and future flow is:
+
+  TradingSignal -> OrderIntent ------------------------+
+  InstrumentResolution -------------------------------+
+  AccountCashSnapshot --------------------------------+
+  PositionCollectionSnapshot -------------------------+-> RiskEvaluationContext
+  OpenOrderExposureSnapshot ---------------------------+       -> RiskDecision
+  MarketQuoteCollectionSnapshot ----------------------+              |
+                                                                     v
+                                                        PositionTargetTranslation
+                                                                     :
+                                                  future Broker-Neutral Execution Plan
+                                                                     :
+                                                     future approval / submission
+                                                                     :
+                                                        future broker adapter
+
+  Dotted `:` edges are future boundaries. Neither structural approval nor a
+  `buy`/`sell` translation triggers approval, submission, or broker activity.
+- V0.60 adds only `position_target_translation/v1`. It adds no order instruction,
+  order style, price, financial or short authorization, application operation,
+  persistence, adapter, CLI, network, or execution behavior. See
+  `docs/adr/0017-position-target-translation-foundation.md`.
