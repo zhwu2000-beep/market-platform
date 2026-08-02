@@ -259,16 +259,54 @@ concrete providers such as `PolygonProvider`.
   caller-supplied nonnegative limits. Separate snapshot arrows do not imply
   atomic capture:
 
-  broker/provider adapter
-      -> AccountCashSnapshot
-      -> PositionCollectionSnapshot
-      -> OpenOrderExposureSnapshot
-      -> MarketQuoteCollectionSnapshot
-      -> explicit freshness/skew evaluation
-      -> future RiskDecision application boundary
+  broker/provider adapters
+      +-> AccountCashSnapshot -----------+
+      +-> PositionCollectionSnapshot ----+
+      +-> OpenOrderExposureSnapshot -----+
+      +-> MarketQuoteCollectionSnapshot -+
+                                        +-> explicit freshness/skew evaluation
+                                        +-> future RiskDecision boundary
+
+  These are parallel inputs, not a capture sequence.
 
 - V0.58 adds no bundle or atomicity flag, cross-snapshot risk correspondence,
   application service, persistence, adapter implementation, provider/broker
   access, TradingView/HTTP behavior, authentication, risk decision, execution,
   CLI, or Agent behavior. See
   `docs/adr/0015-trading-state-snapshot-foundation.md`.
+
+
+## Structural Risk Decision Domain
+- `market_platform.risk` composes released Order Intent, instrument mapping, and
+  trading-state evidence into one deterministic structural decision. It owns no
+  application, persistence, adapter, provider, broker, execution, CLI, or Agent
+  boundary.
+- The four snapshots are parallel evidence inputs. Account cash, positions, and
+  open orders carry separately audited account fingerprints; quotes remain
+  account-independent. No edge implies atomic capture:
+
+  OrderIntent ------------------------------+
+  InstrumentResolution --------------------+
+  StructuralRiskPolicy --------------------+
+  AccountCashSnapshot ---------------------+
+  PositionCollectionSnapshot --------------+-> RiskEvaluationContext
+  OpenOrderExposureSnapshot ---------------+       -> stage-gated evaluator
+  MarketQuoteCollectionSnapshot -----------+       -> RiskDecision
+
+- Evaluation reconstructs all released inputs, then applies intent timing;
+  resolution, mapping, and instrument correspondence; account correspondence;
+  four-snapshot freshness and skew; coverage; and target quote sufficiency.
+  Intent findings reject and stop. Resolution/instrument or account findings are
+  indeterminate and stop. Later stages collect all applicable bounded findings.
+- The only outcomes are `approved`, `rejected`, and `indeterminate`. Findings use
+  21 fixed reason codes, fixed reason/subject ordering, at most four evidence
+  fingerprints each, and a maximum of 32 per decision.
+- V0.59 adds exactly `structural_risk_policy/v1`,
+  `risk_evaluation_context/v1`, and `risk_decision/v1` fingerprints. Coverage
+  and findings remain unfingerprinted.
+- Structural approval proves neither financial sufficiency nor execution
+  authority. There is no target delta, open-order netting, notional, buying
+  power, cash sufficiency, FX, margin, leverage, concentration, short
+  authorization, `valid_until`, or revalidation helper. A later answer requires
+  a new context and evaluator run. See
+  `docs/adr/0016-structural-risk-decision-foundation.md`.
