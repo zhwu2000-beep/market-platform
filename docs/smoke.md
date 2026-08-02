@@ -138,3 +138,24 @@ and limits and never consult a clock. Parallel snapshots do not imply atomic
 capture. This release adds no bundle, application command, persistence,
 provider/broker adapter, TradingView/HTTP behavior, risk decision, execution,
 CLI, Agent, filesystem, network, or real-provider smoke action.
+
+
+The v0.59.0 structural-risk foundation is also domain-only and programmatic.
+Construct a `StructuralRiskPolicy`, explicit `RiskEvidenceCoverage`, and a
+`RiskEvaluationContext` containing one released Order Intent, one released
+Instrument Resolution, and all four independently timed v0.58 snapshots. Call
+`evaluate_structural_risk()` with no clock, I/O, or external service.
+
+The evaluator reconstructs released inputs and applies stage-gated intent,
+mapping/instrument, account, freshness/skew, coverage, and quote checks.
+`approved` means only that the supplied evidence passed those structural checks
+at the explicit evaluation time. It is not financial sufficiency, human
+approval, short authorization, or broker execution authority. A later answer
+requires a new context and evaluator run; there is no `valid_until` or
+revalidation helper.
+
+V0.59 adds no provider or broker call, persistence, TradingView/HTTP behavior,
+application command, execution plan, CLI, Agent, filesystem, network, or
+real-provider smoke action. Its smoke coverage is the offline focused and
+compatibility test suites plus the unchanged Historical Replay fingerprint
+benchmark.
