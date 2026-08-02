@@ -6,6 +6,12 @@ from market_platform.execution_planning.errors import (
     ExecutionPlanningUnavailableError,
     ExecutionPlanningValidationError,
 )
+from market_platform.execution_planning.instruction import (
+    BROKER_NEUTRAL_EXECUTION_INSTRUCTION_SCHEMA,
+    BrokerNeutralExecutionInstruction,
+    ExecutionInstructionSide,
+    derive_broker_neutral_execution_instruction,
+)
 from market_platform.execution_planning.translation import (
     POSITION_TARGET_TRANSLATION_SCHEMA,
     PositionDeltaAction,
@@ -14,12 +20,16 @@ from market_platform.execution_planning.translation import (
 )
 
 __all__ = [
+    "BROKER_NEUTRAL_EXECUTION_INSTRUCTION_SCHEMA",
     "POSITION_TARGET_TRANSLATION_SCHEMA",
+    "BrokerNeutralExecutionInstruction",
     "ExecutionPlanningCorrespondenceError",
     "ExecutionPlanningDomainError",
     "ExecutionPlanningUnavailableError",
     "ExecutionPlanningValidationError",
+    "ExecutionInstructionSide",
     "PositionDeltaAction",
     "PositionTargetTranslation",
+    "derive_broker_neutral_execution_instruction",
     "translate_position_target",
 ]

@@ -36,9 +36,12 @@
 - v0.58.0: Trading State Snapshot Foundation
 - v0.59.0: Structural Risk Decision Foundation
 - v0.60.0: Position Target Translation Foundation
-- future: Broker-Neutral Execution Plan, explicit approval/submission, and broker
-  adapter boundaries
+- v0.61.0: Broker-Neutral Execution Instruction Foundation
+- future: Order Specification, explicit authorization/application, broker request,
+  submission, and live reconciliation boundaries
 
 V0.60 deliberately stops at exact target/current/delta translation. Broker order
 style, price, time in force, financial and short authorization, approval,
 submission, persistence, and lifecycle reconciliation require later milestones.
+
+V0.61 converts only actionable deltas into one non-executable side plus positive
