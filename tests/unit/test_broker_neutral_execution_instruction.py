@@ -191,8 +191,34 @@ def _refingerprint(value: BrokerNeutralExecutionInstruction) -> None:
 
 
 def test_exact_public_api() -> None:
+    original_v060_exports = {
+        "POSITION_TARGET_TRANSLATION_SCHEMA",
+        "ExecutionPlanningCorrespondenceError",
+        "ExecutionPlanningDomainError",
+        "ExecutionPlanningUnavailableError",
+        "ExecutionPlanningValidationError",
+        "PositionDeltaAction",
+        "PositionTargetTranslation",
+        "translate_position_target",
+    }
+    original_v061_additions = {
+        "BROKER_NEUTRAL_EXECUTION_INSTRUCTION_SCHEMA",
+        "BrokerNeutralExecutionInstruction",
+        "ExecutionInstructionSide",
+        "derive_broker_neutral_execution_instruction",
+    }
+    approved_v062_additions = {
+        "ORDER_STYLE_CHOICE_SCHEMA",
+        "OrderStyle",
+        "OrderStyleChoice",
+    }
+
+    assert original_v060_exports <= set(execution_planning.__all__)
+    assert original_v061_additions <= set(execution_planning.__all__)
+    assert approved_v062_additions <= set(execution_planning.__all__)
     assert execution_planning.__all__ == [
         "BROKER_NEUTRAL_EXECUTION_INSTRUCTION_SCHEMA",
+        "ORDER_STYLE_CHOICE_SCHEMA",
         "POSITION_TARGET_TRANSLATION_SCHEMA",
         "BrokerNeutralExecutionInstruction",
         "ExecutionPlanningCorrespondenceError",
@@ -200,11 +226,14 @@ def test_exact_public_api() -> None:
         "ExecutionPlanningUnavailableError",
         "ExecutionPlanningValidationError",
         "ExecutionInstructionSide",
+        "OrderStyle",
+        "OrderStyleChoice",
         "PositionDeltaAction",
         "PositionTargetTranslation",
         "derive_broker_neutral_execution_instruction",
         "translate_position_target",
     ]
+    assert len(execution_planning.__all__) == 15
 
 
 def test_exact_schema_enum_and_fields() -> None:

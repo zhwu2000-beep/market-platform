@@ -45,3 +45,14 @@ style, price, time in force, financial and short authorization, approval,
 submission, persistence, and lifecycle reconciliation require later milestones.
 
 V0.61 converts only actionable deltas into one non-executable side plus positive
+
+- v0.62.0: Explicit Order Style Choice Foundation
+- future: Price/TIF/Session Constraint Choice
+- future: Broker-Neutral Order Specification
+- future: Authorization/Application, broker capability and mapping, broker
+  request, submission, and lifecycle reconciliation
+
+V0.62 requires an explicit canonical MARKET or LIMIT choice. Absence never means
+market. The choice is reusable and caller-authored; it contains no instruction,
+price, TIF, session, time, authorization, capability, broker, submission, or
+lifecycle semantics.

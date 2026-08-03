@@ -12,6 +12,11 @@ from market_platform.execution_planning.instruction import (
     ExecutionInstructionSide,
     derive_broker_neutral_execution_instruction,
 )
+from market_platform.execution_planning.order_style import (
+    ORDER_STYLE_CHOICE_SCHEMA,
+    OrderStyle,
+    OrderStyleChoice,
+)
 from market_platform.execution_planning.translation import (
     POSITION_TARGET_TRANSLATION_SCHEMA,
     PositionDeltaAction,
@@ -21,6 +26,7 @@ from market_platform.execution_planning.translation import (
 
 __all__ = [
     "BROKER_NEUTRAL_EXECUTION_INSTRUCTION_SCHEMA",
+    "ORDER_STYLE_CHOICE_SCHEMA",
     "POSITION_TARGET_TRANSLATION_SCHEMA",
     "BrokerNeutralExecutionInstruction",
     "ExecutionPlanningCorrespondenceError",
@@ -28,6 +34,8 @@ __all__ = [
     "ExecutionPlanningUnavailableError",
     "ExecutionPlanningValidationError",
     "ExecutionInstructionSide",
+    "OrderStyle",
+    "OrderStyleChoice",
     "PositionDeltaAction",
     "PositionTargetTranslation",
     "derive_broker_neutral_execution_instruction",
