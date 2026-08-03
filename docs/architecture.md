@@ -357,3 +357,37 @@ concrete providers such as `PolygonProvider`.
 - The instruction copies only the translation fingerprint, canonical instrument
   evidence, account fingerprint, and exact `plan_as_of`. It adds exactly
   `broker_neutral_execution_instruction/v1` and no plan wrapper or policy.
+
+## Explicit Order Style Choice Domain
+
+- V0.62 adds one reusable caller-authored `OrderStyleChoice` with an explicit
+  exact `market` or `limit` label. Missing input, strings, foreign enums,
+  `None`, and unknown values fail; absence never means market.
+- The choice contains only style, `order_style_choice/v1` schema, and
+  fingerprint. It is independent of instructions, accounts, instruments, and
+  time. MARKET is not execution authority; LIMIT intentionally has no price.
+- Unlike factory-derived translations and instructions, the caller-authored
+  choice has no guarded token, constructor-state tuple, identity binding, or
+  retained source. Context-free projection still rejects stale or malformed
+  retained public state.
+- The released and future boundary is:
+
+  PositionTargetTranslation(no_action) -> None instruction -> no specification
+
+  BrokerNeutralExecutionInstruction ----+
+                                         +-> Explicit OrderStyleChoice
+                                               :
+                               future Price / TIF / Session Constraint Choice
+                                               :
+                               future BrokerNeutralOrderSpecification
+                                               :
+                               future Authorization / Application Boundary
+                                               :
+                               future Broker Capability + Mapping Validation
+                                               :
+                               future Broker Request / Submission
+                                               :
+                               future Lifecycle / Reconciliation
+
+  Dotted `:` edges remain future boundaries. The style choice never connects
+  directly to a broker.

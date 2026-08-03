@@ -214,3 +214,25 @@ compatibility selection, and 2,493 passed with one established skip
 repository-wide. The current execution-planning API contains the original eight
 v0.60 exports plus exactly four v0.61 additions, for twelve exports total and
 exactly two fingerprint families.
+
+The v0.62.0 explicit order-style choice foundation is domain-only:
+
+| Construction | Result |
+|---|---|
+| `OrderStyleChoice(OrderStyle.MARKET)` | explicit `market` choice |
+| `OrderStyleChoice(OrderStyle.LIMIT)` | explicit `limit` choice with no price |
+| `OrderStyleChoice()` | rejected; no implicit market default |
+| `OrderStyleChoice("market")` | rejected; strings are not coerced |
+
+The projection contains only schema, lowercase style, and fingerprint. The
+choice has no price, TIF, time, instruction, account, instrument, authorization,
+or broker field. MARKET is not immediate execution or submission authority, and
+LIMIT is not yet an order specification.
+
+V0.62 offline validation includes 51 focused style-choice tests, 1,006
+focused v0.55-v0.62 compatibility tests, the complete reconciled 648-test
+wider compatibility selection, and 2,544 passed with one established skip
+repository-wide. Mypy covers 168 source files. The execution-planning API
+preserves the original twelve exports and adds exactly three v0.62 names for
+fifteen total; exactly three execution-planning fingerprint families exist.
+The ten-path implementation remains unstaged, uncommitted, and READY FOR REVIEW.
