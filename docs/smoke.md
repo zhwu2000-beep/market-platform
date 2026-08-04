@@ -236,3 +236,29 @@ repository-wide. Mypy covers 168 source files. The execution-planning API
 preserves the original twelve exports and adds exactly three v0.62 names for
 fifteen total; exactly three execution-planning fingerprint families exist.
 The ten-path implementation remains unstaged, uncommitted, and READY FOR REVIEW.
+
+The v0.63.0 explicit limit-price choice is also domain-only and programmatic:
+
+```python
+from decimal import Decimal
+from market_platform.execution_planning import LimitPriceChoice
+
+choice = LimitPriceChoice(Decimal("123.4500"), "USD")
+assert choice.limit_price == Decimal("123.45")
+assert choice.to_dict()["limit_price"] == "123.45"
+assert LimitPriceChoice(Decimal("0.25"), "EUR").to_dict()["limit_price"] == "0.25"
+```
+
+Zero, negative, nonfinite, over-bound, and huge-exponent prices are rejected
+before unsafe fixed-point formatting. Missing, lowercase, non-ASCII, or
+non-three-letter currency input is rejected. Canonicalization removes only
+insignificant trailing fractional zeros; it never rounds or derives a value from
+a quote.
+
+`LimitPriceChoice` contains no style, instruction, instrument, account, quote,
+time, TIF, session, tick-size, broker, or authorization field. It does not claim
+that USD matches an instrument, that a price satisfies a venue tick, or that an
+order is executable. MARKET consumes no price artifact. V0.63 validation totals
+are 66 focused choice tests, 1,072 focused v0.55-v0.63 compatibility tests, the
+complete reconciled 648-test wider selection, and 2,610 passed with one
+established skip repository-wide. Mypy covers 169 source files.

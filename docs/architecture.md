@@ -391,3 +391,38 @@ concrete providers such as `PolygonProvider`.
 
   Dotted `:` edges remain future boundaries. The style choice never connects
   directly to a broker.
+
+## Explicit Limit Price Choice Domain
+
+- V0.63 adds one reusable caller-authored `LimitPriceChoice` containing an exact
+  strictly positive canonical `Decimal` and exact uppercase ASCII
+  three-letter trading currency.
+- The price mirrors the released v0.58 public price resource contract: at most
+  128 digit characters, 64 fractional digits, and 256 fixed-point characters.
+  Tuple-based preflight precedes formatting, insignificant fractional zeros are
+  removed, and no rounding or ambient-context arithmetic occurs.
+- Canonical means bounded, deterministic, fixed-point, and currency-denominated.
+  It does not mean instrument-matched, tick-aligned, venue-valid,
+  broker-acceptable, executable, or authorized.
+- The released and future boundary is:
+
+  PositionTargetTranslation(no_action) -> None instruction -> no constraints
+
+  BrokerNeutralExecutionInstruction ---+
+                                      OrderStyleChoice ---+
+                  LIMIT only: LimitPriceChoice -----------+
+                                                          :
+                                  future TIF / Session Choices
+                                                          :
+                         future BrokerNeutralOrderSpecification
+                                                          :
+                       future Authorization / Application Boundary
+                                                          :
+                     future Broker Capability + Mapping Validation
+                                                          :
+                         future Broker Request / Submission
+                                                          :
+                         future Lifecycle / Reconciliation
+
+  MARKET consumes no `LimitPriceChoice`. All `:` edges remain future
+  boundaries; no released choice connects directly to a broker.
