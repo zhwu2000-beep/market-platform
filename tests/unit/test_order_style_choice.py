@@ -52,9 +52,36 @@ EXPECTED_EXPORTS = [
 
 
 def test_exact_public_api() -> None:
-    assert execution_planning.__all__ == EXPECTED_EXPORTS
-    assert len(execution_planning.__all__) == 15
-    for name in EXPECTED_EXPORTS:
+    historical_v062_exports = set(EXPECTED_EXPORTS)
+    approved_v063_additions = {
+        "LIMIT_PRICE_CHOICE_SCHEMA",
+        "LimitPriceChoice",
+    }
+    expected_exports = [
+        "BROKER_NEUTRAL_EXECUTION_INSTRUCTION_SCHEMA",
+        "LIMIT_PRICE_CHOICE_SCHEMA",
+        "ORDER_STYLE_CHOICE_SCHEMA",
+        "POSITION_TARGET_TRANSLATION_SCHEMA",
+        "BrokerNeutralExecutionInstruction",
+        "ExecutionPlanningCorrespondenceError",
+        "ExecutionPlanningDomainError",
+        "ExecutionPlanningUnavailableError",
+        "ExecutionPlanningValidationError",
+        "ExecutionInstructionSide",
+        "LimitPriceChoice",
+        "OrderStyle",
+        "OrderStyleChoice",
+        "PositionDeltaAction",
+        "PositionTargetTranslation",
+        "derive_broker_neutral_execution_instruction",
+        "translate_position_target",
+    ]
+
+    assert historical_v062_exports <= set(execution_planning.__all__)
+    assert approved_v063_additions <= set(execution_planning.__all__)
+    assert execution_planning.__all__ == expected_exports
+    assert len(execution_planning.__all__) == 17
+    for name in expected_exports:
         assert getattr(execution_planning, name) is not None
 
 

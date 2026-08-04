@@ -12,6 +12,10 @@ from market_platform.execution_planning.instruction import (
     ExecutionInstructionSide,
     derive_broker_neutral_execution_instruction,
 )
+from market_platform.execution_planning.limit_price import (
+    LIMIT_PRICE_CHOICE_SCHEMA,
+    LimitPriceChoice,
+)
 from market_platform.execution_planning.order_style import (
     ORDER_STYLE_CHOICE_SCHEMA,
     OrderStyle,
@@ -26,6 +30,7 @@ from market_platform.execution_planning.translation import (
 
 __all__ = [
     "BROKER_NEUTRAL_EXECUTION_INSTRUCTION_SCHEMA",
+    "LIMIT_PRICE_CHOICE_SCHEMA",
     "ORDER_STYLE_CHOICE_SCHEMA",
     "POSITION_TARGET_TRANSLATION_SCHEMA",
     "BrokerNeutralExecutionInstruction",
@@ -34,6 +39,7 @@ __all__ = [
     "ExecutionPlanningUnavailableError",
     "ExecutionPlanningValidationError",
     "ExecutionInstructionSide",
+    "LimitPriceChoice",
     "OrderStyle",
     "OrderStyleChoice",
     "PositionDeltaAction",

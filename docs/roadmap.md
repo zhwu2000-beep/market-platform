@@ -56,3 +56,13 @@ V0.62 requires an explicit canonical MARKET or LIMIT choice. Absence never means
 market. The choice is reusable and caller-authored; it contains no instruction,
 price, TIF, session, time, authorization, capability, broker, submission, or
 lifecycle semantics.
+
+- v0.63.0: Explicit Limit Price Choice Foundation
+- future: Explicit TIF and Session Choices
+- future: Broker-Neutral Order Specification
+
+V0.63 adds a timeless caller-authored positive limit price with an explicit
+three-letter trading currency. It carries no style, instrument, quote, tick-size,
+authorization, capability, broker, submission, or lifecycle semantics. MARKET
+consumes no limit-price choice; future LIMIT specification construction must
+require one and validate instrument-currency correspondence separately.

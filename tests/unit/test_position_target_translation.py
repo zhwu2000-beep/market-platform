@@ -365,11 +365,17 @@ def test_exact_public_api() -> None:
         "OrderStyle",
         "OrderStyleChoice",
     }
+    approved_v063_exports = {
+        "LIMIT_PRICE_CHOICE_SCHEMA",
+        "LimitPriceChoice",
+    }
 
     assert original_v061_exports <= set(execution_planning.__all__)
     assert approved_v062_exports <= set(execution_planning.__all__)
+    assert approved_v063_exports <= set(execution_planning.__all__)
     assert execution_planning.__all__ == [
         "BROKER_NEUTRAL_EXECUTION_INSTRUCTION_SCHEMA",
+        "LIMIT_PRICE_CHOICE_SCHEMA",
         "ORDER_STYLE_CHOICE_SCHEMA",
         "POSITION_TARGET_TRANSLATION_SCHEMA",
         "BrokerNeutralExecutionInstruction",
@@ -378,6 +384,7 @@ def test_exact_public_api() -> None:
         "ExecutionPlanningUnavailableError",
         "ExecutionPlanningValidationError",
         "ExecutionInstructionSide",
+        "LimitPriceChoice",
         "OrderStyle",
         "OrderStyleChoice",
         "PositionDeltaAction",
@@ -385,7 +392,7 @@ def test_exact_public_api() -> None:
         "derive_broker_neutral_execution_instruction",
         "translate_position_target",
     ]
-    assert len(execution_planning.__all__) == 15
+    assert len(execution_planning.__all__) == 17
 
 
 def test_exact_schema_and_enum_inventory() -> None:
