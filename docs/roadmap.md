@@ -79,3 +79,16 @@ behavior without promising support or fulfillment. GTD remains unavailable
 until a separate expiry contract defines its source, timestamp, comparison
 anchor, and broker/calendar boundaries. V0.64 adds no session, compatibility,
 authorization, capability, specification, submission, or lifecycle semantics.
+
+- v0.65.0: Explicit Session Participation Choice Foundation
+- future: Broker-Neutral Order Specification
+- future: Authorization/Application, broker capability and mapping, broker
+  request, submission, and lifecycle reconciliation
+
+V0.65 adds one timeless caller-authored `REGULAR_ONLY` or
+`REGULAR_AND_EXTENDED` choice. Absence never means regular-only or broker
+default. Exact session windows, calendars, timezone rules, current-open state,
+auctions, and supported non-regular sessions remain downstream. The choice has
+no instrument, venue, style, price, TIF, instruction, account, compatibility,
+capability, authorization, specification, broker, submission, or lifecycle
+semantics.

@@ -294,3 +294,34 @@ v0.55-v0.64 compatibility tests, the reconciled 648-test wider selection, and
 2,662 passed with one established skip repository-wide. Mypy covers 170 source
 files. The execution-planning API contains twenty exports and exactly five
 fingerprint families.
+
+The v0.65.0 explicit session-participation choice is domain-only:
+
+```python
+from market_platform.execution_planning import (
+    SessionParticipation,
+    SessionParticipationChoice,
+)
+
+regular = SessionParticipationChoice(SessionParticipation.REGULAR_ONLY)
+extended = SessionParticipationChoice(
+    SessionParticipation.REGULAR_AND_EXTENDED
+)
+assert regular.to_dict()['session_participation'] == 'regular_only'
+assert extended.to_dict()['session_participation'] == 'regular_and_extended'
+```
+
+`SessionParticipationChoice()` and plain `'regular_only'` are rejected. There is
+no implicit regular-only, extended participation, unspecified choice, or broker
+default. The choice calculates no calendar or current-open state and guarantees
+no particular pre-market, after-hours, overnight, or auction participation.
+
+No style/TIF/session compatibility is claimed. The choice is non-executable and
+unauthorized and contains no time, calendar, instrument, venue, style, price,
+TIF, instruction, account, capability, broker, submission, or lifecycle state.
+
+V0.65 validation totals are exactly 52 focused choice tests, 1,176 focused
+v0.55-v0.65 compatibility tests, the reconciled 648-test wider selection, and
+2,714 passed with one established skip repository-wide. Mypy covers 171 source
+files. The execution-planning API contains 23 exports and exactly six
+fingerprint families. The 13-path implementation is unstaged and uncommitted.

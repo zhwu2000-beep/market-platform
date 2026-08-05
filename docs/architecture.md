@@ -467,3 +467,37 @@ concrete providers such as `PolygonProvider`.
   MARKET consumes no `LimitPriceChoice`. Every future specification consumes
   exactly one `TimeInForceChoice`; no TIF is incomplete rather than DAY.
   Dotted `:` edges remain future, and no released choice connects to a broker.
+
+## Explicit Session Participation Choice Domain
+
+- V0.65 adds one timeless caller-authored `SessionParticipationChoice` with
+  exactly `REGULAR_ONLY` or `REGULAR_AND_EXTENDED`. Missing input is incomplete;
+  it never means regular-only, extended participation, or a broker default.
+- `REGULAR_ONLY` requests the applicable downstream-resolved regular session.
+  `REGULAR_AND_EXTENDED` additionally requests eligible downstream-resolved
+  non-regular continuous sessions. Neither value defines exact windows,
+  calendars, timezones, auctions, current-open state, or guaranteed routing.
+- The choice is independent of instrument, venue, style, price, TIF,
+  instruction, account, authorization, and capability. DAY does not imply
+  regular-only; no-action terminates before any order choices are consumed.
+- The released and future boundary is:
+
+  BrokerNeutralExecutionInstruction -----+
+  OrderStyleChoice -----------------------+
+  LIMIT only: LimitPriceChoice -----------+
+  exactly one TimeInForceChoice ----------+
+  exactly one SessionParticipationChoice -+
+                                          :
+                      future BrokerNeutralOrderSpecification
+                                          :
+                      future Authorization / Application Boundary
+                                          :
+                      future Broker Capability + Mapping Validation
+                                          :
+                      future Broker Request / Submission
+                                          :
+                      future Lifecycle / Reconciliation
+
+  MARKET consumes no `LimitPriceChoice`; future LIMIT specifications require
+  one. Every future specification consumes exactly one TIF and one session
+  choice. All `:` edges remain future.

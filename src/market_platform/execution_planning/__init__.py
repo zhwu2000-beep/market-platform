@@ -21,6 +21,11 @@ from market_platform.execution_planning.order_style import (
     OrderStyle,
     OrderStyleChoice,
 )
+from market_platform.execution_planning.session_participation import (
+    SESSION_PARTICIPATION_CHOICE_SCHEMA,
+    SessionParticipation,
+    SessionParticipationChoice,
+)
 from market_platform.execution_planning.time_in_force import (
     TIME_IN_FORCE_CHOICE_SCHEMA,
     TimeInForce,
@@ -38,6 +43,7 @@ __all__ = [
     "LIMIT_PRICE_CHOICE_SCHEMA",
     "ORDER_STYLE_CHOICE_SCHEMA",
     "POSITION_TARGET_TRANSLATION_SCHEMA",
+    "SESSION_PARTICIPATION_CHOICE_SCHEMA",
     "TIME_IN_FORCE_CHOICE_SCHEMA",
     "BrokerNeutralExecutionInstruction",
     "ExecutionPlanningCorrespondenceError",
@@ -50,6 +56,8 @@ __all__ = [
     "OrderStyleChoice",
     "PositionDeltaAction",
     "PositionTargetTranslation",
+    "SessionParticipation",
+    "SessionParticipationChoice",
     "TimeInForce",
     "TimeInForceChoice",
     "derive_broker_neutral_execution_instruction",

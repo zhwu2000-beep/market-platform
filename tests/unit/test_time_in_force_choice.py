@@ -60,21 +60,23 @@ EXPECTED_EXPORTS = [
 
 
 def test_exact_public_api() -> None:
-    prior_seventeen = set(EXPECTED_EXPORTS) - {
-        "TIME_IN_FORCE_CHOICE_SCHEMA",
-        "TimeInForce",
-        "TimeInForceChoice",
+    historical_v064_exports = set(EXPECTED_EXPORTS)
+    approved_v065_additions = {
+        'SESSION_PARTICIPATION_CHOICE_SCHEMA',
+        'SessionParticipation',
+        'SessionParticipationChoice',
     }
-    additions = {
-        "TIME_IN_FORCE_CHOICE_SCHEMA",
-        "TimeInForce",
-        "TimeInForceChoice",
-    }
-    assert prior_seventeen <= set(execution_planning.__all__)
-    assert additions <= set(execution_planning.__all__)
-    assert execution_planning.__all__ == EXPECTED_EXPORTS
-    assert len(execution_planning.__all__) == 20
-    for name in EXPECTED_EXPORTS:
+    expected_exports = EXPECTED_EXPORTS.copy()
+    expected_exports.insert(4, 'SESSION_PARTICIPATION_CHOICE_SCHEMA')
+    expected_exports[17:17] = [
+        'SessionParticipation',
+        'SessionParticipationChoice',
+    ]
+    assert historical_v064_exports <= set(execution_planning.__all__)
+    assert approved_v065_additions <= set(execution_planning.__all__)
+    assert execution_planning.__all__ == expected_exports
+    assert len(execution_planning.__all__) == 23
+    for name in expected_exports:
         assert getattr(execution_planning, name) is not None
 
 
