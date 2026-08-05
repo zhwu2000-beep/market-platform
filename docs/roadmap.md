@@ -66,3 +66,16 @@ three-letter trading currency. It carries no style, instrument, quote, tick-size
 authorization, capability, broker, submission, or lifecycle semantics. MARKET
 consumes no limit-price choice; future LIMIT specification construction must
 require one and validate instrument-currency correspondence separately.
+
+- v0.64.0: Explicit Time-in-Force Choice Foundation
+- future: Explicit Session Choice, if required
+- future: Broker-Neutral Order Specification
+- future: Authorization/Application, broker capability and mapping, broker
+  request, submission, and lifecycle reconciliation
+
+V0.64 adds one timeless caller-authored DAY, GTC, IOC, or FOK choice. Absence
+never means DAY. These labels express requested order-duration or immediate-fill
+behavior without promising support or fulfillment. GTD remains unavailable
+until a separate expiry contract defines its source, timestamp, comparison
+anchor, and broker/calendar boundaries. V0.64 adds no session, compatibility,
+authorization, capability, specification, submission, or lifecycle semantics.

@@ -262,3 +262,35 @@ order is executable. MARKET consumes no price artifact. V0.63 validation totals
 are 66 focused choice tests, 1,072 focused v0.55-v0.63 compatibility tests, the
 complete reconciled 648-test wider selection, and 2,610 passed with one
 established skip repository-wide. Mypy covers 169 source files.
+
+The v0.64.0 explicit time-in-force choice is domain-only:
+
+```python
+from market_platform.execution_planning import TimeInForce, TimeInForceChoice
+
+day = TimeInForceChoice(TimeInForce.DAY)
+gtc = TimeInForceChoice(TimeInForce.GTC)
+ioc = TimeInForceChoice(TimeInForce.IOC)
+fok = TimeInForceChoice(TimeInForce.FOK)
+
+assert day.to_dict()["time_in_force"] == "day"
+assert gtc.to_dict()["time_in_force"] == "gtc"
+assert ioc.to_dict()["time_in_force"] == "ioc"
+assert fok.to_dict()["time_in_force"] == "fok"
+```
+
+`TimeInForceChoice()` is rejected; absence never means DAY. Plain `"day"` is
+also rejected rather than parsed. The enum has no GTD member, and the choice has
+no expiry, timestamp, duration, session, extended-hours, style, price,
+instruction, instrument, account, or capability field.
+
+DAY identifies no exact day boundary or session. GTC is not guaranteed
+indefinite persistence. IOC and FOK request future matching/cancellation
+behavior but do not prove liquidity or fulfillment. No style/TIF compatibility
+is claimed. The choice is non-executable, unauthorized, and cannot be submitted.
+
+V0.64 validation totals are exactly 52 focused choice tests, 1,124 focused
+v0.55-v0.64 compatibility tests, the reconciled 648-test wider selection, and
+2,662 passed with one established skip repository-wide. Mypy covers 170 source
+files. The execution-planning API contains twenty exports and exactly five
+fingerprint families.

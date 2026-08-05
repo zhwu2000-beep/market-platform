@@ -426,3 +426,44 @@ concrete providers such as `PolygonProvider`.
 
   MARKET consumes no `LimitPriceChoice`. All `:` edges remain future
   boundaries; no released choice connects directly to a broker.
+
+## Explicit Time-in-Force Choice Domain
+
+- V0.64 adds one reusable caller-authored `TimeInForceChoice` containing
+  exactly one explicit DAY, GTC, IOC, or FOK label. Missing input and strings
+  fail; absence never means DAY.
+- DAY requests eligibility through a downstream-resolved order day. GTC
+  requests persistence across days or sessions until canceled, subject to
+  later rules. IOC requests immediate matching to the available extent and
+  remainder cancellation. FOK requests immediate full execution or
+  cancellation without partial fill. These are requests, not fulfillment or
+  broker-support guarantees.
+- The choice contains only TIF, `time_in_force_choice/v1` schema, and
+  fingerprint. It is timeless and independent of style, price, instruction,
+  account, instrument, session, authorization, and capability.
+- GTD is unavailable. It requires a future explicit expiry source, canonical
+  timestamp representation, comparison anchor, and broker/calendar contract.
+- The released and future boundary is:
+
+  PositionTargetTranslation(no_action) -> None instruction -> no choices consumed
+
+  BrokerNeutralExecutionInstruction ---+
+  OrderStyleChoice ---------------------+
+  LIMIT only: LimitPriceChoice ---------+
+  exactly one TimeInForceChoice --------+
+                                        :
+                            future Session Choice, if required
+                                        :
+                            future BrokerNeutralOrderSpecification
+                                        :
+                            future Authorization / Application Boundary
+                                        :
+                            future Broker Capability + Mapping Validation
+                                        :
+                            future Broker Request / Submission
+                                        :
+                            future Lifecycle / Reconciliation
+
+  MARKET consumes no `LimitPriceChoice`. Every future specification consumes
+  exactly one `TimeInForceChoice`; no TIF is incomplete rather than DAY.
+  Dotted `:` edges remain future, and no released choice connects to a broker.
