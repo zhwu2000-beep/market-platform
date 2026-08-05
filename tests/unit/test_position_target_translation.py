@@ -374,16 +374,23 @@ def test_exact_public_api() -> None:
         "TimeInForce",
         "TimeInForceChoice",
     }
+    approved_v065_exports = {
+        'SESSION_PARTICIPATION_CHOICE_SCHEMA',
+        'SessionParticipation',
+        'SessionParticipationChoice',
+    }
 
     assert original_v061_exports <= set(execution_planning.__all__)
     assert approved_v062_exports <= set(execution_planning.__all__)
     assert approved_v063_exports <= set(execution_planning.__all__)
     assert approved_v064_exports <= set(execution_planning.__all__)
+    assert approved_v065_exports <= set(execution_planning.__all__)
     assert execution_planning.__all__ == [
         "BROKER_NEUTRAL_EXECUTION_INSTRUCTION_SCHEMA",
         "LIMIT_PRICE_CHOICE_SCHEMA",
         "ORDER_STYLE_CHOICE_SCHEMA",
         "POSITION_TARGET_TRANSLATION_SCHEMA",
+        'SESSION_PARTICIPATION_CHOICE_SCHEMA',
         "TIME_IN_FORCE_CHOICE_SCHEMA",
         "BrokerNeutralExecutionInstruction",
         "ExecutionPlanningCorrespondenceError",
@@ -396,12 +403,14 @@ def test_exact_public_api() -> None:
         "OrderStyleChoice",
         "PositionDeltaAction",
         "PositionTargetTranslation",
+        'SessionParticipation',
+        'SessionParticipationChoice',
         "TimeInForce",
         "TimeInForceChoice",
         "derive_broker_neutral_execution_instruction",
         "translate_position_target",
     ]
-    assert len(execution_planning.__all__) == 20
+    assert len(execution_planning.__all__) == 23
 
 
 def test_exact_schema_and_enum_inventory() -> None:
