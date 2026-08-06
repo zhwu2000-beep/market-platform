@@ -62,21 +62,70 @@ def _valid_choice() -> SessionParticipationChoice:
 
 
 def test_exact_public_api() -> None:
-    prior_twenty = set(EXPECTED_EXPORTS) - {
-        'SESSION_PARTICIPATION_CHOICE_SCHEMA',
-        'SessionParticipation',
-        'SessionParticipationChoice',
+    prior_twenty_three_exports = {
+        "BROKER_NEUTRAL_EXECUTION_INSTRUCTION_SCHEMA",
+        "LIMIT_PRICE_CHOICE_SCHEMA",
+        "ORDER_STYLE_CHOICE_SCHEMA",
+        "POSITION_TARGET_TRANSLATION_SCHEMA",
+        "SESSION_PARTICIPATION_CHOICE_SCHEMA",
+        "TIME_IN_FORCE_CHOICE_SCHEMA",
+        "BrokerNeutralExecutionInstruction",
+        "ExecutionPlanningCorrespondenceError",
+        "ExecutionPlanningDomainError",
+        "ExecutionPlanningUnavailableError",
+        "ExecutionPlanningValidationError",
+        "ExecutionInstructionSide",
+        "LimitPriceChoice",
+        "OrderStyle",
+        "OrderStyleChoice",
+        "PositionDeltaAction",
+        "PositionTargetTranslation",
+        "SessionParticipation",
+        "SessionParticipationChoice",
+        "TimeInForce",
+        "TimeInForceChoice",
+        "derive_broker_neutral_execution_instruction",
+        "translate_position_target",
     }
-    additions = {
-        'SESSION_PARTICIPATION_CHOICE_SCHEMA',
-        'SessionParticipation',
-        'SessionParticipationChoice',
+    approved_v066_additions = {
+        "BROKER_NEUTRAL_ORDER_SPECIFICATION_SCHEMA",
+        "BrokerNeutralOrderSpecification",
+        "construct_broker_neutral_order_specification",
     }
-    assert prior_twenty <= set(execution_planning.__all__)
-    assert additions <= set(execution_planning.__all__)
-    assert execution_planning.__all__ == EXPECTED_EXPORTS
-    assert len(execution_planning.__all__) == 23
-    for name in EXPECTED_EXPORTS:
+    expected_exports = [
+        "BROKER_NEUTRAL_EXECUTION_INSTRUCTION_SCHEMA",
+        "BROKER_NEUTRAL_ORDER_SPECIFICATION_SCHEMA",
+        "LIMIT_PRICE_CHOICE_SCHEMA",
+        "ORDER_STYLE_CHOICE_SCHEMA",
+        "POSITION_TARGET_TRANSLATION_SCHEMA",
+        "SESSION_PARTICIPATION_CHOICE_SCHEMA",
+        "TIME_IN_FORCE_CHOICE_SCHEMA",
+        "BrokerNeutralExecutionInstruction",
+        "BrokerNeutralOrderSpecification",
+        "ExecutionPlanningCorrespondenceError",
+        "ExecutionPlanningDomainError",
+        "ExecutionPlanningUnavailableError",
+        "ExecutionPlanningValidationError",
+        "ExecutionInstructionSide",
+        "LimitPriceChoice",
+        "OrderStyle",
+        "OrderStyleChoice",
+        "PositionDeltaAction",
+        "PositionTargetTranslation",
+        "SessionParticipation",
+        "SessionParticipationChoice",
+        "TimeInForce",
+        "TimeInForceChoice",
+        "construct_broker_neutral_order_specification",
+        "derive_broker_neutral_execution_instruction",
+        "translate_position_target",
+    ]
+    assert len(prior_twenty_three_exports) == 23
+    assert prior_twenty_three_exports <= set(execution_planning.__all__)
+    assert approved_v066_additions <= set(execution_planning.__all__)
+    assert execution_planning.__all__ == expected_exports
+    assert len(execution_planning.__all__) == 26
+    for name in expected_exports:
         assert getattr(execution_planning, name) is not None
 
 
@@ -223,15 +272,24 @@ def test_choice_is_frozen() -> None:
         choice.session_participation = SessionParticipation.REGULAR_AND_EXTENDED
 
 
-def test_no_parser_default_or_factory_api() -> None:
+def test_no_parser_default_or_local_choice_factory_api() -> None:
     for name in (
         'parse_session_participation',
         'derive_session_participation_choice',
         'BROKER_DEFAULT',
         'DEFAULT_SESSION_PARTICIPATION',
-        'BrokerNeutralOrderSpecification',
     ):
+        assert not hasattr(session_participation_module, name)
         assert not hasattr(execution_planning, name)
+    for method in (
+        'parse',
+        'from_string',
+        'from_optional',
+        'construct_specification',
+        'derive_specification',
+    ):
+        assert not hasattr(SessionParticipationChoice, method)
+    assert callable(execution_planning.construct_broker_neutral_order_specification)
 
 
 @pytest.mark.parametrize(

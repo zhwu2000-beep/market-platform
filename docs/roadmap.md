@@ -92,3 +92,14 @@ auctions, and supported non-regular sessions remain downstream. The choice has
 no instrument, venue, style, price, TIF, instruction, account, compatibility,
 capability, authorization, specification, broker, submission, or lifecycle
 semantics.
+
+- v0.66.0: Broker-Neutral Order Specification Foundation
+- future: Authorization/Application Boundary
+- future: Capability and Broker Mapping
+- future: Broker Request/Submission and Lifecycle/Reconciliation
+
+V0.66 factory-binds the exact instruction, corresponding canonical descriptor,
+style, explicit conditional price, TIF, and session choice. MARKET requires an
+explicit null price; LIMIT requires one matching-currency price. The complete
+specification remains unauthorized, capability-unvalidated, broker-unmapped,
+unsubmitted, and non-live.

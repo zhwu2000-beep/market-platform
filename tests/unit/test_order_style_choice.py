@@ -52,27 +52,12 @@ EXPECTED_EXPORTS = [
 
 
 def test_exact_public_api() -> None:
-    historical_v062_exports = set(EXPECTED_EXPORTS)
-    approved_v063_additions = {
-        "LIMIT_PRICE_CHOICE_SCHEMA",
-        "LimitPriceChoice",
-    }
-    approved_v064_additions = {
-        "TIME_IN_FORCE_CHOICE_SCHEMA",
-        "TimeInForce",
-        "TimeInForceChoice",
-    }
-    approved_v065_additions = {
-        'SESSION_PARTICIPATION_CHOICE_SCHEMA',
-        'SessionParticipation',
-        'SessionParticipationChoice',
-    }
-    expected_exports = [
+    prior_twenty_three_exports = {
         "BROKER_NEUTRAL_EXECUTION_INSTRUCTION_SCHEMA",
         "LIMIT_PRICE_CHOICE_SCHEMA",
         "ORDER_STYLE_CHOICE_SCHEMA",
         "POSITION_TARGET_TRANSLATION_SCHEMA",
-        'SESSION_PARTICIPATION_CHOICE_SCHEMA',
+        "SESSION_PARTICIPATION_CHOICE_SCHEMA",
         "TIME_IN_FORCE_CHOICE_SCHEMA",
         "BrokerNeutralExecutionInstruction",
         "ExecutionPlanningCorrespondenceError",
@@ -85,20 +70,51 @@ def test_exact_public_api() -> None:
         "OrderStyleChoice",
         "PositionDeltaAction",
         "PositionTargetTranslation",
-        'SessionParticipation',
-        'SessionParticipationChoice',
+        "SessionParticipation",
+        "SessionParticipationChoice",
         "TimeInForce",
         "TimeInForceChoice",
         "derive_broker_neutral_execution_instruction",
         "translate_position_target",
+    }
+    approved_v066_additions = {
+        "BROKER_NEUTRAL_ORDER_SPECIFICATION_SCHEMA",
+        "BrokerNeutralOrderSpecification",
+        "construct_broker_neutral_order_specification",
+    }
+    expected_exports = [
+        "BROKER_NEUTRAL_EXECUTION_INSTRUCTION_SCHEMA",
+        "BROKER_NEUTRAL_ORDER_SPECIFICATION_SCHEMA",
+        "LIMIT_PRICE_CHOICE_SCHEMA",
+        "ORDER_STYLE_CHOICE_SCHEMA",
+        "POSITION_TARGET_TRANSLATION_SCHEMA",
+        "SESSION_PARTICIPATION_CHOICE_SCHEMA",
+        "TIME_IN_FORCE_CHOICE_SCHEMA",
+        "BrokerNeutralExecutionInstruction",
+        "BrokerNeutralOrderSpecification",
+        "ExecutionPlanningCorrespondenceError",
+        "ExecutionPlanningDomainError",
+        "ExecutionPlanningUnavailableError",
+        "ExecutionPlanningValidationError",
+        "ExecutionInstructionSide",
+        "LimitPriceChoice",
+        "OrderStyle",
+        "OrderStyleChoice",
+        "PositionDeltaAction",
+        "PositionTargetTranslation",
+        "SessionParticipation",
+        "SessionParticipationChoice",
+        "TimeInForce",
+        "TimeInForceChoice",
+        "construct_broker_neutral_order_specification",
+        "derive_broker_neutral_execution_instruction",
+        "translate_position_target",
     ]
-
-    assert historical_v062_exports <= set(execution_planning.__all__)
-    assert approved_v063_additions <= set(execution_planning.__all__)
-    assert approved_v064_additions <= set(execution_planning.__all__)
-    assert approved_v065_additions <= set(execution_planning.__all__)
+    assert len(prior_twenty_three_exports) == 23
+    assert prior_twenty_three_exports <= set(execution_planning.__all__)
+    assert approved_v066_additions <= set(execution_planning.__all__)
     assert execution_planning.__all__ == expected_exports
-    assert len(execution_planning.__all__) == 23
+    assert len(execution_planning.__all__) == 26
     for name in expected_exports:
         assert getattr(execution_planning, name) is not None
 
@@ -329,14 +345,27 @@ def test_choice_has_no_order_specification_fields() -> None:
     assert public_fields.isdisjoint(prohibited)
 
 
-def test_no_specification_or_derivation_export_exists() -> None:
-    prohibited = {
+def test_order_style_choice_owns_no_specification_construction() -> None:
+    assert {item.name for item in fields(OrderStyleChoice)} == {
+        "style",
+        "schema_version",
+        "fingerprint",
+    }
+    for name in (
         "BrokerNeutralOrderSpecification",
-        "OrderSpecification",
+        "construct_broker_neutral_order_specification",
         "derive_broker_neutral_order_specification",
         "derive_order_style_choice",
-    }
-    assert set(execution_planning.__all__).isdisjoint(prohibited)
+    ):
+        assert not hasattr(order_style_module, name)
+    for method in (
+        "construct_specification",
+        "derive_specification",
+        "to_specification",
+        "build_order",
+        "submit",
+    ):
+        assert not hasattr(OrderStyleChoice, method)
 
 
 def test_caller_may_construct_each_valid_choice_independently() -> None:

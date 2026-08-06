@@ -325,3 +325,54 @@ v0.55-v0.65 compatibility tests, the reconciled 648-test wider selection, and
 2,714 passed with one established skip repository-wide. Mypy covers 171 source
 files. The execution-planning API contains 23 exports and exactly six
 fingerprint families. The 13-path implementation is unstaged and uncommitted.
+
+The v0.66.0 broker-neutral order specification is constructed only from exact
+released source artifacts:
+
+```python
+from decimal import Decimal
+
+from market_platform.execution_planning import (
+    LimitPriceChoice,
+    OrderStyle,
+    OrderStyleChoice,
+    SessionParticipation,
+    SessionParticipationChoice,
+    TimeInForce,
+    TimeInForceChoice,
+    construct_broker_neutral_order_specification,
+)
+
+market_specification = construct_broker_neutral_order_specification(
+    instruction=instruction,
+    canonical_instrument=canonical_instrument,
+    order_style_choice=OrderStyleChoice(OrderStyle.MARKET),
+    limit_price_choice=None,
+    time_in_force_choice=TimeInForceChoice(TimeInForce.DAY),
+    session_participation_choice=SessionParticipationChoice(
+        SessionParticipation.REGULAR_ONLY
+    ),
+)
+assert market_specification.to_dict()["limit_price_choice"] is None
+
+limit_specification = construct_broker_neutral_order_specification(
+    instruction=instruction,
+    canonical_instrument=canonical_instrument,
+    order_style_choice=OrderStyleChoice(OrderStyle.LIMIT),
+    limit_price_choice=LimitPriceChoice(Decimal("190.25"), "USD"),
+    time_in_force_choice=TimeInForceChoice(TimeInForce.GTC),
+    session_participation_choice=SessionParticipationChoice(
+        SessionParticipation.REGULAR_AND_EXTENDED
+    ),
+)
+assert limit_specification.to_dict()["limit_price_choice"]["limit_price"] == "190.25"
+```
+
+MARKET with a price, LIMIT without a price, a price-currency mismatch, or a
+canonical descriptor that does not match the instruction is rejected. TIF and
+session arguments cannot be omitted. Repeating construction from identical
+sources produces the same nested projection and fingerprint.
+
+The specification has no current-time behavior and grants no authorization,
+broker capability, mapping, routing, submission, acknowledgement, execution,
+fill, cancellation, persistence, or lifecycle status.

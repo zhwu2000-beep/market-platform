@@ -501,3 +501,40 @@ concrete providers such as `PolygonProvider`.
   MARKET consumes no `LimitPriceChoice`; future LIMIT specifications require
   one. Every future specification consumes exactly one TIF and one session
   choice. All `:` edges remain future.
+
+## Broker-Neutral Order Specification Domain
+
+- V0.66 adds factory-owned `BrokerNeutralOrderSpecification`, the first complete
+  internally coherent broker-neutral order request. It binds one exact
+  instruction, its independently reconstructed canonical instrument, explicit
+  style, conditional price, TIF, and session sources.
+- The keyword-only factory requires all six arguments. MARKET requires explicit
+  `None` and projects JSON null; LIMIT requires exactly one `LimitPriceChoice`
+  whose trading currency equals `CanonicalInstrument.trading_currency`.
+- The public model retains the six complete bounded source artifacts plus schema
+  and fingerprint. Private token, constructor state, and identity binding reject
+  equal-but-distinct source replacement and coherent retained-state fabrication.
+- No new timestamp exists. The instruction's `plan_as_of` remains transitively
+  bound. No-action ends before specification construction.
+- The released and future boundary is:
+
+  ```text
+  BrokerNeutralExecutionInstruction -----+
+  CanonicalInstrument -------------------+
+  OrderStyleChoice ----------------------+
+  conditional LimitPriceChoice ----------+--> BrokerNeutralOrderSpecification
+  TimeInForceChoice ----------------------+
+  SessionParticipationChoice ------------+
+                                                   :
+                              future Authorization/Application Boundary
+                                                   :
+                              future Capability and Broker Mapping
+                                                   :
+                              future Broker Request/Submission
+                                                   :
+                              future Lifecycle/Reconciliation
+  ```
+
+  The solid edge is released. Every `:` edge remains future. Complete intent is
+  not authorization or broker support. Every specification requires TIF and
+  session choices; style/TIF/session compatibility remains downstream.
