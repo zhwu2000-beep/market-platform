@@ -60,22 +60,69 @@ EXPECTED_EXPORTS = [
 
 
 def test_exact_public_api() -> None:
-    historical_v064_exports = set(EXPECTED_EXPORTS)
-    approved_v065_additions = {
-        'SESSION_PARTICIPATION_CHOICE_SCHEMA',
-        'SessionParticipation',
-        'SessionParticipationChoice',
+    prior_twenty_three_exports = {
+        "BROKER_NEUTRAL_EXECUTION_INSTRUCTION_SCHEMA",
+        "LIMIT_PRICE_CHOICE_SCHEMA",
+        "ORDER_STYLE_CHOICE_SCHEMA",
+        "POSITION_TARGET_TRANSLATION_SCHEMA",
+        "SESSION_PARTICIPATION_CHOICE_SCHEMA",
+        "TIME_IN_FORCE_CHOICE_SCHEMA",
+        "BrokerNeutralExecutionInstruction",
+        "ExecutionPlanningCorrespondenceError",
+        "ExecutionPlanningDomainError",
+        "ExecutionPlanningUnavailableError",
+        "ExecutionPlanningValidationError",
+        "ExecutionInstructionSide",
+        "LimitPriceChoice",
+        "OrderStyle",
+        "OrderStyleChoice",
+        "PositionDeltaAction",
+        "PositionTargetTranslation",
+        "SessionParticipation",
+        "SessionParticipationChoice",
+        "TimeInForce",
+        "TimeInForceChoice",
+        "derive_broker_neutral_execution_instruction",
+        "translate_position_target",
     }
-    expected_exports = EXPECTED_EXPORTS.copy()
-    expected_exports.insert(4, 'SESSION_PARTICIPATION_CHOICE_SCHEMA')
-    expected_exports[17:17] = [
-        'SessionParticipation',
-        'SessionParticipationChoice',
+    approved_v066_additions = {
+        "BROKER_NEUTRAL_ORDER_SPECIFICATION_SCHEMA",
+        "BrokerNeutralOrderSpecification",
+        "construct_broker_neutral_order_specification",
+    }
+    expected_exports = [
+        "BROKER_NEUTRAL_EXECUTION_INSTRUCTION_SCHEMA",
+        "BROKER_NEUTRAL_ORDER_SPECIFICATION_SCHEMA",
+        "LIMIT_PRICE_CHOICE_SCHEMA",
+        "ORDER_STYLE_CHOICE_SCHEMA",
+        "POSITION_TARGET_TRANSLATION_SCHEMA",
+        "SESSION_PARTICIPATION_CHOICE_SCHEMA",
+        "TIME_IN_FORCE_CHOICE_SCHEMA",
+        "BrokerNeutralExecutionInstruction",
+        "BrokerNeutralOrderSpecification",
+        "ExecutionPlanningCorrespondenceError",
+        "ExecutionPlanningDomainError",
+        "ExecutionPlanningUnavailableError",
+        "ExecutionPlanningValidationError",
+        "ExecutionInstructionSide",
+        "LimitPriceChoice",
+        "OrderStyle",
+        "OrderStyleChoice",
+        "PositionDeltaAction",
+        "PositionTargetTranslation",
+        "SessionParticipation",
+        "SessionParticipationChoice",
+        "TimeInForce",
+        "TimeInForceChoice",
+        "construct_broker_neutral_order_specification",
+        "derive_broker_neutral_execution_instruction",
+        "translate_position_target",
     ]
-    assert historical_v064_exports <= set(execution_planning.__all__)
-    assert approved_v065_additions <= set(execution_planning.__all__)
+    assert len(prior_twenty_three_exports) == 23
+    assert prior_twenty_three_exports <= set(execution_planning.__all__)
+    assert approved_v066_additions <= set(execution_planning.__all__)
     assert execution_planning.__all__ == expected_exports
-    assert len(execution_planning.__all__) == 23
+    assert len(execution_planning.__all__) == 26
     for name in expected_exports:
         assert getattr(execution_planning, name) is not None
 
@@ -259,7 +306,7 @@ def test_fingerprint_payload_is_exact(time_in_force: TimeInForce) -> None:
     assert choice.fingerprint == canonical_fingerprint(choice._fingerprint_payload())
 
 
-def test_no_implicit_day_parser_factory_or_gtd_api() -> None:
+def test_no_implicit_day_parser_local_factory_or_gtd_api() -> None:
     assert TimeInForceChoice.__dataclass_fields__["time_in_force"].default is MISSING
     assert "GTD" not in TimeInForce.__members__
     for name in (
@@ -268,10 +315,18 @@ def test_no_implicit_day_parser_factory_or_gtd_api() -> None:
         "from_optional",
         "derive_time_in_force_choice",
         "GoodTilDateChoice",
-        "BrokerNeutralOrderSpecification",
     ):
         assert not hasattr(time_in_force_module, name)
         assert name not in execution_planning.__all__
+    for method in (
+        "parse",
+        "from_string",
+        "from_optional",
+        "construct_specification",
+        "derive_specification",
+    ):
+        assert not hasattr(TimeInForceChoice, method)
+    assert callable(execution_planning.construct_broker_neutral_order_specification)
 
 
 @pytest.mark.parametrize(
