@@ -538,3 +538,41 @@ concrete providers such as `PolygonProvider`.
   The solid edge is released. Every `:` edge remains future. Complete intent is
   not authorization or broker support. Every specification requires TIF and
   session choices; style/TIF/session compatibility remains downstream.
+## Broker Execution Structural Capability Domain
+
+- V0.67 adds one factory-owned `BrokerExecutionCapabilityProfile` for an opaque
+  execution target and one evaluator-owned
+  `BrokerExecutionStructuralCompatibilityResult`.
+- The profile declares independent supported asset-class, trading-currency, and
+  venue domains plus exact supported style/TIF/session combinations. All are
+  nonempty exact canonical tuples; the factory rejects coercion, duplicates, and
+  noncanonical order.
+- Compatibility validates the complete v0.66 specification and profile, then
+  emits fixed-order reasons for unsupported asset class, currency, venue, style,
+  TIF, session, or an otherwise unsupported exact combination.
+- The result is self-contained fingerprint-bound value evidence. It retains no
+  source objects, registry, attestation, weak references, timestamps, accounts,
+  credentials, or process-local identity.
+- `compatible` means only that the specification fits the bounded dimensions
+  declared by the profile. It does not mean broker acceptance, authorization,
+  risk approval, mapping, routing, submission, or executability.
+- Asset, currency, and venue sets are intentionally independent in v1. Exact
+  order-policy combinations cover only style, TIF, and session. Product,
+  account, quantity, lot, tick, collar, price-band, live-state, and cross-matrix
+  rules remain downstream.
+- The released and future boundary is:
+
+  ```text
+  BrokerNeutralOrderSpecification -----------+
+  BrokerExecutionCapabilityProfile ----------+-->
+      BrokerExecutionStructuralCompatibilityResult
+                                                   :
+                                  future Broker-Native Order Mapping
+                                                   :
+                                  future Authorization / Submission
+                                                   :
+                                  future Lifecycle / Reconciliation
+  ```
+
+  The solid evaluation is deterministic and offline. Every dotted edge remains
+  future work.

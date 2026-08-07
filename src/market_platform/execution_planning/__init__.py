@@ -1,5 +1,17 @@
 """Mechanical position-target translation without broker authority."""
 
+from market_platform.execution_planning.capability import (
+    BROKER_EXECUTION_CAPABILITY_PROFILE_SCHEMA,
+    BrokerExecutionCapabilityProfile,
+    construct_broker_execution_capability_profile,
+)
+from market_platform.execution_planning.compatibility import (
+    BROKER_EXECUTION_STRUCTURAL_COMPATIBILITY_RESULT_SCHEMA,
+    BrokerExecutionStructuralCompatibilityOutcome,
+    BrokerExecutionStructuralCompatibilityReason,
+    BrokerExecutionStructuralCompatibilityResult,
+    evaluate_broker_execution_structural_compatibility,
+)
 from market_platform.execution_planning.errors import (
     ExecutionPlanningCorrespondenceError,
     ExecutionPlanningDomainError,
@@ -70,4 +82,12 @@ __all__ = [
     "construct_broker_neutral_order_specification",
     "derive_broker_neutral_execution_instruction",
     "translate_position_target",
+    "BROKER_EXECUTION_CAPABILITY_PROFILE_SCHEMA",
+    "BrokerExecutionCapabilityProfile",
+    "construct_broker_execution_capability_profile",
+    "BROKER_EXECUTION_STRUCTURAL_COMPATIBILITY_RESULT_SCHEMA",
+    "BrokerExecutionStructuralCompatibilityOutcome",
+    "BrokerExecutionStructuralCompatibilityReason",
+    "BrokerExecutionStructuralCompatibilityResult",
+    "evaluate_broker_execution_structural_compatibility",
 ]

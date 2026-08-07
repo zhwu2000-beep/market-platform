@@ -105,6 +105,14 @@ EXPECTED_EXPORTS = [
     "construct_broker_neutral_order_specification",
     "derive_broker_neutral_execution_instruction",
     "translate_position_target",
+    "BROKER_EXECUTION_CAPABILITY_PROFILE_SCHEMA",
+    "BrokerExecutionCapabilityProfile",
+    "construct_broker_execution_capability_profile",
+    "BROKER_EXECUTION_STRUCTURAL_COMPATIBILITY_RESULT_SCHEMA",
+    "BrokerExecutionStructuralCompatibilityOutcome",
+    "BrokerExecutionStructuralCompatibilityReason",
+    "BrokerExecutionStructuralCompatibilityResult",
+    "evaluate_broker_execution_structural_compatibility",
 ]
 
 
@@ -278,15 +286,28 @@ def _construct(**overrides: object) -> BrokerNeutralOrderSpecification:
 
 
 def test_exact_public_api() -> None:
-    prior = set(EXPECTED_EXPORTS) - {
+    v066_additions = {
         "BROKER_NEUTRAL_ORDER_SPECIFICATION_SCHEMA",
         "BrokerNeutralOrderSpecification",
         "construct_broker_neutral_order_specification",
     }
+    v067_additions = {
+        "BROKER_EXECUTION_CAPABILITY_PROFILE_SCHEMA",
+        "BrokerExecutionCapabilityProfile",
+        "construct_broker_execution_capability_profile",
+        "BROKER_EXECUTION_STRUCTURAL_COMPATIBILITY_RESULT_SCHEMA",
+        "BrokerExecutionStructuralCompatibilityOutcome",
+        "BrokerExecutionStructuralCompatibilityReason",
+        "BrokerExecutionStructuralCompatibilityResult",
+        "evaluate_broker_execution_structural_compatibility",
+    }
+    prior = set(EXPECTED_EXPORTS) - v066_additions - v067_additions
     assert len(prior) == 23
     assert prior <= set(execution_planning.__all__)
+    assert v066_additions <= set(execution_planning.__all__)
+    assert v067_additions <= set(execution_planning.__all__)
     assert execution_planning.__all__ == EXPECTED_EXPORTS
-    assert len(execution_planning.__all__) == 26
+    assert len(execution_planning.__all__) == 34
     assert all(
         getattr(execution_planning, name) is not None for name in EXPECTED_EXPORTS
     )
@@ -302,6 +323,8 @@ def test_exact_schema_and_fingerprint_inventory() -> None:
         for name, value in vars(execution_planning).items()
         if name.endswith("_SCHEMA") and isinstance(value, str)
     } == {
+        "broker_execution_capability_profile/v1",
+        "broker_execution_structural_compatibility_result/v1",
         "position_target_translation/v1",
         "broker_neutral_execution_instruction/v1",
         "broker_neutral_order_specification/v1",
