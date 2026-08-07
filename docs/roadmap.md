@@ -103,3 +103,15 @@ style, explicit conditional price, TIF, and session choice. MARKET requires an
 explicit null price; LIMIT requires one matching-currency price. The complete
 specification remains unauthorized, capability-unvalidated, broker-unmapped,
 unsubmitted, and non-live.
+- v0.67.0: Broker Execution Capability Foundation
+- future: Broker-Native Order Mapping Foundation
+- future: Authorization, Submission, and Lifecycle/Reconciliation
+
+V0.67 declares one opaque execution target's independent asset, currency, and
+venue support plus exact style/TIF/session combinations. It evaluates a complete
+v0.66 specification offline and returns deterministic structural compatibility
+with bounded machine-readable reasons. Compatibility is not broker acceptance,
+authorization, risk approval, mapping, routing, submission, or executability.
+The result retains only source fingerprints and canonical value state; it has no
+source registry, attestation, weak-reference lifecycle, or process-local owner
+identity.

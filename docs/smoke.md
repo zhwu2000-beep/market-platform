@@ -376,3 +376,44 @@ sources produces the same nested projection and fingerprint.
 The specification has no current-time behavior and grants no authorization,
 broker capability, mapping, routing, submission, acknowledgement, execution,
 fill, cancellation, persistence, or lifecycle status.
+The v0.67.0 broker execution capability boundary is deterministic and offline:
+
+```python
+from market_platform.execution_planning import (
+    OrderStyle,
+    SessionParticipation,
+    TimeInForce,
+    construct_broker_execution_capability_profile,
+    evaluate_broker_execution_structural_compatibility,
+)
+from market_platform.instruments import InstrumentAssetClass
+
+profile = construct_broker_execution_capability_profile(
+    execution_target_id="broker.paper",
+    supported_asset_classes=(InstrumentAssetClass.EQUITY,),
+    supported_trading_currencies=("USD",),
+    supported_venues=("NASDAQ",),
+    supported_order_combinations=((
+        OrderStyle.MARKET,
+        TimeInForce.DAY,
+        SessionParticipation.REGULAR_ONLY,
+    ),),
+)
+result = evaluate_broker_execution_structural_compatibility(
+    specification=market_specification,
+    capability_profile=profile,
+)
+assert result.to_dict()["outcome"] == "compatible"
+assert result.to_dict()["rejection_reasons"] == []
+```
+
+Profile collections are exact, duplicate-free, canonically ordered tuples.
+Currencies use exact uppercase ASCII three-letter values; venues must already
+match canonical retained venue state. Unsupported orders return an incompatible
+result with fixed-order reason strings rather than raising. The result contains
+only source fingerprints and its own canonical value state.
+
+This is structural compatibility across the profile's declared dimensions, not
+complete broker executability. It performs no quantity, lot, tick, collar,
+price-band, product, account, calendar, live-state, authorization, broker-native
+mapping, routing, submission, or lifecycle work.
