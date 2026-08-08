@@ -28,6 +28,15 @@ from market_platform.execution_planning.limit_price import (
     LIMIT_PRICE_CHOICE_SCHEMA,
     LimitPriceChoice,
 )
+from market_platform.execution_planning.native_order_mapping import (
+    BROKER_NATIVE_ORDER_MAPPING_SCHEMA,
+    BROKER_NATIVE_ORDER_REPRESENTATION_SCHEMA,
+    BrokerNativeOrderMapper,
+    BrokerNativeOrderMapping,
+    BrokerNativeOrderRepresentation,
+    construct_broker_native_order_representation,
+    map_broker_native_order,
+)
 from market_platform.execution_planning.order_specification import (
     BROKER_NEUTRAL_ORDER_SPECIFICATION_SCHEMA,
     BrokerNeutralOrderSpecification,
@@ -90,4 +99,11 @@ __all__ = [
     "BrokerExecutionStructuralCompatibilityReason",
     "BrokerExecutionStructuralCompatibilityResult",
     "evaluate_broker_execution_structural_compatibility",
+    "BROKER_NATIVE_ORDER_REPRESENTATION_SCHEMA",
+    "BrokerNativeOrderRepresentation",
+    "construct_broker_native_order_representation",
+    "BROKER_NATIVE_ORDER_MAPPING_SCHEMA",
+    "BrokerNativeOrderMapping",
+    "BrokerNativeOrderMapper",
+    "map_broker_native_order",
 ]

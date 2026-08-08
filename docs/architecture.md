@@ -576,3 +576,42 @@ concrete providers such as `PolygonProvider`.
 
   The solid evaluation is deterministic and offline. Every dotted edge remains
   future work.
+
+## Broker-Native Order Mapping Domain
+
+- V0.68 adds the outbound `BrokerNativeOrderMapper` port, a bounded
+  `BrokerNativeOrderRepresentation`, and self-contained
+  `BrokerNativeOrderMapping` provenance in `execution_planning`.
+- Mapping requires an exact specification, matching capability profile, exact
+  compatible structural result, and one caller-supplied active
+  `InstrumentMapping`. The mapping is used canonical-to-external; there is no
+  lookup, search, resolver, route selection, or live contract discovery.
+- Mapper target, ID, version, policy fingerprint, and namespace are captured
+  exactly once. The operation is bound once and invoked once only after all
+  independently checkable preconditions pass.
+- Native side, order-type, TIF, and session tokens are opaque bounded adapter
+  vocabulary. The platform proves token shape and reconstructible source,
+  instrument, quantity, and price correspondence, not target-token meaning or
+  mapper correctness.
+- Decimal scale is non-semantic and reuses existing instruction and limit-price
+  canonicalization. MARKET maps no price; LIMIT maps its exact canonical price
+  and currency without rounding, ticks, collars, or conversion.
+- `native_order` is owned nested semantic state. The mapping retains no upstream
+  sources or mapper, and enforces parent/child namespace consistency without a
+  registry, attestation, weak reference, or process-local identity.
+- The boundary remains pure and offline:
+
+  ```text
+  BrokerNeutralOrderSpecification -------------------+
+  BrokerExecutionCapabilityProfile ------------------+
+  compatible StructuralCompatibilityResult ----------+--> BrokerNativeOrderMapping
+  caller-supplied active InstrumentMapping -----------+             :
+  BrokerNativeOrderMapper ----------------------------+    future Authorization
+                                                                    :
+                                                           future Submission
+                                                                    :
+                                                      future Lifecycle/Reconciliation
+  ```
+
+  Mapping is not authorization, submission, broker acceptance, or complete
+  executability. Dotted edges remain future work.

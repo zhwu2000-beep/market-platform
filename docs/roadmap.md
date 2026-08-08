@@ -115,3 +115,14 @@ authorization, risk approval, mapping, routing, submission, or executability.
 The result retains only source fingerprints and canonical value state; it has no
 source registry, attestation, weak-reference lifecycle, or process-local owner
 identity.
+
+- v0.68.0: Broker-Native Order Mapping Foundation
+- future: Broker-Neutral Execution Authorization Foundation
+- future: Submission Adapter and Lifecycle/Reconciliation
+
+V0.68 maps one structurally compatible specification through a replaceable,
+offline mapper into bounded adapter-native semantic values. It reuses one
+caller-supplied active instrument relation and records exact mapper/policy
+provenance. Native tokens remain opaque mapper vocabulary. The result is not an
+SDK object, authorization, routing approval, submission request, broker
+acceptance, or lifecycle state.
