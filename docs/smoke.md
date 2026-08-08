@@ -417,3 +417,29 @@ This is structural compatibility across the profile's declared dimensions, not
 complete broker executability. It performs no quantity, lot, tick, collar,
 price-band, product, account, calendar, live-state, authorization, broker-native
 mapping, routing, submission, or lifecycle work.
+
+The v0.68.0 outbound mapping boundary remains deterministic and offline:
+
+```python
+from market_platform.execution_planning import map_broker_native_order
+
+mapped = map_broker_native_order(
+    specification=market_specification,
+    capability_profile=profile,
+    compatibility_result=result,
+    instrument_mapping=instrument_mapping,
+    mapper=mapper,
+)
+assert mapped.execution_target_id == profile.execution_target_id
+assert mapped.native_order.external_instrument_identity.namespace == (
+    mapped.instrument_namespace
+)
+```
+
+The caller supplies one active `InstrumentMapping`; no resolver or search runs.
+Mapper metadata is captured once and its operation is invoked once. Native side,
+order-type, TIF, and session tokens are opaque adapter vocabulary: the platform
+validates their shape, source provenance, external identity, quantity, and
+MARKET/LIMIT price correspondence, but not target-token meaning. Mapping grants
+no authorization and performs no SDK call, live lookup, routing, submission, or
+lifecycle transition.
