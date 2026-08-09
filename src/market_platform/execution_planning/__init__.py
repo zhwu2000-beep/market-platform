@@ -1,5 +1,13 @@
 """Mechanical position-target translation without broker authority."""
 
+from market_platform.execution_planning.authorization import (
+    BROKER_NEUTRAL_EXECUTION_AUTHORIZATION_POLICY_IDENTITY_SCHEMA,
+    BROKER_NEUTRAL_EXECUTION_AUTHORIZATION_SCHEMA,
+    BrokerNeutralExecutionAuthorization,
+    BrokerNeutralExecutionAuthorizationPolicyIdentity,
+    authorize_broker_neutral_execution,
+    construct_broker_neutral_execution_authorization_policy_identity,
+)
 from market_platform.execution_planning.capability import (
     BROKER_EXECUTION_CAPABILITY_PROFILE_SCHEMA,
     BrokerExecutionCapabilityProfile,
@@ -106,4 +114,10 @@ __all__ = [
     "BrokerNativeOrderMapping",
     "BrokerNativeOrderMapper",
     "map_broker_native_order",
+    "BROKER_NEUTRAL_EXECUTION_AUTHORIZATION_POLICY_IDENTITY_SCHEMA",
+    "BrokerNeutralExecutionAuthorizationPolicyIdentity",
+    "construct_broker_neutral_execution_authorization_policy_identity",
+    "BROKER_NEUTRAL_EXECUTION_AUTHORIZATION_SCHEMA",
+    "BrokerNeutralExecutionAuthorization",
+    "authorize_broker_neutral_execution",
 ]

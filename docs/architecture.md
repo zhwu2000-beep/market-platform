@@ -560,6 +560,31 @@ concrete providers such as `PolygonProvider`.
   order-policy combinations cover only style, TIF, and session. Product,
   account, quantity, lot, tick, collar, price-band, live-state, and cross-matrix
   rules remain downstream.
+
+## Broker-neutral execution authorization boundary
+
+- `execution_planning` owns the success-only platform permission that binds one
+  exact approved risk evidence chain to one exact `BrokerNativeOrderMapping`.
+- Structural risk is replayed exactly once for correspondence. Compatibility,
+  mapping, and risk retain their existing meanings; none alone is authorization.
+- A policy identity records the platform rule-set ID and version but has no
+  callback, protocol, configuration, or claim of code authenticity.
+- The common evidence time is retained separately from the explicit authorization
+  time. Authorization may occur at or after evidence time, without a clock read,
+  freshness threshold, or expiry rule.
+- Capability and instrument mapping evidence remain transitively bound. Native
+  tokens remain opaque and are never reinterpreted.
+
+  ```text
+  approved risk evidence ----+
+  specification -------------+--> BrokerNeutralExecutionAuthorization
+  compatible result ---------+                  :
+  native mapping ------------+        future Submission Request
+  policy identity -----------+                  :
+                                       future Submission Adapter
+  ```
+
+  A mapping alone cannot cross a conforming future submission boundary.
 - The released and future boundary is:
 
   ```text

@@ -263,12 +263,18 @@ def test_exact_public_api() -> None:
         "BrokerNativeOrderMapping",
         "BrokerNativeOrderMapper",
         "map_broker_native_order",
+        "BROKER_NEUTRAL_EXECUTION_AUTHORIZATION_POLICY_IDENTITY_SCHEMA",
+        "BrokerNeutralExecutionAuthorizationPolicyIdentity",
+        "construct_broker_neutral_execution_authorization_policy_identity",
+        "BROKER_NEUTRAL_EXECUTION_AUTHORIZATION_SCHEMA",
+        "BrokerNeutralExecutionAuthorization",
+        "authorize_broker_neutral_execution",
     ]
     assert len(prior_twenty_three_exports) == 23
     assert prior_twenty_three_exports <= set(execution_planning.__all__)
     assert approved_v066_additions <= set(execution_planning.__all__)
     assert execution_planning.__all__ == expected_exports
-    assert len(execution_planning.__all__) == 41
+    assert len(execution_planning.__all__) == 47
     for name in expected_exports:
         assert getattr(execution_planning, name) is not None
 

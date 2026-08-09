@@ -344,7 +344,43 @@ def _rewrite(target: object, name: str, value: object) -> None:
 
 
 def test_exact_public_api_and_schemas() -> None:
-    additions = [
+    prior_exports = [
+        "BROKER_NEUTRAL_EXECUTION_INSTRUCTION_SCHEMA",
+        "BROKER_NEUTRAL_ORDER_SPECIFICATION_SCHEMA",
+        "LIMIT_PRICE_CHOICE_SCHEMA",
+        "ORDER_STYLE_CHOICE_SCHEMA",
+        "POSITION_TARGET_TRANSLATION_SCHEMA",
+        "SESSION_PARTICIPATION_CHOICE_SCHEMA",
+        "TIME_IN_FORCE_CHOICE_SCHEMA",
+        "BrokerNeutralExecutionInstruction",
+        "BrokerNeutralOrderSpecification",
+        "ExecutionPlanningCorrespondenceError",
+        "ExecutionPlanningDomainError",
+        "ExecutionPlanningUnavailableError",
+        "ExecutionPlanningValidationError",
+        "ExecutionInstructionSide",
+        "LimitPriceChoice",
+        "OrderStyle",
+        "OrderStyleChoice",
+        "PositionDeltaAction",
+        "PositionTargetTranslation",
+        "SessionParticipation",
+        "SessionParticipationChoice",
+        "TimeInForce",
+        "TimeInForceChoice",
+        "construct_broker_neutral_order_specification",
+        "derive_broker_neutral_execution_instruction",
+        "translate_position_target",
+        "BROKER_EXECUTION_CAPABILITY_PROFILE_SCHEMA",
+        "BrokerExecutionCapabilityProfile",
+        "construct_broker_execution_capability_profile",
+        "BROKER_EXECUTION_STRUCTURAL_COMPATIBILITY_RESULT_SCHEMA",
+        "BrokerExecutionStructuralCompatibilityOutcome",
+        "BrokerExecutionStructuralCompatibilityReason",
+        "BrokerExecutionStructuralCompatibilityResult",
+        "evaluate_broker_execution_structural_compatibility",
+    ]
+    v068_additions = [
         "BROKER_NATIVE_ORDER_REPRESENTATION_SCHEMA",
         "BrokerNativeOrderRepresentation",
         "construct_broker_native_order_representation",
@@ -353,8 +389,18 @@ def test_exact_public_api_and_schemas() -> None:
         "BrokerNativeOrderMapper",
         "map_broker_native_order",
     ]
-    assert execution_planning.__all__[-7:] == additions
-    assert len(execution_planning.__all__) == 41
+    v069_additions = [
+        "BROKER_NEUTRAL_EXECUTION_AUTHORIZATION_POLICY_IDENTITY_SCHEMA",
+        "BrokerNeutralExecutionAuthorizationPolicyIdentity",
+        "construct_broker_neutral_execution_authorization_policy_identity",
+        "BROKER_NEUTRAL_EXECUTION_AUTHORIZATION_SCHEMA",
+        "BrokerNeutralExecutionAuthorization",
+        "authorize_broker_neutral_execution",
+    ]
+    assert execution_planning.__all__[:34] == prior_exports
+    assert execution_planning.__all__[34:41] == v068_additions
+    assert execution_planning.__all__[41:] == v069_additions
+    assert len(execution_planning.__all__) == 47
     assert (
         BROKER_NATIVE_ORDER_REPRESENTATION_SCHEMA
         == "broker_native_order_representation/v1"
