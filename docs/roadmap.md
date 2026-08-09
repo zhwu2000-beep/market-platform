@@ -104,8 +104,6 @@ explicit null price; LIMIT requires one matching-currency price. The complete
 specification remains unauthorized, capability-unvalidated, broker-unmapped,
 unsubmitted, and non-live.
 - v0.67.0: Broker Execution Capability Foundation
-- future: Broker-Native Order Mapping Foundation
-- future: Authorization, Submission, and Lifecycle/Reconciliation
 
 V0.67 declares one opaque execution target's independent asset, currency, and
 venue support plus exact style/TIF/session combinations. It evaluates a complete
@@ -117,8 +115,6 @@ source registry, attestation, weak-reference lifecycle, or process-local owner
 identity.
 
 - v0.68.0: Broker-Native Order Mapping Foundation
-- future: Broker-Neutral Execution Authorization Foundation
-- future: Submission Adapter and Lifecycle/Reconciliation
 
 V0.68 maps one structurally compatible specification through a replaceable,
 offline mapper into bounded adapter-native semantic values. It reuses one
@@ -126,3 +122,14 @@ caller-supplied active instrument relation and records exact mapper/policy
 provenance. Native tokens remain opaque mapper vocabulary. The result is not an
 SDK object, authorization, routing approval, submission request, broker
 acceptance, or lifecycle state.
+
+- v0.69.0: Broker-Neutral Execution Authorization Foundation
+- future: Broker Submission Request Foundation
+- future: Submission Adapter and Lifecycle/Reconciliation
+
+V0.69 composes the exact approved structural-risk evidence chain, compatible
+specification, and broker-native mapping into the first submission-bound
+permission. It replays existing risk once for correspondence and records a
+declared platform rule-set identity. The result is success-only, self-contained,
+and offline. It is not risk calculation, token interpretation, broker acceptance,
+submission, live account eligibility, freshness, expiry, or lifecycle state.

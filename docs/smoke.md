@@ -368,6 +368,33 @@ limit_specification = construct_broker_neutral_order_specification(
 assert limit_specification.to_dict()["limit_price_choice"]["limit_price"] == "190.25"
 ```
 
+The v0.69.0 authorization boundary creates an explicit permission after mapping:
+
+```python
+from datetime import UTC, datetime
+from market_platform.execution_planning import (
+    authorize_broker_neutral_execution,
+    construct_broker_neutral_execution_authorization_policy_identity,
+)
+
+policy_identity = construct_broker_neutral_execution_authorization_policy_identity(
+    policy_id="platform.default", policy_version="1"
+)
+authorization = authorize_broker_neutral_execution(
+    risk_context=risk_context,
+    risk_decision=risk_decision,
+    position_target_translation=translation,
+    specification=market_specification,
+    compatibility_result=result,
+    native_order_mapping=mapped,
+    authorization_policy_identity=policy_identity,
+    authorization_as_of=datetime(2026, 1, 2, 15, tzinfo=UTC),
+)
+```
+
+Authorization replays risk once for correspondence, reads no system clock, and
+does not submit. Future submission must require this exact permission and mapping.
+
 MARKET with a price, LIMIT without a price, a price-currency mismatch, or a
 canonical descriptor that does not match the instruction is rejected. TIF and
 session arguments cannot be omitted. Repeating construction from identical

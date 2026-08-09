@@ -112,15 +112,21 @@ EXPECTED_EXPORTS = [
     "BrokerExecutionStructuralCompatibilityOutcome",
     "BrokerExecutionStructuralCompatibilityReason",
     "BrokerExecutionStructuralCompatibilityResult",
-        "evaluate_broker_execution_structural_compatibility",
-        "BROKER_NATIVE_ORDER_REPRESENTATION_SCHEMA",
-        "BrokerNativeOrderRepresentation",
-        "construct_broker_native_order_representation",
-        "BROKER_NATIVE_ORDER_MAPPING_SCHEMA",
-        "BrokerNativeOrderMapping",
-        "BrokerNativeOrderMapper",
-        "map_broker_native_order",
-    ]
+    "evaluate_broker_execution_structural_compatibility",
+    "BROKER_NATIVE_ORDER_REPRESENTATION_SCHEMA",
+    "BrokerNativeOrderRepresentation",
+    "construct_broker_native_order_representation",
+    "BROKER_NATIVE_ORDER_MAPPING_SCHEMA",
+    "BrokerNativeOrderMapping",
+    "BrokerNativeOrderMapper",
+    "map_broker_native_order",
+    "BROKER_NEUTRAL_EXECUTION_AUTHORIZATION_POLICY_IDENTITY_SCHEMA",
+    "BrokerNeutralExecutionAuthorizationPolicyIdentity",
+    "construct_broker_neutral_execution_authorization_policy_identity",
+    "BROKER_NEUTRAL_EXECUTION_AUTHORIZATION_SCHEMA",
+    "BrokerNeutralExecutionAuthorization",
+    "authorize_broker_neutral_execution",
+]
 
 
 class _EqualitySpoof:
@@ -316,20 +322,21 @@ def test_exact_public_api() -> None:
         "BrokerNativeOrderMapping",
         "BrokerNativeOrderMapper",
         "map_broker_native_order",
+        "BROKER_NEUTRAL_EXECUTION_AUTHORIZATION_POLICY_IDENTITY_SCHEMA",
+        "BrokerNeutralExecutionAuthorizationPolicyIdentity",
+        "construct_broker_neutral_execution_authorization_policy_identity",
+        "BROKER_NEUTRAL_EXECUTION_AUTHORIZATION_SCHEMA",
+        "BrokerNeutralExecutionAuthorization",
+        "authorize_broker_neutral_execution",
     }
-    prior = (
-        set(EXPECTED_EXPORTS)
-        - v066_additions
-        - v067_additions
-        - v068_additions
-    )
+    prior = set(EXPECTED_EXPORTS) - v066_additions - v067_additions - v068_additions
     assert len(prior) == 23
     assert prior <= set(execution_planning.__all__)
     assert v066_additions <= set(execution_planning.__all__)
     assert v067_additions <= set(execution_planning.__all__)
     assert v068_additions <= set(execution_planning.__all__)
     assert execution_planning.__all__ == EXPECTED_EXPORTS
-    assert len(execution_planning.__all__) == 41
+    assert len(execution_planning.__all__) == 47
     assert all(
         getattr(execution_planning, name) is not None for name in EXPECTED_EXPORTS
     )
@@ -349,6 +356,8 @@ def test_exact_schema_and_fingerprint_inventory() -> None:
         "broker_execution_structural_compatibility_result/v1",
         "broker_native_order_mapping/v1",
         "broker_native_order_representation/v1",
+        "broker_neutral_execution_authorization_policy_identity/v1",
+        "broker_neutral_execution_authorization/v1",
         "position_target_translation/v1",
         "broker_neutral_execution_instruction/v1",
         "broker_neutral_order_specification/v1",
@@ -795,8 +804,9 @@ def test_mutated_attestation_contents_cannot_redefine_registered_origin() -> Non
         result.to_dict()
 
 
-def test_exact_type_reconstructed_attestation_cannot_replace_registered_origin(
-) -> None:
+def test_exact_type_reconstructed_attestation_cannot_replace_registered_origin() -> (
+    None
+):
     result = _construct()
     attestation_type = type(result._token)
     reconstructed = object.__new__(attestation_type)
