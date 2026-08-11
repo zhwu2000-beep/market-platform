@@ -640,3 +640,17 @@ concrete providers such as `PolygonProvider`.
 
   Mapping is not authorization, submission, broker acceptance, or complete
   executability. Dotted edges remain future work.
+
+## Daily technical-analysis foundation
+
+- v0.70 owns a pure completed-daily evidence boundary, generic technical
+  indicators, one fixed v1 profile, and deterministic technical snapshots.
+- Callers supply analysis_as_of. Midnight-UTC provider labels are admitted only
+  when earlier than its New York local calendar date; same-date rows remain
+  excluded until local midnight. This is a provider-daily-aggregate rule, not a
+  certified-RTH or exchange-calendar claim.
+- The snapshot is replay-compatible and self-contained. It retains bounded
+  evidence/profile values and calculated semantics, never a DataFrame, provider,
+  historical series, carrier, clock, risk artifact, or execution artifact.
+- Provider acquisition, workflow/CLI integration, rendering, and human warning
+  prose remain v0.71 responsibilities.
