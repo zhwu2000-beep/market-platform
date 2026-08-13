@@ -1,5 +1,10 @@
 """Research workflow package."""
 
+from market_platform.research.daily_analysis import (
+    DailyTechnicalResearchRequest,
+    DailyTechnicalResearchResult,
+    DailyTechnicalResearchWorkflow,
+)
 from market_platform.research.daily_evidence import (
     DAILY_RESEARCH_EVIDENCE_SCHEMA,
     CompletedDailyPriceSeries,
@@ -163,4 +168,7 @@ __all__ = [
     "analyze_daily_technical_snapshot",
     "construct_daily_technical_analysis_profile",
     "prepare_completed_daily_price_series",
+    "DailyTechnicalResearchRequest",
+    "DailyTechnicalResearchResult",
+    "DailyTechnicalResearchWorkflow",
 ]

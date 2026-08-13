@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import math
+import re
 import sys
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
@@ -41,9 +42,15 @@ from market_platform.replay import (
     summarize_historical_replay,
 )
 from market_platform.research import (
+    DailyTechnicalResearchRequest,
+    DailyTechnicalResearchResult,
+    DailyTechnicalResearchWorkflow,
     DefaultResearchWorkflow,
     ResearchRequest,
     ResearchResult,
+    ResearchTimeframe,
+    TechnicalAnalysisWarning,
+    construct_daily_technical_analysis_profile,
 )
 from market_platform.signals.batch import (
     SignalClassificationSnapshot,
@@ -61,6 +68,7 @@ from market_platform.strategy import (
     StrategyCollection,
     create_strategy_collection,
 )
+from market_platform.trading.instrument import TradingInstrumentIdentity
 
 _REPLAY_DAILY_INTERVAL = "1day"
 _DEFAULT_REPLAY_MAX_BARS = 500
@@ -72,6 +80,21 @@ class CommandHandler(Protocol):
     def __call__(self, args: argparse.Namespace) -> int:
         """Run a parsed command."""
         ...
+
+
+class _StoreOnceAction(argparse.Action):
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: object,
+        option_string: str | None = None,
+    ) -> None:
+        seen: set[str] = getattr(namespace, "_research_analyze_seen", set())
+        if self.dest in seen:
+            parser.error(f"argument {option_string}: may not be repeated")
+        namespace._research_analyze_seen = {*seen, self.dest}
+        setattr(namespace, self.dest, values)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -267,6 +290,52 @@ def build_parser() -> argparse.ArgumentParser:
         help="Daily lookback window in calendar days.",
     )
     run_parser.set_defaults(handler=_handle_research_run)
+
+    analyze_parser = research_subparsers.add_parser(
+        "analyze",
+        help="Analyze one instrument with adjusted Polygon daily data.",
+    )
+    analyze_parser.add_argument(
+        "--symbol", required=True, action=_StoreOnceAction, help="Ticker symbol."
+    )
+    analyze_parser.add_argument(
+        "--venue", required=True, action=_StoreOnceAction, help="Trading venue."
+    )
+    analyze_parser.add_argument(
+        "--timeframe",
+        choices=["1d"],
+        default="1d",
+        action=_StoreOnceAction,
+        help="Research timeframe.",
+    )
+    analyze_parser.add_argument(
+        "--provider",
+        choices=["polygon"],
+        default="polygon",
+        action=_StoreOnceAction,
+        help="Data provider.",
+    )
+    analyze_parser.add_argument(
+        "--as-of",
+        type=_parse_aware_iso_datetime,
+        default=None,
+        action=_StoreOnceAction,
+        help="Aware ISO-8601 analysis timestamp.",
+    )
+    analyze_parser.add_argument(
+        "--format",
+        choices=["table", "json"],
+        default="table",
+        action=_StoreOnceAction,
+        help="Output format.",
+    )
+    analyze_parser.add_argument(
+        "--output",
+        default=None,
+        action=_StoreOnceAction,
+        help="Write formatted output to a file instead of stdout.",
+    )
+    analyze_parser.set_defaults(handler=_handle_research_analyze)
 
     replay_parser = subparsers.add_parser(
         "replay",
@@ -599,6 +668,41 @@ def _handle_research_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_research_analyze(args: argparse.Namespace) -> int:
+    logger = get_logger(__name__)
+    try:
+        instrument = _parse_research_instrument(args.symbol, args.venue)
+        analysis_as_of = args.as_of
+        if analysis_as_of is None:
+            analysis_as_of = datetime.now(UTC)
+        request = DailyTechnicalResearchRequest(
+            instrument=instrument,
+            timeframe=ResearchTimeframe(args.timeframe),
+            provider=args.provider,
+            analysis_as_of=analysis_as_of,
+            profile=construct_daily_technical_analysis_profile(),
+        )
+    except (TypeError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        service = create_default_market_data_service()
+        workflow = DailyTechnicalResearchWorkflow(service)
+        result = asyncio.run(workflow.run(request))
+        rendered_output = _render_daily_technical_research_result(result, args.format)
+        if args.output is not None:
+            _write_output(Path(args.output), rendered_output)
+            return 0
+    except (ConfigurationError, DataProviderError, ValueError, OSError) as exc:
+        logger.error("Failed to analyze daily technical research: %s", exc)
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    print(rendered_output, end="" if rendered_output.endswith("\n") else "\n")
+    return 0
+
+
 def _handle_replay_run(args: argparse.Namespace) -> int:
     logger = get_logger(__name__)
     symbol = args.symbol.strip().upper()
@@ -823,6 +927,134 @@ def _render_research_result_json(result: ResearchResult) -> str:
     return json.dumps(result.to_dict(), ensure_ascii=False) + "\n"
 
 
+def _render_daily_technical_research_result(
+    result: DailyTechnicalResearchResult,
+    output_format: str,
+) -> str:
+    if output_format == "table":
+        return _render_daily_technical_research_table(result)
+    if output_format == "json":
+        return json.dumps(result.to_dict(), ensure_ascii=False) + "\n"
+    raise ValueError(f"Unsupported output format: {output_format}")
+
+
+def _render_daily_technical_research_table(
+    result: DailyTechnicalResearchResult,
+) -> str:
+    result.to_dict()
+    snapshot = result.snapshot
+    evidence = snapshot.evidence
+    references = snapshot.volatility_references
+    rows = [
+        ("Identity", "Symbol", result.request.instrument.symbol),
+        ("Identity", "Venue", result.request.instrument.venue),
+        ("Identity", "Timeframe", result.request.timeframe.value),
+        ("Data", "Provider", result.request.provider),
+        ("Data", "Adjustment", evidence.adjustment_policy.value),
+        ("Data", "Analysis As Of", evidence.analysis_as_of.isoformat()),
+        (
+            "Data",
+            "Latest Completed Session",
+            evidence.latest_completed_bar_session_date.isoformat(),
+        ),
+        ("Data", "Bars", str(evidence.bar_count)),
+        ("Data", "Calendar Lag Days", str(evidence.calendar_lag_days)),
+        ("Data", "Quality", snapshot.quality.value),
+        ("Trend", "Latest Close", _format_analysis_number(snapshot.latest_close, 4)),
+        ("Trend", "EMA8", _format_analysis_number(snapshot.ema_8, 4)),
+        ("Trend", "EMA20", _format_analysis_number(snapshot.ema_20, 4)),
+        ("Trend", "EMA144", _format_analysis_number(snapshot.ema_144, 4)),
+        ("Trend", "EMA169", _format_analysis_number(snapshot.ema_169, 4)),
+        ("Trend", "EMA Alignment", snapshot.ema_alignment.value),
+        ("Trend", "Tunnel Position", snapshot.tunnel_position.value),
+        ("Momentum", "MACD", _format_analysis_number(snapshot.macd_line, 4)),
+        ("Momentum", "MACD Signal", _format_analysis_number(snapshot.macd_signal, 4)),
+        (
+            "Momentum",
+            "MACD Histogram",
+            _format_analysis_number(snapshot.macd_histogram, 4),
+        ),
+        ("Momentum", "RSI14", _format_analysis_number(snapshot.rsi_14, 2)),
+        (
+            "Volatility",
+            "Wilder ATR14",
+            _format_analysis_number(snapshot.wilder_atr_14, 4),
+        ),
+        ("Volatility", "ATR%", _format_analysis_number(snapshot.atr_percent_14, 4)),
+        (
+            "Volatility",
+            "Realized Volatility",
+            _format_analysis_number(snapshot.realized_volatility, 4),
+        ),
+        (
+            "Volatility",
+            "Current Drawdown",
+            _format_analysis_number(snapshot.current_drawdown, 4),
+        ),
+        ("References", "-1 ATR", _format_analysis_number(references.one_atr_below, 4)),
+        ("References", "+1 ATR", _format_analysis_number(references.one_atr_above, 4)),
+        (
+            "References",
+            "-1.5 ATR",
+            _format_analysis_number(references.one_and_half_atr_below, 4),
+        ),
+        (
+            "References",
+            "+1.5 ATR",
+            _format_analysis_number(references.one_and_half_atr_above, 4),
+        ),
+        ("References", "-2 ATR", _format_analysis_number(references.two_atr_below, 4)),
+        ("References", "+2 ATR", _format_analysis_number(references.two_atr_above, 4)),
+        (
+            "References",
+            "EMA20 Distance %",
+            _format_analysis_number(references.distance_from_ema20_percent, 4),
+        ),
+        ("Conclusion", "Trend State", snapshot.trend_state.value),
+        ("Conclusion", "Momentum State", snapshot.momentum_state.value),
+        ("Conclusion", "Volatility State", snapshot.volatility_state.value),
+        ("Warnings", "Warnings", _render_technical_warnings(snapshot.warnings)),
+        (
+            "Warnings",
+            "Unavailable Components",
+            ", ".join(item.component.value for item in snapshot.unavailable) or "-",
+        ),
+        (
+            "Provenance",
+            "Dataset Fingerprint",
+            evidence.dataset_content_fingerprint,
+        ),
+        ("Provenance", "Evidence Fingerprint", evidence.fingerprint),
+        ("Provenance", "Profile Fingerprint", snapshot.profile.fingerprint),
+        ("Provenance", "Snapshot Fingerprint", snapshot.fingerprint),
+    ]
+    table = pd.DataFrame(rows, columns=["Section", "Field", "Value"])
+    return f"{table.to_string(index=False)}\n"
+
+
+def _format_analysis_number(value: float | None, places: int) -> str:
+    if value is None:
+        return "-"
+    rendered = f"{value:.{places}f}".rstrip("0").rstrip(".")
+    if rendered in {"-0", ""}:
+        rendered = "0"
+    if rendered == "0" and value != 0:
+        rendered = f"{value:.{places}g}"
+    return rendered
+
+
+def _render_technical_warnings(
+    warnings: tuple[TechnicalAnalysisWarning, ...],
+) -> str:
+    labels = {
+        TechnicalAnalysisWarning.INSUFFICIENT_PROFILE_HISTORY: (
+            "Insufficient history for the complete fixed profile"
+        ),
+        TechnicalAnalysisWarning.STALE_EVIDENCE: "Latest completed session is stale",
+    }
+    return "; ".join(labels[warning] for warning in warnings) or "-"
+
+
 def _render_replay_output(
     *,
     replay_result: HistoricalReplayResult,
@@ -1008,6 +1240,48 @@ def _parse_iso_date(value: str) -> date:
         raise argparse.ArgumentTypeError(
             f"invalid date {value!r}; expected format YYYY-MM-DD"
         ) from exc
+
+
+def _parse_aware_iso_datetime(value: str) -> datetime:
+    grammar = (
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"
+        r"(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)"
+    )
+    if re.fullmatch(grammar, value) is None:
+        raise argparse.ArgumentTypeError(
+            f"invalid datetime {value!r}; expected extended aware ISO-8601"
+        )
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"invalid datetime {value!r}; expected extended aware ISO-8601"
+        ) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise argparse.ArgumentTypeError(
+            f"invalid datetime {value!r}; timezone is required"
+        )
+    return parsed.astimezone(UTC)
+
+
+def _parse_research_instrument(
+    symbol_value: object,
+    venue_value: object,
+) -> TradingInstrumentIdentity:
+    if type(symbol_value) is not str or type(venue_value) is not str:
+        raise TypeError("symbol and venue must be strings")
+    symbol = symbol_value.strip().upper()
+    venue = venue_value.strip().upper()
+    if not symbol:
+        raise ValueError("symbol must not be empty")
+    if not venue:
+        raise ValueError("venue must not be empty")
+    if any(character.isspace() for character in symbol):
+        raise ValueError("symbol must not contain internal whitespace")
+    if any(character.isspace() for character in venue):
+        raise ValueError("venue must not contain internal whitespace")
+    return TradingInstrumentIdentity(symbol=symbol, venue=venue)
 
 
 def _parse_positive_int(value: str) -> int:

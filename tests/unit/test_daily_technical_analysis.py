@@ -116,6 +116,11 @@ APPENDED_RESEARCH_EXPORTS = [
     "construct_daily_technical_analysis_profile",
     "prepare_completed_daily_price_series",
 ]
+V071_RESEARCH_EXPORTS = [
+    "DailyTechnicalResearchRequest",
+    "DailyTechnicalResearchResult",
+    "DailyTechnicalResearchWorkflow",
+]
 INSTRUMENT = TradingInstrumentIdentity("AAPL", "NASDAQ")
 
 
@@ -173,8 +178,9 @@ def snapshot(
 
 def test_exact_research_exports_and_schema_inventory() -> None:
     assert research.__all__[:51] == PRIOR_RESEARCH_EXPORTS
-    assert research.__all__[51:] == APPENDED_RESEARCH_EXPORTS
-    assert len(research.__all__) == 74
+    assert research.__all__[51:74] == APPENDED_RESEARCH_EXPORTS
+    assert research.__all__[74:] == V071_RESEARCH_EXPORTS
+    assert len(research.__all__) == 77
     assert [
         DAILY_RESEARCH_EVIDENCE_SCHEMA,
         DAILY_TECHNICAL_ANALYSIS_PROFILE_SCHEMA,
@@ -559,6 +565,7 @@ def test_snapshot_has_no_execution_or_signal_artifacts() -> None:
     }
     assert forbidden.isdisjoint(projection)
 
+
 class StrSubclass(str):
     pass
 
@@ -733,7 +740,4 @@ def test_exact_unavailable_component_identities(
 def test_exact_volatility_interpretation_boundaries(
     value: float, expected: VolatilityState
 ) -> None:
-    assert (
-        technical_analysis_module._volatility_state(value, 0.15, 0.30)
-        is expected
-    )
+    assert technical_analysis_module._volatility_state(value, 0.15, 0.30) is expected
