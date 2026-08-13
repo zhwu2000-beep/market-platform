@@ -12,6 +12,23 @@ Separate offline validation from real-provider smoke checks:
 5. Cleanup generated files
 6. Merge, tag, and push
 
+## Polygon daily technical research smoke
+
+The v0.71 Polygon application smoke is skipped by default. It requires both
+`MARKET_PLATFORM_RUN_INTEGRATION_SMOKE=1` and a configured `POLYGON_API_KEY`:
+
+```powershell
+$env:MARKET_PLATFORM_RUN_INTEGRATION_SMOKE = "1"
+uv run pytest -p no:cacheprovider tests/integration/test_real_provider_smoke.py::test_polygon_daily_technical_research_smoke
+```
+
+The smoke runs AAPL/NASDAQ through the full adjusted Polygon daily acquisition,
+completed-evidence, technical-analysis, result-projection, and JSON path. It
+checks provider and adjustment provenance, a nonempty completed snapshot,
+finite available values, and all four fingerprints without asserting an exact
+live price. Missing opt-in or credentials remains a skip, not an ordinary-suite
+failure.
+
 Real-provider smoke requires `TWELVE_DATA_API_KEY`.
 
 The smoke workflow may create:

@@ -1,8 +1,11 @@
 """Polygon provider skeleton."""
 
+import math
 import os
-from datetime import date, datetime
+from datetime import UTC, date, datetime
+from decimal import Decimal
 from typing import cast
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -73,7 +76,12 @@ class PolygonProvider(DataProvider):
         end_str = normalize_date_like(end)
         payload = self._request(
             f"/v2/aggs/ticker/{symbol.upper()}/range/1/day/{start_str}/{end_str}",
-            params={"apiKey": api_key},
+            params={
+                "adjusted": "true",
+                "sort": "asc",
+                "limit": "50000",
+                "apiKey": api_key,
+            },
         )
         return self._daily_payload_to_frame(symbol=symbol, payload=payload)
 
@@ -134,10 +142,17 @@ class PolygonProvider(DataProvider):
         return self._http_client.get(f"{self._base_url}{path}", params=params)
 
     def _daily_payload_to_frame(self, symbol: str, payload: JsonValue) -> pd.DataFrame:
+        if not isinstance(payload, dict):
+            raise DataProviderError("Polygon historical response must be an object")
+        if payload.get("adjusted") is not True:
+            raise DataProviderError(
+                "Polygon daily response must prove adjusted is exact boolean true"
+            )
         return self._historical_payload_to_frame(
             symbol=symbol,
             payload=payload,
             missing_field_message="Polygon daily price result missing field: {field}",
+            normalize_daily_timestamp=True,
         )
 
     def _health_payload_to_frame(self, payload: JsonValue) -> pd.DataFrame:
@@ -166,6 +181,7 @@ class PolygonProvider(DataProvider):
         symbol: str,
         payload: JsonValue,
         missing_field_message: str,
+        normalize_daily_timestamp: bool = False,
     ) -> pd.DataFrame:
         if not isinstance(payload, dict):
             raise DataProviderError("Polygon historical response must be an object")
@@ -185,24 +201,50 @@ class PolygonProvider(DataProvider):
             if not isinstance(item, dict):
                 raise DataProviderError("Polygon historical result must be an object")
             try:
-                timestamp_value = cast(float | str | datetime | date, item["t"])
+                timestamp_value = (
+                    _daily_timestamp_value(item["t"])
+                    if normalize_daily_timestamp
+                    else cast(float | str | datetime | date, item["t"])
+                )
+                timestamp = pd.to_datetime(timestamp_value, unit="ms", utc=True)
+                if normalize_daily_timestamp:
+                    session_date = timestamp.tz_convert(
+                        ZoneInfo("America/New_York")
+                    ).date()
+                    timestamp = pd.Timestamp(
+                        datetime.combine(session_date, datetime.min.time(), tzinfo=UTC)
+                    )
                 rows.append(
                     {
                         "symbol": symbol.upper(),
-                        "timestamp": pd.to_datetime(
-                            timestamp_value, unit="ms", utc=True
-                        ),
-                        "open": item["o"],
-                        "high": item["h"],
-                        "low": item["l"],
-                        "close": item["c"],
-                        "volume": item["v"],
+                        "timestamp": timestamp,
+                        "open": _daily_numeric_value(item["o"], "open")
+                        if normalize_daily_timestamp
+                        else item["o"],
+                        "high": _daily_numeric_value(item["h"], "high")
+                        if normalize_daily_timestamp
+                        else item["h"],
+                        "low": _daily_numeric_value(item["l"], "low")
+                        if normalize_daily_timestamp
+                        else item["l"],
+                        "close": _daily_numeric_value(item["c"], "close")
+                        if normalize_daily_timestamp
+                        else item["c"],
+                        "volume": _daily_numeric_value(item["v"], "volume")
+                        if normalize_daily_timestamp
+                        else item["v"],
                         "provider": self.name,
                     }
                 )
             except KeyError as exc:
                 raise DataProviderError(
                     missing_field_message.format(field=exc.args[0])
+                ) from exc
+            except (TypeError, ValueError, OverflowError) as exc:
+                if not normalize_daily_timestamp:
+                    raise
+                raise DataProviderError(
+                    "Polygon daily price result is malformed"
                 ) from exc
 
         frame = pd.DataFrame(rows, columns=PRICE_COLUMNS)
@@ -265,3 +307,21 @@ class PolygonProvider(DataProvider):
 
         latest_frame = normalize_latest_price_frame(latest_frame)
         return latest_frame.reset_index(drop=True)
+
+
+def _daily_timestamp_value(value: object) -> int | float:
+    if type(value) not in (int, float):
+        raise ValueError("daily timestamp must be a finite number")
+    numeric = cast(int | float, value)
+    if not math.isfinite(numeric):
+        raise ValueError("daily timestamp must be a finite number")
+    return numeric
+
+
+def _daily_numeric_value(value: object, field: str) -> int | float | Decimal:
+    if type(value) not in (int, float, Decimal):
+        raise ValueError(f"daily {field} must be a finite number")
+    numeric = cast(int | float | Decimal, value)
+    if not math.isfinite(numeric):
+        raise ValueError(f"daily {field} must be a finite number")
+    return numeric

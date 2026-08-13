@@ -53,9 +53,12 @@ def test_polygon_provider_daily_prices_are_normalized(
         return httpx.Response(
             200,
             json={
+                "adjusted": True,
                 "results": [
                     {
-                        "t": 1767312000000,
+                        "t": int(
+                            pd.Timestamp("2026-01-02T05:00:00Z").timestamp() * 1000
+                        ),
                         "o": 2.0,
                         "h": 3.0,
                         "l": 1.5,
@@ -63,19 +66,23 @@ def test_polygon_provider_daily_prices_are_normalized(
                         "v": 200,
                     },
                     {
-                        "t": 1767225600000,
+                        "t": int(
+                            pd.Timestamp("2026-01-01T05:00:00Z").timestamp() * 1000
+                        ),
                         "o": 1.0,
                         "h": 2.0,
                         "l": 0.5,
                         "c": 1.5,
                         "v": 100,
                     },
-                ]
+                ],
             },
         )
 
     provider = PolygonProvider(
-        http_client=HTTPClient(client=httpx.Client(transport=httpx.MockTransport(handler)))
+        http_client=HTTPClient(
+            client=httpx.Client(transport=httpx.MockTransport(handler))
+        )
     )
 
     frame = asyncio.run(
@@ -84,6 +91,9 @@ def test_polygon_provider_daily_prices_are_normalized(
 
     assert "/v2/aggs/ticker/MSFT/range/1/day/2026-01-01/2026-01-02" in captured["url"]
     assert captured["apiKey"] == "test-key"
+    assert "adjusted=true" in captured["url"]
+    assert "sort=asc" in captured["url"]
+    assert "limit=50000" in captured["url"]
     assert list(frame.columns) == [
         "symbol",
         "timestamp",
@@ -101,6 +111,97 @@ def test_polygon_provider_daily_prices_are_normalized(
     ]
     assert list(frame["symbol"]) == ["MSFT", "MSFT"]
     assert list(frame["provider"]) == ["polygon", "polygon"]
+
+
+@pytest.mark.parametrize("adjusted", [None, False, 1, "true"])
+def test_polygon_daily_prices_require_exact_adjusted_proof(
+    monkeypatch: pytest.MonkeyPatch,
+    adjusted: object,
+) -> None:
+    monkeypatch.setenv("POLYGON_API_KEY", "test-key")
+    payload: dict[str, object] = {"results": []}
+    if adjusted is not None:
+        payload["adjusted"] = adjusted
+    provider = PolygonProvider(
+        http_client=HTTPClient(
+            client=httpx.Client(
+                transport=httpx.MockTransport(
+                    lambda request: httpx.Response(200, json=payload)
+                )
+            )
+        )
+    )
+
+    with pytest.raises(DataProviderError, match="exact boolean true"):
+        asyncio.run(provider.get_daily_prices("msft", date(2026, 1, 1), "2026-01-02"))
+
+
+@pytest.mark.parametrize(
+    ("raw_timestamp", "expected"),
+    [
+        ("2026-03-09T04:00:00Z", "2026-03-09T00:00:00Z"),
+        ("2026-11-02T05:00:00Z", "2026-11-02T00:00:00Z"),
+        ("2026-01-02T01:00:00Z", "2026-01-01T00:00:00Z"),
+    ],
+)
+def test_polygon_daily_timestamp_uses_new_york_session_date(
+    monkeypatch: pytest.MonkeyPatch,
+    raw_timestamp: str,
+    expected: str,
+) -> None:
+    monkeypatch.setenv("POLYGON_API_KEY", "test-key")
+    raw_ms = int(pd.Timestamp(raw_timestamp).timestamp() * 1000)
+    provider = PolygonProvider(
+        http_client=HTTPClient(
+            client=httpx.Client(
+                transport=httpx.MockTransport(
+                    lambda request: httpx.Response(
+                        200,
+                        json={
+                            "adjusted": True,
+                            "results": [
+                                {
+                                    "t": raw_ms,
+                                    "o": 1.0,
+                                    "h": 2.0,
+                                    "l": 0.5,
+                                    "c": 1.5,
+                                    "v": 100,
+                                }
+                            ],
+                        },
+                    )
+                )
+            )
+        )
+    )
+
+    frame = asyncio.run(
+        provider.get_daily_prices("msft", date(2026, 1, 1), "2026-11-02")
+    )
+
+    assert frame.at[0, "timestamp"] == pd.Timestamp(expected)
+    assert frame.at[0, "provider"] == "polygon"
+
+
+def test_polygon_daily_prices_reject_malformed_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("POLYGON_API_KEY", "test-key")
+    provider = PolygonProvider(
+        http_client=HTTPClient(
+            client=httpx.Client(
+                transport=httpx.MockTransport(
+                    lambda request: httpx.Response(
+                        200, json={"adjusted": True, "results": [{"t": 1}]}
+                    )
+                )
+            )
+        )
+    )
+
+    with pytest.raises(DataProviderError, match="missing field"):
+        asyncio.run(provider.get_daily_prices("msft", date(2026, 1, 1), "2026-01-02"))
 
 
 def test_polygon_provider_daily_prices_requires_api_key(
@@ -130,7 +231,9 @@ def test_polygon_provider_health_check_is_normalized(
         return httpx.Response(200, json={"status": "OK", "message": "connected"})
 
     provider = PolygonProvider(
-        http_client=HTTPClient(client=httpx.Client(transport=httpx.MockTransport(handler)))
+        http_client=HTTPClient(
+            client=httpx.Client(transport=httpx.MockTransport(handler))
+        )
     )
 
     frame = asyncio.run(provider.health_check())
@@ -165,7 +268,9 @@ def test_polygon_provider_latest_price_is_normalized(
         )
 
     provider = PolygonProvider(
-        http_client=HTTPClient(client=httpx.Client(transport=httpx.MockTransport(handler)))
+        http_client=HTTPClient(
+            client=httpx.Client(transport=httpx.MockTransport(handler))
+        )
     )
 
     frame = asyncio.run(provider.get_latest_price("msft"))
@@ -416,4 +521,87 @@ def test_polygon_provider_intraday_prices_rejects_malformed_response(
                 datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
                 datetime(2026, 1, 2, 0, 0, tzinfo=UTC),
             )
+        )
+
+
+def _daily_provider_with_value(field: str, value: object) -> PolygonProvider:
+    row: dict[str, object] = {
+        "t": 1,
+        "o": 1.0,
+        "h": 2.0,
+        "l": 0.5,
+        "c": 1.5,
+        "v": 100,
+    }
+    row[field] = value
+    return PolygonProvider(
+        api_key="test-key",
+        http_client=HTTPClient(
+            client=httpx.Client(
+                transport=httpx.MockTransport(
+                    lambda request: httpx.Response(
+                        200,
+                        json={"adjusted": True, "results": [row]},
+                    )
+                )
+            )
+        ),
+    )
+
+
+@pytest.mark.parametrize("timestamp", ["bad", True, float("nan"), float("inf")])
+def test_polygon_daily_prices_wrap_malformed_timestamp(
+    timestamp: object,
+) -> None:
+    provider = _daily_provider_with_value("t", timestamp)
+    with pytest.raises(DataProviderError, match="malformed"):
+        provider._daily_payload_to_frame(
+            "MSFT",
+            {
+                "adjusted": True,
+                "results": [
+                    {
+                        "t": timestamp,
+                        "o": 1.0,
+                        "h": 2.0,
+                        "l": 0.5,
+                        "c": 1.5,
+                        "v": 100,
+                    }
+                ],
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("o", "bad"),
+        ("h", True),
+        ("l", float("nan")),
+        ("c", float("inf")),
+        ("v", "bad"),
+    ],
+)
+def test_polygon_daily_prices_wrap_malformed_ohlcv(
+    field: str,
+    value: object,
+) -> None:
+    provider = _daily_provider_with_value(field, value)
+    with pytest.raises(DataProviderError, match="malformed"):
+        row = {
+            "t": 1,
+            "o": 1.0,
+            "h": 2.0,
+            "l": 0.5,
+            "c": 1.5,
+            "v": 100,
+        }
+        row[field] = value
+        provider._daily_payload_to_frame(
+            "MSFT",
+            {
+                "adjusted": True,
+                "results": [row],
+            },
         )

@@ -135,10 +135,11 @@ and offline. It is not risk calculation, token interpretation, broker acceptance
 submission, live account eligibility, freshness, expiry, or lifecycle state.
 
 - v0.70.0: Daily Technical Analysis Foundation
-- next: v0.71.0 Daily Technical Research Analysis MVP
-- expected: v0.72.0 Research Comparison and Personal Watchlist Foundation
+- v0.71.0: Daily Technical Research Analysis MVP (implemented, unreleased)
+- next: v0.72.0 Research Comparison and Personal Watchlist Foundation
 
 V0.70 provides provider-independent completed-daily evidence, generic
 indicators, a fixed technical profile, and deterministic replay-compatible
-snapshots. It adds no provider, CLI, workflow, TradingSignal, risk, or execution
-behavior. v0.71 and v0.72 remain future work.
+snapshots. V0.71 adds the explicit Polygon-only daily application and CLI
+vertical slice without changing historical research or adding actionable
+behavior. V0.72 remains future work.

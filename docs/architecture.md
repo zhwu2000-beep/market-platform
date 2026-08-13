@@ -654,3 +654,20 @@ concrete providers such as `PolygonProvider`.
   historical series, carrier, clock, risk artifact, or execution artifact.
 - Provider acquisition, workflow/CLI integration, rendering, and human warning
   prose remain v0.71 responsibilities.
+
+## Daily technical research application boundary
+
+- v0.71 adds an application layer around the frozen v0.70 foundation:
+  explicit adjusted Polygon daily acquisition, canonical historical-series
+  reconstruction, completed-daily preparation, snapshot analysis, and a
+  request/result boundary.
+- Acquisition uses a fixed 450-calendar-day window ending on the New York date
+  containing the caller-supplied analysis time. Polygon is explicit and has no
+  Twelve Data fallback. Daily aggregate timestamps normalize through the New
+  York calendar date to midnight UTC; intraday timestamps remain unchanged.
+- `research analyze` owns the only optional clock read and deterministic table,
+  JSON, and file presentation. Table formatting cannot change semantic values
+  or fingerprints.
+- The application is additive. Historical research models, serialization,
+  `DefaultResearchWorkflow`, and `research run` remain unchanged. No support or
+  resistance, signal, risk, broker, or execution semantics cross this boundary.
