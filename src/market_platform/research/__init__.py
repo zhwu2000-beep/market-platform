@@ -14,6 +14,15 @@ from market_platform.research.daily_evidence import (
     ResearchTimeframe,
     prepare_completed_daily_price_series,
 )
+from market_platform.research.daily_instrument_integrity import (
+    DAILY_INSTRUMENT_INTEGRITY_EVIDENCE_SCHEMA,
+    TRUSTED_INSTRUMENT_MAPPING_REGISTRY_SCHEMA,
+    DailyInstrumentIntegrityEvidence,
+    DailyInstrumentIntegrityPolicy,
+    IntegrityCheckedDailyTechnicalResearchResult,
+    IntegrityCheckedDailyTechnicalResearchWorkflow,
+    TrustedInstrumentMappingRegistry,
+)
 from market_platform.research.historical_replay_workflow import (
     HistoricalReplayResearchMemberSpecification,
     HistoricalReplayResearchStateModelInstance,
@@ -171,4 +180,11 @@ __all__ = [
     "DailyTechnicalResearchRequest",
     "DailyTechnicalResearchResult",
     "DailyTechnicalResearchWorkflow",
+    "DAILY_INSTRUMENT_INTEGRITY_EVIDENCE_SCHEMA",
+    "TRUSTED_INSTRUMENT_MAPPING_REGISTRY_SCHEMA",
+    "DailyInstrumentIntegrityPolicy",
+    "DailyInstrumentIntegrityEvidence",
+    "TrustedInstrumentMappingRegistry",
+    "IntegrityCheckedDailyTechnicalResearchResult",
+    "IntegrityCheckedDailyTechnicalResearchWorkflow",
 ]

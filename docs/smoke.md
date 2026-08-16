@@ -1,5 +1,10 @@
 # Smoke Workflow
 
+Verified daily research uses `research analyze-verified` with an explicit
+trusted mapping JSON file. Its real Polygon variant remains opt-in, requires
+credentials, and checks nonempty admitted data plus identity and fingerprint
+correspondence without asserting prices or bar counts.
+
 This document standardizes the real-provider smoke workflow for market data
 commands in v0.22.0.
 

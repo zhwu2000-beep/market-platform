@@ -1,5 +1,10 @@
 # Architecture
 
+Verified daily research uses trusted local effective-dated v0.57 instrument
+mappings to trim completed Polygon history before analysis. The verified path
+fails closed on metadata correspondence and retains mapping plus
+original/admitted dataset provenance; legacy daily analysis is unchanged.
+
 ## Data Layer
 - `HTTPClient` is the shared network boundary for providers.
 - `DataProvider` defines the common provider interface.

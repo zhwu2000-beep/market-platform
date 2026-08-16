@@ -9,6 +9,7 @@ import httpx
 import pandas as pd
 import pytest
 
+import market_platform.research.daily_instrument_integrity as integrity_module
 from market_platform.cli import main as cli_main
 from market_platform.data.capabilities import DataCapability
 from market_platform.data.exceptions import DataProviderError
@@ -727,3 +728,198 @@ def test_table_has_exact_41_semantic_rows() -> None:
         ("Provenance", "Profile Fingerprint"),
         ("Provenance", "Snapshot Fingerprint"),
     ]
+
+
+def test_verified_parser_defaults_and_required_mapping_path() -> None:
+    args = cli_main.build_parser().parse_args(
+        [
+            "research",
+            "analyze-verified",
+            "--symbol",
+            "NVDA",
+            "--venue",
+            "NASDAQ",
+            "--instrument-mappings",
+            "mapping.json",
+        ]
+    )
+    assert (args.timeframe, args.provider, args.format, args.output) == (
+        "1d",
+        "polygon",
+        "table",
+        None,
+    )
+
+
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [
+        ("--symbol", "NVDA"),
+        ("--venue", "NASDAQ"),
+        ("--instrument-mappings", "mapping.json"),
+        ("--timeframe", "1d"),
+        ("--provider", "polygon"),
+        ("--as-of", "2026-08-12T00:00:00Z"),
+        ("--format", "json"),
+        ("--output", "output.json"),
+    ],
+)
+def test_verified_singleton_options_reject_repetition(option: str, value: str) -> None:
+    argv = [
+        "research",
+        "analyze-verified",
+        "--symbol",
+        "NVDA",
+        "--venue",
+        "NASDAQ",
+        "--instrument-mappings",
+        "mapping.json",
+    ]
+    with pytest.raises(SystemExit) as error:
+        cli_main.build_parser().parse_args([*argv, option, value, option, value])
+    assert error.value.code == 2
+
+
+def test_verified_metadata_load_precedes_service_creation(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    service_calls = 0
+
+    def service_factory() -> object:
+        nonlocal service_calls
+        service_calls += 1
+        raise AssertionError("service factory must not be reached")
+
+    monkeypatch.setattr(
+        cli_main,
+        "load_trusted_instrument_mapping_registry",
+        lambda path: (_ for _ in ()).throw(ValueError("invalid metadata")),
+    )
+    monkeypatch.setattr(cli_main, "create_default_market_data_service", service_factory)
+    code = cli_main.run(
+        [
+            "research",
+            "analyze-verified",
+            "--symbol",
+            "NVDA",
+            "--venue",
+            "NASDAQ",
+            "--instrument-mappings",
+            "secret-mapping-path.json",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert code == 1
+    assert service_calls == 0
+    assert "invalid metadata" in captured.err
+    assert "secret-mapping-path.json" not in captured.out + captured.err
+
+
+def _verified_mapping_document(case: str) -> dict[str, object]:
+    canonical_identity = {"symbol": "NVDA", "venue": "NASDAQ"}
+    if case == "canonical_mismatch":
+        canonical_identity = {"symbol": "NVDA", "venue": "NYSE"}
+    instruments = [
+        {
+            "instrument_id": "synthetic.current",
+            "trading_identity": canonical_identity,
+            "asset_class": "equity",
+            "trading_currency": "USD",
+        }
+    ]
+    external_venue = "NYSE" if case == "missing" else "NASDAQ"
+    valid_from = "2026-08-13" if case == "inactive" else "2020-01-01"
+    mappings = [
+        {
+            "external_identity": {
+                "namespace": "polygon",
+                "external_symbol": "NVDA",
+                "external_venue": external_venue,
+            },
+            "canonical_instrument_id": "synthetic.current",
+            "valid_from": valid_from,
+            "expires_at": None,
+        }
+    ]
+    if case in {"ambiguous", "conflicting"}:
+        second_id = "synthetic.current"
+        if case == "conflicting":
+            second_id = "synthetic.other"
+            instruments.append(
+                {
+                    "instrument_id": second_id,
+                    "trading_identity": {
+                        "symbol": "NVDA",
+                        "venue": "NASDAQ",
+                    },
+                    "asset_class": "equity",
+                    "trading_currency": "USD",
+                }
+            )
+        mappings.append(
+            {
+                "external_identity": {
+                    "namespace": "polygon",
+                    "external_symbol": "NVDA",
+                    "external_venue": "NASDAQ",
+                },
+                "canonical_instrument_id": second_id,
+                "valid_from": "2021-01-01",
+                "expires_at": None,
+            }
+        )
+    return {
+        "schema_version": "trusted_instrument_mapping_document/v1",
+        "source": {
+            "source_id": "synthetic",
+            "source_version": "1",
+            "configuration_fingerprint": None,
+        },
+        "instruments": instruments,
+        "mappings": mappings,
+    }
+
+
+@pytest.mark.parametrize(
+    "case", ["missing", "inactive", "ambiguous", "conflicting", "canonical_mismatch"]
+)
+def test_verified_semantic_metadata_failure_precedes_service_and_provider_io(
+    case: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service_calls = 0
+    provider_calls = 0
+
+    def service_factory() -> object:
+        nonlocal service_calls
+        service_calls += 1
+        raise AssertionError("service factory must not be reached")
+
+    async def acquire(service: object, request: object) -> object:
+        nonlocal provider_calls
+        provider_calls += 1
+        raise AssertionError("provider I/O must not be reached")
+
+    path = tmp_path / f"{case}.json"
+    path.write_text(json.dumps(_verified_mapping_document(case)), encoding="utf-8")
+    monkeypatch.setattr(cli_main, "create_default_market_data_service", service_factory)
+    monkeypatch.setattr(integrity_module, "_acquire_polygon_daily_prices", acquire)
+    code = cli_main.run(
+        [
+            "research",
+            "analyze-verified",
+            "--symbol",
+            "NVDA",
+            "--venue",
+            "NASDAQ",
+            "--as-of",
+            _AS_OF.isoformat(),
+            "--instrument-mappings",
+            str(path),
+        ]
+    )
+    assert code == 1
+    assert service_calls == 0
+    assert provider_calls == 0

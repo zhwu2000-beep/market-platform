@@ -1,5 +1,11 @@
 # Roadmap
 
+## v0.72.0
+
+Daily research instrument-history integrity adds an explicit verified sibling
+command and deterministic mapping-interval admission. Automated reference data,
+alias stitching, and interpretation/presentation changes remain deferred.
+
 ## Releases
 - v0.2.0: Provider foundation
 - v0.3.0: Unified Provider Architecture
@@ -136,10 +142,12 @@ submission, live account eligibility, freshness, expiry, or lifecycle state.
 
 - v0.70.0: Daily Technical Analysis Foundation
 - v0.71.0: Daily Technical Research Analysis MVP (implemented, unreleased)
-- next: v0.72.0 Research Comparison and Personal Watchlist Foundation
+- v0.72.0: Daily Research Instrument-History Integrity (implemented, unreleased)
+- future: Research Comparison and Personal Watchlist Foundation
 
 V0.70 provides provider-independent completed-daily evidence, generic
 indicators, a fixed technical profile, and deterministic replay-compatible
 snapshots. V0.71 adds the explicit Polygon-only daily application and CLI
 vertical slice without changing historical research or adding actionable
-behavior. V0.72 remains future work.
+behavior. V0.72 adds trusted lifecycle metadata, fail-closed historical
+identity resolution, and verified daily research without actionable behavior.
