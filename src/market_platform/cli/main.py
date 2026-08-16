@@ -15,6 +15,9 @@ from typing import Protocol, cast
 
 import pandas as pd
 
+from market_platform.application.instrument_mapping_codec import (
+    load_trusted_instrument_mapping_registry,
+)
 from market_platform.data.cache import (
     DEFAULT_MARKET_DATA_CACHE_DIR,
     MarketDataCache,
@@ -33,6 +36,7 @@ from market_platform.data.health import (
     build_provider_health_report,
     render_provider_health_report,
 )
+from market_platform.instruments import InstrumentMappingError
 from market_platform.logging import configure_logging, get_logger
 from market_platform.replay import (
     HistoricalReplayResult,
@@ -46,11 +50,16 @@ from market_platform.research import (
     DailyTechnicalResearchResult,
     DailyTechnicalResearchWorkflow,
     DefaultResearchWorkflow,
+    IntegrityCheckedDailyTechnicalResearchResult,
+    IntegrityCheckedDailyTechnicalResearchWorkflow,
     ResearchRequest,
     ResearchResult,
     ResearchTimeframe,
     TechnicalAnalysisWarning,
     construct_daily_technical_analysis_profile,
+)
+from market_platform.research.daily_instrument_integrity import (
+    _preflight_daily_instrument_resolution,
 )
 from market_platform.signals.batch import (
     SignalClassificationSnapshot,
@@ -336,6 +345,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="Write formatted output to a file instead of stdout.",
     )
     analyze_parser.set_defaults(handler=_handle_research_analyze)
+
+    verified_parser = research_subparsers.add_parser(
+        "analyze-verified",
+        help="Analyze Polygon daily data with trusted lifecycle metadata.",
+    )
+    verified_parser.add_argument("--symbol", required=True, action=_StoreOnceAction)
+    verified_parser.add_argument("--venue", required=True, action=_StoreOnceAction)
+    verified_parser.add_argument(
+        "--instrument-mappings", required=True, action=_StoreOnceAction
+    )
+    verified_parser.add_argument(
+        "--timeframe", choices=["1d"], default="1d", action=_StoreOnceAction
+    )
+    verified_parser.add_argument(
+        "--provider", choices=["polygon"], default="polygon", action=_StoreOnceAction
+    )
+    verified_parser.add_argument(
+        "--as-of", type=_parse_aware_iso_datetime, default=None, action=_StoreOnceAction
+    )
+    verified_parser.add_argument(
+        "--format", choices=["table", "json"], default="table", action=_StoreOnceAction
+    )
+    verified_parser.add_argument("--output", default=None, action=_StoreOnceAction)
+    verified_parser.set_defaults(handler=_handle_research_analyze_verified)
 
     replay_parser = subparsers.add_parser(
         "replay",
@@ -703,6 +736,50 @@ def _handle_research_analyze(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_research_analyze_verified(args: argparse.Namespace) -> int:
+    logger = get_logger(__name__)
+    try:
+        instrument = _parse_research_instrument(args.symbol, args.venue)
+        analysis_as_of = args.as_of
+        if analysis_as_of is None:
+            analysis_as_of = datetime.now(UTC)
+        request = DailyTechnicalResearchRequest(
+            instrument=instrument,
+            timeframe=ResearchTimeframe(args.timeframe),
+            provider=args.provider,
+            analysis_as_of=analysis_as_of,
+            profile=construct_daily_technical_analysis_profile(),
+        )
+    except (TypeError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    try:
+        registry = load_trusted_instrument_mapping_registry(args.instrument_mappings)
+        _preflight_daily_instrument_resolution(request, registry)
+        service = create_default_market_data_service()
+        workflow = IntegrityCheckedDailyTechnicalResearchWorkflow(service)
+        result = asyncio.run(workflow.run(request, registry))
+        rendered_output = _render_integrity_checked_daily_research_result(
+            result, args.format
+        )
+        if args.output is not None:
+            _write_output(Path(args.output), rendered_output)
+            return 0
+    except (
+        ConfigurationError,
+        DataProviderError,
+        InstrumentMappingError,
+        TypeError,
+        ValueError,
+        OSError,
+    ) as exc:
+        logger.error("Failed to analyze verified daily research: %s", exc)
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(rendered_output, end="" if rendered_output.endswith("\n") else "\n")
+    return 0
+
+
 def _handle_replay_run(args: argparse.Namespace) -> int:
     logger = get_logger(__name__)
     symbol = args.symbol.strip().upper()
@@ -940,6 +1017,8 @@ def _render_daily_technical_research_result(
 
 def _render_daily_technical_research_table(
     result: DailyTechnicalResearchResult,
+    *,
+    additional_rows: tuple[tuple[str, str, str], ...] = (),
 ) -> str:
     result.to_dict()
     snapshot = result.snapshot
@@ -1028,8 +1107,81 @@ def _render_daily_technical_research_table(
         ("Provenance", "Profile Fingerprint", snapshot.profile.fingerprint),
         ("Provenance", "Snapshot Fingerprint", snapshot.fingerprint),
     ]
+    rows.extend(additional_rows)
     table = pd.DataFrame(rows, columns=["Section", "Field", "Value"])
     return f"{table.to_string(index=False)}\n"
+
+
+def _render_integrity_checked_daily_research_result(
+    result: IntegrityCheckedDailyTechnicalResearchResult,
+    output_format: str,
+) -> str:
+    if output_format == "json":
+        return json.dumps(result.to_dict(), ensure_ascii=False) + "\n"
+    if output_format != "table":
+        raise ValueError(f"Unsupported output format: {output_format}")
+    result.to_dict()
+    integrity = result.integrity
+    rows = [
+        ("Integrity", "Verification", "verified"),
+        ("Integrity", "Policy", integrity.integrity_policy.value),
+        (
+            "Integrity",
+            "Canonical Instrument ID",
+            integrity.canonical_instrument_id.instrument_id,
+        ),
+        (
+            "Integrity",
+            "External Identity",
+            f"{integrity.resolved_external_identity.namespace}:{integrity.resolved_external_identity.external_symbol}@{integrity.resolved_external_identity.external_venue}",
+        ),
+        ("Integrity", "Mapping Valid From", integrity.mapping_valid_from.isoformat()),
+        (
+            "Integrity",
+            "Mapping Expires At",
+            "-"
+            if integrity.mapping_expires_at is None
+            else integrity.mapping_expires_at.isoformat(),
+        ),
+        (
+            "Integrity",
+            "Original Completed Bars",
+            str(integrity.original_completed_bar_count),
+        ),
+        ("Integrity", "Admitted Bars", str(integrity.admitted_bar_count)),
+        (
+            "Integrity",
+            "Excluded Before Valid From",
+            str(integrity.excluded_before_valid_from_count),
+        ),
+        (
+            "Integrity",
+            "Excluded At/After Expires At",
+            str(integrity.excluded_at_or_after_expires_at_count),
+        ),
+        (
+            "Integrity",
+            "Original Completed Range",
+            f"{integrity.original_first_session_date.isoformat()}..{integrity.original_last_session_date.isoformat()}",
+        ),
+        (
+            "Integrity",
+            "Admitted Range",
+            f"{integrity.admitted_first_session_date.isoformat()}..{integrity.admitted_last_session_date.isoformat()}",
+        ),
+        (
+            "Integrity",
+            "Mapping Source Fingerprint",
+            integrity.mapping_source_fingerprint,
+        ),
+        ("Integrity", "Mapping Fingerprint", integrity.mapping_fingerprint),
+        ("Integrity", "Registry Fingerprint", integrity.registry_fingerprint),
+        ("Integrity", "Integrity Evidence Fingerprint", integrity.fingerprint),
+    ]
+    return _render_daily_technical_research_table(
+        result.research,
+        additional_rows=tuple(rows),
+    )
 
 
 def _format_analysis_number(value: float | None, places: int) -> str:

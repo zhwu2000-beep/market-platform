@@ -183,27 +183,7 @@ class DailyTechnicalResearchWorkflow:
         if type(request) is not DailyTechnicalResearchRequest:
             raise TypeError("request must be an exact DailyTechnicalResearchRequest")
         request._validate()
-        _require_production_polygon_route(self._market_data_service)
-        end_date = request.analysis_as_of.astimezone(ZoneInfo(_MARKET_TIMEZONE)).date()
-        start_date = end_date - timedelta(days=_LOOKBACK_CALENDAR_DAYS)
-        frame = await self._market_data_service.get_daily_prices(
-            symbol=request.instrument.symbol,
-            start=start_date,
-            end=end_date,
-            provider=_PROVIDER,
-        )
-        if "provider" not in frame.columns or not all(
-            type(value) is str and value == _PROVIDER for value in frame["provider"]
-        ):
-            raise DataProviderError("daily price provider identity must be polygon")
-        try:
-            prices = HistoricalPriceSeries(
-                frame,
-                symbol=request.instrument.symbol,
-                provider=_PROVIDER,
-            )
-        except (TypeError, ValueError) as exc:
-            raise DataProviderError("Polygon daily price rows are invalid") from exc
+        prices = await _acquire_polygon_daily_prices(self._market_data_service, request)
         completed = prepare_completed_daily_price_series(
             prices=prices,
             instrument=request.instrument,
@@ -285,3 +265,28 @@ def _require_production_polygon_route(service: MarketDataService) -> None:
         raise DataProviderError(
             "production Polygon acquisition method cannot be attested"
         )
+
+
+async def _acquire_polygon_daily_prices(
+    service: MarketDataService,
+    request: DailyTechnicalResearchRequest,
+) -> HistoricalPriceSeries:
+    _require_production_polygon_route(service)
+    end_date = request.analysis_as_of.astimezone(ZoneInfo(_MARKET_TIMEZONE)).date()
+    start_date = end_date - timedelta(days=_LOOKBACK_CALENDAR_DAYS)
+    frame = await service.get_daily_prices(
+        symbol=request.instrument.symbol,
+        start=start_date,
+        end=end_date,
+        provider=_PROVIDER,
+    )
+    if "provider" not in frame.columns or not all(
+        type(value) is str and value == _PROVIDER for value in frame["provider"]
+    ):
+        raise DataProviderError("daily price provider identity must be polygon")
+    try:
+        return HistoricalPriceSeries(
+            frame, symbol=request.instrument.symbol, provider=_PROVIDER
+        )
+    except (TypeError, ValueError) as exc:
+        raise DataProviderError("Polygon daily price rows are invalid") from exc

@@ -11,15 +11,20 @@ import json
 import math
 import os
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
+from market_platform.application.instrument_mapping_codec import (
+    load_trusted_instrument_mapping_registry,
+)
 from market_platform.config import get_settings
 from market_platform.data.factory import create_default_market_data_service
 from market_platform.data.models import PRICE_COLUMNS
 from market_platform.research import (
     DailyTechnicalResearchRequest,
     DailyTechnicalResearchWorkflow,
+    IntegrityCheckedDailyTechnicalResearchWorkflow,
     PriceAdjustmentPolicy,
     ResearchTimeframe,
     construct_daily_technical_analysis_profile,
@@ -107,3 +112,70 @@ def test_polygon_daily_technical_research_smoke() -> None:
     assert result.snapshot.evidence.fingerprint.startswith("sha256:")
     assert result.snapshot.profile.fingerprint.startswith("sha256:")
     assert result.snapshot.fingerprint.startswith("sha256:")
+
+
+@pytest.mark.integration
+def test_polygon_verified_daily_technical_research_smoke(tmp_path: Path) -> None:
+    """Run verified AAPL research with temporary trusted local metadata."""
+
+    settings = get_settings()
+    if not settings.polygon_api_key:
+        pytest.skip("POLYGON_API_KEY is not configured")
+
+    mapping_path = tmp_path / "trusted_mapping.json"
+    mapping_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "trusted_instrument_mapping_document/v1",
+                "source": {
+                    "source_id": "real-smoke-fixture",
+                    "source_version": "1",
+                    "configuration_fingerprint": None,
+                },
+                "instruments": [
+                    {
+                        "instrument_id": "security.aapl",
+                        "trading_identity": {
+                            "symbol": "AAPL",
+                            "venue": "NASDAQ",
+                        },
+                        "asset_class": "equity",
+                        "trading_currency": "USD",
+                    }
+                ],
+                "mappings": [
+                    {
+                        "external_identity": {
+                            "namespace": "polygon",
+                            "external_symbol": "AAPL",
+                            "external_venue": "NASDAQ",
+                        },
+                        "canonical_instrument_id": "security.aapl",
+                        "valid_from": "1980-12-12",
+                        "expires_at": None,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    analysis_as_of = datetime.now(UTC)
+    request = DailyTechnicalResearchRequest(
+        TradingInstrumentIdentity("AAPL", "NASDAQ"),
+        ResearchTimeframe.DAILY,
+        "polygon",
+        analysis_as_of,
+        construct_daily_technical_analysis_profile(),
+    )
+    registry = load_trusted_instrument_mapping_registry(mapping_path)
+    service = create_default_market_data_service(provider_order=["polygon"])
+    result = asyncio.run(
+        IntegrityCheckedDailyTechnicalResearchWorkflow(service).run(request, registry)
+    )
+
+    assert result.integrity.admitted_bar_count > 0
+    assert result.integrity.requested_trading_identity == request.instrument
+    assert result.integrity.fingerprint == result.integrity.to_dict()["fingerprint"]
+    assert result.research.snapshot.evidence.dataset_content_fingerprint == (
+        result.integrity.admitted_dataset_fingerprint
+    )
