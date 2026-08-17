@@ -23,6 +23,16 @@ from market_platform.research.daily_instrument_integrity import (
     IntegrityCheckedDailyTechnicalResearchWorkflow,
     TrustedInstrumentMappingRegistry,
 )
+from market_platform.research.daily_technical_assessment import (
+    DailyTechnicalAssessment,
+    DailyTechnicalAssessmentPolicy,
+    assess_daily_technical_interpretation,
+)
+from market_platform.research.daily_technical_interpretation import (
+    DailyTechnicalInterpretation,
+    DailyTechnicalInterpretationPolicy,
+    interpret_daily_technical_research,
+)
 from market_platform.research.historical_replay_workflow import (
     HistoricalReplayResearchMemberSpecification,
     HistoricalReplayResearchStateModelInstance,
@@ -187,4 +197,10 @@ __all__ = [
     "TrustedInstrumentMappingRegistry",
     "IntegrityCheckedDailyTechnicalResearchResult",
     "IntegrityCheckedDailyTechnicalResearchWorkflow",
+    "DailyTechnicalInterpretationPolicy",
+    "DailyTechnicalAssessmentPolicy",
+    "DailyTechnicalInterpretation",
+    "DailyTechnicalAssessment",
+    "interpret_daily_technical_research",
+    "assess_daily_technical_interpretation",
 ]
