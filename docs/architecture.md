@@ -676,3 +676,21 @@ concrete providers such as `PolygonProvider`.
 - The application is additive. Historical research models, serialization,
   `DefaultResearchWorkflow`, and `research run` remain unchanged. No support or
   resistance, signal, risk, broker, or execution semantics cross this boundary.
+
+## Daily technical interpretation and assessment boundary
+
+- v0.73 adds a descriptive policy chain over an exact integrity-checked daily
+  technical research result. An interpretation policy produces a
+  provenance-complete interpretation, then an assessment policy produces a
+  bounded coherence assessment.
+- Policy identities bind kind, stable policy ID, behavioral revision, typed
+  configuration schema, complete canonical configuration, and fingerprint.
+  Runners detach identity values before and after one invocation and reject
+  drift, source mismatch, incomplete evidence, incorrect state, findings, or
+  outcome.
+- Classic comparison evidence is a closed ordered set of direct numeric
+  comparisons against the verified snapshot and typed interpretation
+  configuration. It is not a formula language or general evidence framework.
+- Direction, volatility, extension, outcome, and findings are deterministic and
+  non-actionable. This boundary adds no strategy, signal, recommendation,
+  position, order, account, portfolio, persistence, provider, or CLI authority.

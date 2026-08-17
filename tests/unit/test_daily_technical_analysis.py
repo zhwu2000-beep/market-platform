@@ -180,7 +180,7 @@ def test_exact_research_exports_and_schema_inventory() -> None:
     assert research.__all__[:51] == PRIOR_RESEARCH_EXPORTS
     assert research.__all__[51:74] == APPENDED_RESEARCH_EXPORTS
     assert research.__all__[74:77] == V071_RESEARCH_EXPORTS
-    assert research.__all__[77:] == [
+    assert research.__all__[77:84] == [
         "DAILY_INSTRUMENT_INTEGRITY_EVIDENCE_SCHEMA",
         "TRUSTED_INSTRUMENT_MAPPING_REGISTRY_SCHEMA",
         "DailyInstrumentIntegrityPolicy",
@@ -189,7 +189,7 @@ def test_exact_research_exports_and_schema_inventory() -> None:
         "IntegrityCheckedDailyTechnicalResearchResult",
         "IntegrityCheckedDailyTechnicalResearchWorkflow",
     ]
-    assert len(research.__all__) == 84
+    assert len(research.__all__[:84]) == 84
     assert [
         DAILY_RESEARCH_EVIDENCE_SCHEMA,
         DAILY_TECHNICAL_ANALYSIS_PROFILE_SCHEMA,

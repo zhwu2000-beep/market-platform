@@ -1,5 +1,12 @@
 # Roadmap
 
+## v0.73.0
+
+Daily technical interpretation and assessment foundation is implemented on its
+feature branch and awaiting review. It adds deterministic, policy-identified,
+provenance-aware descriptive interpretation and coherence assessment without
+strategy or trading authority.
+
 ## v0.72.0
 
 Daily research instrument-history integrity adds an explicit verified sibling
@@ -141,8 +148,10 @@ and offline. It is not risk calculation, token interpretation, broker acceptance
 submission, live account eligibility, freshness, expiry, or lifecycle state.
 
 - v0.70.0: Daily Technical Analysis Foundation
-- v0.71.0: Daily Technical Research Analysis MVP (implemented, unreleased)
-- v0.72.0: Daily Research Instrument-History Integrity (implemented, unreleased)
+- v0.71.0: Daily Technical Research Analysis MVP
+- v0.72.0: Daily Research Instrument-History Integrity
+- v0.73.0: Daily Technical Interpretation / Assessment Foundation (implemented,
+  awaiting review)
 - future: Research Comparison and Personal Watchlist Foundation
 
 V0.70 provides provider-independent completed-daily evidence, generic
