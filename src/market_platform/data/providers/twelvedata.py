@@ -1,5 +1,6 @@
 """Twelve Data provider skeleton."""
 
+import math
 import os
 from datetime import UTC, date, datetime
 from typing import cast
@@ -25,6 +26,29 @@ _INTRADAY_INTERVALS: dict[str, str] = {
     "30min": "30min",
     "1h": "1h",
 }
+_PRICE_FIELDS = ("open", "high", "low", "close")
+
+
+def _normalize_numeric_value(value: object, *, field: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        raise DataProviderError(f"Twelve Data {field} must be a finite numeric value")
+
+    try:
+        normalized = float(value)
+    except (ValueError, OverflowError) as exc:
+        raise DataProviderError(
+            f"Twelve Data {field} must be a finite numeric value"
+        ) from exc
+
+    if not math.isfinite(normalized):
+        raise DataProviderError(f"Twelve Data {field} must be a finite numeric value")
+    return normalized
+
+
+def _normalize_volume_value(value: object) -> float | None:
+    if value is None or value is pd.NA or value == "":
+        return None
+    return _normalize_numeric_value(value, field="volume")
 
 
 class TwelveDataProvider(DataProvider):
@@ -183,13 +207,13 @@ class TwelveDataProvider(DataProvider):
             timestamp_value = datetime.now(UTC)
 
         price_value = payload.get("price")
-        if price_value in {"", None}:
+        if price_value is None or price_value == "":
             price_value = payload.get("close")
-        if price_value in {"", None}:
+        if price_value is None or price_value == "":
             price_value = payload.get("value")
-        if price_value in {"", None}:
+        if price_value is None or price_value == "":
             price_value = payload.get("last")
-        if price_value in {"", None}:
+        if price_value is None or price_value == "":
             raise DataProviderError(
                 "Twelve Data latest price response missing field: price"
             )
@@ -207,6 +231,9 @@ class TwelveDataProvider(DataProvider):
                 }
             ],
             columns=LATEST_PRICE_COLUMNS,
+        )
+        latest_frame["price"] = latest_frame["price"].map(
+            lambda value: _normalize_numeric_value(value, field="latest price")
         )
         latest_frame = normalize_latest_price_frame(latest_frame)
         return latest_frame.reset_index(drop=True)
@@ -244,7 +271,7 @@ class TwelveDataProvider(DataProvider):
                 raise DataProviderError(missing_field_message.format(field="datetime"))
 
             volume_value: object | None = item.get("volume")
-            if volume_value in {"", None}:
+            if volume_value is None or volume_value == "":
                 volume_value = pd.NA
 
             try:
@@ -274,6 +301,14 @@ class TwelveDataProvider(DataProvider):
                 ) from exc
 
         frame = pd.DataFrame(rows, columns=PRICE_COLUMNS)
+        for field in _PRICE_FIELDS:
+            frame[field] = frame[field].map(
+                lambda value, field=field: _normalize_numeric_value(value, field=field)
+            )
+        normalized_volume = [
+            _normalize_volume_value(value) for value in frame["volume"].tolist()
+        ]
+        frame["volume"] = pd.array(normalized_volume, dtype="Float64")
         frame = normalize_price_frame(frame)
         frame = frame.sort_values("timestamp", ascending=True, kind="stable")
         return frame.reset_index(drop=True)

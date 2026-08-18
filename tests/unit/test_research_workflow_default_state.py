@@ -3,12 +3,15 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, date, datetime
 
+import httpx
 import pandas as pd
 import pytest
 from pandas.testing import assert_frame_equal
 
 import market_platform.cli.main as cli_main
 import market_platform.research.workflow as research_workflow
+from market_platform.data.http import HTTPClient
+from market_platform.data.providers.twelvedata import TwelveDataProvider
 from market_platform.observation import MarketObservation
 from market_platform.research import (
     DefaultResearchWorkflow,
@@ -294,6 +297,70 @@ def test_default_state_matches_explicit_baseline_model(
     )
 
     assert _run(default).to_dict() == _run(explicit).to_dict()
+
+
+def test_default_state_accepts_twelve_data_string_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_signals(monkeypatch, _signals())
+    payload = {
+        "status": "ok",
+        "values": [
+            {
+                "datetime": "2026-07-16",
+                "open": "101.5",
+                "high": "103.0",
+                "low": "100.0",
+                "close": "102.0",
+                "volume": "1200000",
+            },
+            {
+                "datetime": "2026-07-15",
+                "open": "100.5",
+                "high": "102.0",
+                "low": "99.0",
+                "close": "101.0",
+                "volume": "1100000",
+            },
+            {
+                "datetime": "2026-07-14",
+                "open": "98.5",
+                "high": "100.0",
+                "low": "98.0",
+                "close": "99.0",
+                "volume": "1000000",
+            },
+        ],
+    }
+    provider = TwelveDataProvider(
+        api_key="test-key",
+        http_client=HTTPClient(
+            client=httpx.Client(
+                transport=httpx.MockTransport(
+                    lambda request: httpx.Response(200, json=payload)
+                )
+            )
+        ),
+    )
+    prices = asyncio.run(
+        provider.get_daily_prices(
+            "MSFT",
+            date(2026, 7, 14),
+            date(2026, 7, 16),
+        )
+    )
+    model = RecordingStateModel()
+    workflow, _, _ = _workflow(
+        prices=prices,
+        structure=_structure_snapshot(),
+        state_model=model,
+    )
+
+    result = _run(workflow)
+
+    assert result.market_view is not None
+    assert result.analysis is not None
+    assert model.observations[0].price_facts.latest_price == 102.0
 
 
 def test_explicit_state_uses_injected_custom_model(
