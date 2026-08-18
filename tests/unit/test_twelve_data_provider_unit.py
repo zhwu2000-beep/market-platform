@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import math
 from datetime import UTC, date, datetime
+from numbers import Real
 
 import httpx
 import pandas as pd
@@ -14,6 +17,50 @@ from market_platform.data.providers.twelvedata import (
     TWELVE_DATA_BASE_URL,
     TwelveDataProvider,
 )
+
+_INVALID_NUMERIC_VALUES: tuple[object, ...] = (
+    "not-a-number",
+    [],
+    {},
+    True,
+    "NaN",
+    "Infinity",
+    "-Infinity",
+    float("nan"),
+    float("inf"),
+    float("-inf"),
+)
+
+
+def _provider_returning(payload: object) -> TwelveDataProvider:
+    return TwelveDataProvider(
+        api_key="test-key",
+        http_client=HTTPClient(
+            client=httpx.Client(
+                transport=httpx.MockTransport(
+                    lambda request: httpx.Response(
+                        200,
+                        text=json.dumps(payload),
+                        headers={"content-type": "application/json"},
+                    )
+                )
+            )
+        ),
+    )
+
+
+def _assert_finite_numeric_values(
+    frame: pd.DataFrame,
+    fields: tuple[str, ...],
+) -> None:
+    for field in fields:
+        values = frame[field].dropna().tolist()
+        assert values
+        assert all(
+            isinstance(value, Real) and not isinstance(value, bool)
+            for value in values
+        )
+        assert all(math.isfinite(float(value)) for value in values)
 
 
 def test_twelve_data_provider_name() -> None:
@@ -167,7 +214,8 @@ def test_twelve_data_provider_latest_price_is_normalized(
     assert list(frame["symbol"]) == ["MSFT"]
     assert list(frame["provider"]) == ["twelvedata"]
     assert list(frame["timestamp"]) == [pd.Timestamp("2026-01-01T14:30:00Z")]
-    assert list(frame["price"]) == ["100.5"]
+    assert frame.at[0, "price"] == 100.5
+    _assert_finite_numeric_values(frame, ("price",))
 
 
 def test_twelve_data_provider_latest_price_defaults_to_fetch_time(
@@ -201,6 +249,43 @@ def test_twelve_data_provider_latest_price_defaults_to_fetch_time(
     frame = asyncio.run(provider.get_latest_price("MSFT"))
 
     assert list(frame["timestamp"]) == [pd.Timestamp("2026-01-01T14:30:00Z")]
+
+
+@pytest.mark.parametrize("price_value", [100.5, 100])
+def test_twelve_data_provider_latest_price_accepts_numeric_vendor_value(
+    price_value: float | int,
+) -> None:
+    provider = _provider_returning(
+        {
+            "status": "ok",
+            "price": price_value,
+            "datetime": "2026-01-01T09:30:00Z",
+        }
+    )
+
+    frame = asyncio.run(provider.get_latest_price("MSFT"))
+
+    assert frame.at[0, "price"] == float(price_value)
+    _assert_finite_numeric_values(frame, ("price",))
+
+
+@pytest.mark.parametrize("price_value", _INVALID_NUMERIC_VALUES)
+def test_twelve_data_provider_latest_price_rejects_invalid_numeric_value(
+    price_value: object,
+) -> None:
+    provider = _provider_returning(
+        {
+            "status": "ok",
+            "price": price_value,
+            "datetime": "2026-01-01T09:30:00Z",
+        }
+    )
+
+    with pytest.raises(
+        DataProviderError,
+        match="Twelve Data latest price must be a finite numeric value",
+    ):
+        asyncio.run(provider.get_latest_price("MSFT"))
 
 
 def test_twelve_data_provider_intraday_prices_are_normalized(
@@ -278,6 +363,10 @@ def test_twelve_data_provider_intraday_prices_are_normalized(
         pd.Timestamp("2026-01-01T14:30:00Z"),
         pd.Timestamp("2026-01-01T14:31:00Z"),
     ]
+    _assert_finite_numeric_values(
+        frame,
+        ("open", "high", "low", "close", "volume"),
+    )
 
 
 @pytest.mark.parametrize("interval", ["1min", "5min", "15min", "30min", "1h"])
@@ -479,6 +568,7 @@ def test_twelve_data_provider_intraday_prices_rejects_missing_volume(
     )
 
     assert pd.isna(frame.at[0, "volume"])
+    assert pd.api.types.is_numeric_dtype(frame["volume"].dtype)
 
 
 def test_twelve_data_provider_daily_prices_are_normalized(
@@ -543,6 +633,10 @@ def test_twelve_data_provider_daily_prices_are_normalized(
         pd.Timestamp("2026-01-01T00:00:00Z"),
         pd.Timestamp("2026-01-02T00:00:00Z"),
     ]
+    _assert_finite_numeric_values(
+        frame,
+        ("open", "high", "low", "close", "volume"),
+    )
 
 
 def test_twelve_data_provider_daily_prices_requires_api_key(
@@ -571,6 +665,99 @@ def test_twelve_data_provider_daily_prices_requires_api_key(
                 "MSFT",
                 date(2026, 1, 1),
                 date(2026, 1, 2),
+            )
+        )
+
+
+def test_twelve_data_provider_daily_prices_accepts_numeric_vendor_values() -> None:
+    provider = _provider_returning(
+        {
+            "status": "ok",
+            "values": [
+                {
+                    "datetime": "2026-01-01",
+                    "open": 1,
+                    "high": 2.0,
+                    "low": 0.5,
+                    "close": 1.5,
+                    "volume": 100,
+                }
+            ],
+        }
+    )
+
+    frame = asyncio.run(
+        provider.get_daily_prices("MSFT", date(2026, 1, 1), date(2026, 1, 1))
+    )
+
+    _assert_finite_numeric_values(
+        frame,
+        ("open", "high", "low", "close", "volume"),
+    )
+
+
+@pytest.mark.parametrize("price_value", _INVALID_NUMERIC_VALUES)
+def test_twelve_data_provider_daily_prices_rejects_invalid_price_value(
+    price_value: object,
+) -> None:
+    provider = _provider_returning(
+        {
+            "status": "ok",
+            "values": [
+                {
+                    "datetime": "2026-01-01",
+                    "open": price_value,
+                    "high": "2.0",
+                    "low": "0.5",
+                    "close": "1.5",
+                    "volume": "100",
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(
+        DataProviderError,
+        match="Twelve Data open must be a finite numeric value",
+    ):
+        asyncio.run(
+            provider.get_daily_prices(
+                "MSFT",
+                date(2026, 1, 1),
+                date(2026, 1, 1),
+            )
+        )
+
+
+@pytest.mark.parametrize("volume_value", _INVALID_NUMERIC_VALUES)
+def test_twelve_data_provider_daily_prices_rejects_invalid_volume_value(
+    volume_value: object,
+) -> None:
+    provider = _provider_returning(
+        {
+            "status": "ok",
+            "values": [
+                {
+                    "datetime": "2026-01-01",
+                    "open": "1.0",
+                    "high": "2.0",
+                    "low": "0.5",
+                    "close": "1.5",
+                    "volume": volume_value,
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(
+        DataProviderError,
+        match="Twelve Data volume must be a finite numeric value",
+    ):
+        asyncio.run(
+            provider.get_daily_prices(
+                "MSFT",
+                date(2026, 1, 1),
+                date(2026, 1, 1),
             )
         )
 
@@ -697,6 +884,7 @@ def test_twelve_data_provider_daily_prices_handles_blank_volume(
     )
 
     assert pd.isna(frame.at[0, "volume"])
+    assert pd.api.types.is_numeric_dtype(frame["volume"].dtype)
 
 
 def test_twelve_data_provider_daily_prices_handles_missing_volume(
@@ -732,3 +920,4 @@ def test_twelve_data_provider_daily_prices_handles_missing_volume(
     )
 
     assert pd.isna(frame.at[0, "volume"])
+    assert pd.api.types.is_numeric_dtype(frame["volume"].dtype)

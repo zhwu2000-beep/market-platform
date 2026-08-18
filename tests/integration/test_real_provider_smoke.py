@@ -11,6 +11,7 @@ import json
 import math
 import os
 from datetime import UTC, datetime
+from numbers import Real
 from pathlib import Path
 
 import pytest
@@ -60,7 +61,21 @@ def test_twelve_data_daily_prices_smoke() -> None:
     assert list(frame.columns) == PRICE_COLUMNS
     assert set(frame["symbol"]) == {"MSFT"}
     assert set(frame["provider"]) == {"twelvedata"}
-    assert frame["timestamp"].dt.tz is not None
+    assert str(frame["timestamp"].dt.tz) == "UTC"
+    for field in ("open", "high", "low", "close"):
+        present_values = frame[field].dropna().tolist()
+        assert present_values
+        assert all(
+            isinstance(value, Real) and not isinstance(value, bool)
+            for value in present_values
+        )
+        assert all(math.isfinite(float(value)) for value in present_values)
+    present_volume = frame["volume"].dropna().tolist()
+    assert all(
+        isinstance(value, Real) and not isinstance(value, bool)
+        for value in present_volume
+    )
+    assert all(math.isfinite(float(value)) for value in present_volume)
 
 
 @pytest.mark.integration
