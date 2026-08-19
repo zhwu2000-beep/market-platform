@@ -484,6 +484,27 @@ def test_derivation_rejects_coherently_refingerprinted_assessment_drift() -> Non
     assert policy.calls == 1
 
 
+def test_derivation_rejects_coherently_refingerprinted_nested_assessment_drift(
+) -> None:
+    interpretation, assessment = _source_chain_for_snapshot(rsi_14=75.0)
+    finding = assessment.findings[0]
+    assert finding.comparison_evidence_ids
+
+    def mutate() -> None:
+        object.__setattr__(finding, "comparison_evidence_ids", ())
+        object.__setattr__(
+            assessment,
+            "fingerprint",
+            canonical_fingerprint(assessment._fingerprint_payload()),
+        )
+        assessment._validate()
+
+    policy = _TestStrategyPolicy(mutation=mutate)
+    with pytest.raises(ValueError, match="source assessment drifted"):
+        derive_daily_technical_strategy(interpretation, assessment, policy)
+    assert policy.calls == 1
+
+
 def test_derivation_accepts_temporary_source_mutation_then_exact_reversion() -> None:
     interpretation, assessment = _source_chain()
 
@@ -536,6 +557,54 @@ def test_derivation_rejects_strategy_result_policy_identity_mismatch() -> None:
     assert policy.calls == 1
 
 
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        _strategy_identity(policy_id="replacement_strategy_policy"),
+        _strategy_identity(revision="1.0.1"),
+        _assessment_identity(),
+    ],
+)
+def test_derivation_rejects_strategy_policy_identity_replacement(
+    replacement: TechnicalPolicyIdentity,
+) -> None:
+    interpretation, assessment = _source_chain()
+    policy = _TestStrategyPolicy(
+        returned_result=_strategy(
+            source_assessment_fingerprint=assessment.fingerprint
+        )
+    )
+
+    def replace_identity() -> None:
+        policy._policy_identity = replacement
+
+    policy.mutation = replace_identity
+    with pytest.raises(ValueError, match="policy identity drifted"):
+        derive_daily_technical_strategy(interpretation, assessment, policy)
+    assert policy.calls == 1
+
+
+def test_derivation_accepts_temporary_policy_identity_drift_then_exact_reversion(
+) -> None:
+    interpretation, assessment = _source_chain()
+    policy = _TestStrategyPolicy()
+    original_identity = policy._policy_identity
+
+    def replace_then_restore_identity() -> None:
+        policy._policy_identity = _strategy_identity(
+            policy_id="temporary_strategy_policy"
+        )
+        policy._policy_identity = _strategy_identity()
+
+    policy.mutation = replace_then_restore_identity
+    result = derive_daily_technical_strategy(interpretation, assessment, policy)
+
+    assert policy.calls == 1
+    assert policy._policy_identity is not original_identity
+    assert policy._policy_identity.to_dict() == original_identity.to_dict()
+    assert result.strategy_policy_identity.to_dict() == original_identity.to_dict()
+
+
 def test_derivation_accepts_structurally_valid_alternative_strategy_semantics() -> None:
     interpretation, assessment = _source_chain()
     assert assessment.outcome is DailyTechnicalAssessmentOutcome.ALIGNED
@@ -555,12 +624,22 @@ def test_derivation_accepts_structurally_valid_alternative_strategy_semantics() 
     assert policy.calls == 1
 
 
-def test_derivation_propagates_policy_exception_without_retry() -> None:
+def test_derivation_propagates_policy_exception_without_retry_or_rollback() -> None:
     interpretation, assessment = _source_chain()
-    policy = _TestStrategyPolicy(error=RuntimeError("strategy policy failed"))
-    with pytest.raises(RuntimeError, match="strategy policy failed"):
+    error = RuntimeError("strategy policy failed")
+
+    def mutate() -> None:
+        object.__setattr__(assessment, "outcome", DailyTechnicalAssessmentOutcome.MIXED)
+
+    policy = _TestStrategyPolicy(
+        mutation=mutate,
+        error=error,
+    )
+    with pytest.raises(RuntimeError, match="strategy policy failed") as exc_info:
         derive_daily_technical_strategy(interpretation, assessment, policy)
+    assert exc_info.value is error
     assert policy.calls == 1
+    assert assessment.outcome is DailyTechnicalAssessmentOutcome.MIXED
 
 
 def test_strategy_policy_kind_and_empty_configuration_are_closed() -> None:
@@ -602,7 +681,10 @@ def test_classic_strategy_policy_has_exact_deterministic_identity_and_configurat
     assert type(first.configuration) is ClassicDailyTechnicalStrategyConfiguration
     assert first.configuration.to_dict() == {}
     assert not hasattr(first.configuration, "__dict__")
+    assert first.policy_identity.configuration is not first.configuration
+    assert not hasattr(first.policy_identity.configuration, "__dict__")
     assert first.policy_identity.to_dict() == _strategy_identity().to_dict()
+    assert first.policy_identity.to_dict() == first.policy_identity.to_dict()
     assert second.policy_identity.to_dict() == first.policy_identity.to_dict()
     assert second.policy_identity.fingerprint == first.policy_identity.fingerprint
 
@@ -1038,6 +1120,41 @@ def test_strategy_enums_require_exact_types_and_reject_free_form_strings() -> No
         _strategy(rule_code="aligned_positive_continuation")  # type: ignore[arg-type]
 
 
+def test_strategy_rejects_policy_identity_and_configuration_subclasses() -> None:
+    class StrategyConfigurationSubclass(ClassicDailyTechnicalStrategyConfiguration):
+        pass
+
+    with pytest.raises(TypeError, match="exact supported typed configuration"):
+        TechnicalPolicyIdentity(
+            policy_kind=TechnicalPolicyKind.DAILY_TECHNICAL_STRATEGY,
+            policy_id="classic_daily_technical_strategy",
+            behavioral_revision="1.0.0",
+            configuration_schema=(
+                CLASSIC_DAILY_TECHNICAL_STRATEGY_CONFIGURATION_SCHEMA
+            ),
+            configuration=StrategyConfigurationSubclass(),
+        )
+
+    class TechnicalPolicyIdentitySubclass(TechnicalPolicyIdentity):
+        pass
+
+    identity = TechnicalPolicyIdentitySubclass(
+        policy_kind=TechnicalPolicyKind.DAILY_TECHNICAL_STRATEGY,
+        policy_id="classic_daily_technical_strategy",
+        behavioral_revision="1.0.0",
+        configuration_schema=CLASSIC_DAILY_TECHNICAL_STRATEGY_CONFIGURATION_SCHEMA,
+        configuration=ClassicDailyTechnicalStrategyConfiguration(),
+    )
+    with pytest.raises(ValueError, match="exact TechnicalPolicyIdentity"):
+        _strategy(strategy_policy_identity=identity)
+
+    interpretation, assessment = _source_chain()
+    policy = _TestStrategyPolicy(identity=identity)
+    with pytest.raises(ValueError, match="strategy policy identity is invalid"):
+        derive_daily_technical_strategy(interpretation, assessment, policy)
+    assert policy.calls == 0
+
+
 def test_strategy_projection_and_fingerprint_are_deterministic() -> None:
     first = _strategy()
     second = _strategy()
@@ -1113,6 +1230,77 @@ def test_strategy_is_frozen_slotted_and_revalidates_forged_state() -> None:
     )
     with pytest.raises(ValueError, match="do not correspond"):
         strategy.to_dict()
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        (
+            {"mode": DailyTechnicalStrategyMode.NEGATIVE_DIRECTIONAL_CONTINUATION},
+            "do not correspond",
+        ),
+        (
+            {
+                "mode": DailyTechnicalStrategyMode.NEGATIVE_DIRECTIONAL_CONTINUATION,
+                "rule_code": (
+                    DailyTechnicalStrategyRuleCode.ALIGNED_NEGATIVE_CONTINUATION
+                ),
+            },
+            "fingerprint does not match",
+        ),
+        (
+            {"source_assessment_fingerprint": "sha256:" + "2" * 64},
+            "fingerprint does not match",
+        ),
+        (
+            {
+                "strategy_policy_identity": _strategy_identity(
+                    policy_id="replacement_strategy_policy"
+                )
+            },
+            "fingerprint does not match",
+        ),
+    ],
+)
+def test_strategy_rejects_post_construction_stale_fingerprint_forgery(
+    changes: dict[str, object],
+    message: str,
+) -> None:
+    strategy = _strategy()
+    for name, value in changes.items():
+        object.__setattr__(strategy, name, value)
+
+    with pytest.raises(ValueError, match=message):
+        strategy.to_dict()
+
+
+def test_runner_accepts_coherently_refingerprinted_alternate_strategy_semantics(
+) -> None:
+    interpretation, assessment = _source_chain()
+    strategy = _strategy(source_assessment_fingerprint=assessment.fingerprint)
+    object.__setattr__(
+        strategy,
+        "mode",
+        DailyTechnicalStrategyMode.NEGATIVE_DIRECTIONAL_CONTINUATION,
+    )
+    object.__setattr__(
+        strategy,
+        "rule_code",
+        DailyTechnicalStrategyRuleCode.ALIGNED_NEGATIVE_CONTINUATION,
+    )
+    object.__setattr__(
+        strategy,
+        "fingerprint",
+        canonical_fingerprint(strategy._fingerprint_payload()),
+    )
+    strategy.to_dict()
+
+    result = derive_daily_technical_strategy(
+        interpretation,
+        assessment,
+        _TestStrategyPolicy(returned_result=strategy),
+    )
+    assert result is strategy
 
 
 def test_fingerprint_changes_with_each_meaningfully_variable_semantic_field() -> None:
@@ -1261,3 +1449,56 @@ def test_derivation_rejects_two_source_identity_and_time_mismatches() -> None:
         with pytest.raises(ValueError, match="source chain"):
             derive_daily_technical_strategy(interpretation, assessment, policy)
         assert policy.calls == 0
+
+
+def test_derivation_rejects_value_valid_source_lineage_substitution() -> None:
+    interpretation_a, assessment_a = _source_chain()
+    interpretation_b, assessment_b = _source_chain_for_snapshot(ema_8=13.0)
+
+    assert interpretation_b.canonical_instrument_id.to_dict() == (
+        interpretation_a.canonical_instrument_id.to_dict()
+    )
+    assert interpretation_b.analysis_as_of == interpretation_a.analysis_as_of
+    assert interpretation_b.fingerprint != interpretation_a.fingerprint
+    assert assessment_b.outcome is assessment_a.outcome
+    assert assessment_b.findings == assessment_a.findings
+    assert assessment_b.fingerprint != assessment_a.fingerprint
+
+    for interpretation, assessment in (
+        (interpretation_b, assessment_a),
+        (interpretation_a, assessment_b),
+    ):
+        policy = _TestStrategyPolicy()
+        with pytest.raises(ValueError, match="source chain"):
+            derive_daily_technical_strategy(interpretation, assessment, policy)
+        assert policy.calls == 0
+
+
+def test_derivation_accepts_canonically_identical_reconstructed_sources() -> None:
+    original_interpretation, original_assessment = _source_chain()
+    reconstructed_interpretation, reconstructed_assessment = _source_chain()
+    assert reconstructed_interpretation is not original_interpretation
+    assert reconstructed_assessment is not original_assessment
+    assert reconstructed_interpretation.to_dict() == original_interpretation.to_dict()
+    assert reconstructed_assessment.to_dict() == original_assessment.to_dict()
+
+    result = derive_daily_technical_strategy(
+        reconstructed_interpretation,
+        original_assessment,
+        _TestStrategyPolicy(),
+    )
+    assert result.source_assessment_fingerprint == original_assessment.fingerprint
+
+
+def test_derivation_rejects_strategy_forged_from_different_valid_assessment() -> None:
+    interpretation, assessment = _source_chain()
+    _, substituted_assessment = _source_chain_for_snapshot(ema_8=13.0)
+    forged = _strategy(
+        source_assessment_fingerprint=substituted_assessment.fingerprint
+    )
+    forged.to_dict()
+
+    policy = _TestStrategyPolicy(returned_result=forged)
+    with pytest.raises(ValueError, match="strategy source correspondence"):
+        derive_daily_technical_strategy(interpretation, assessment, policy)
+    assert policy.calls == 1
