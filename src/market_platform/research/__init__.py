@@ -33,6 +33,11 @@ from market_platform.research.daily_technical_interpretation import (
     DailyTechnicalInterpretationPolicy,
     interpret_daily_technical_research,
 )
+from market_platform.research.daily_technical_strategy import (
+    DailyTechnicalStrategy,
+    DailyTechnicalStrategyPolicy,
+    derive_daily_technical_strategy,
+)
 from market_platform.research.historical_replay_workflow import (
     HistoricalReplayResearchMemberSpecification,
     HistoricalReplayResearchStateModelInstance,
@@ -203,4 +208,7 @@ __all__ = [
     "DailyTechnicalAssessment",
     "interpret_daily_technical_research",
     "assess_daily_technical_interpretation",
+    "DailyTechnicalStrategyPolicy",
+    "DailyTechnicalStrategy",
+    "derive_daily_technical_strategy",
 ]

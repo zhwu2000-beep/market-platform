@@ -24,10 +24,13 @@ from market_platform.research import (
     DailyTechnicalAssessment,
     DailyTechnicalInterpretation,
     DailyTechnicalResearchRequest,
+    DailyTechnicalStrategy,
+    DailyTechnicalStrategyPolicy,
     IntegrityCheckedDailyTechnicalResearchWorkflow,
     ResearchTimeframe,
     assess_daily_technical_interpretation,
     construct_daily_technical_analysis_profile,
+    derive_daily_technical_strategy,
     interpret_daily_technical_research,
 )
 from market_platform.research.classic_daily_technical import (
@@ -1073,8 +1076,8 @@ def test_v073_runner_boundaries_reject_exact_model_subclasses(
 
 
 def test_root_exports_are_exact_append_and_models_are_non_actionable() -> None:
-    assert len(research.__all__) == 90
-    assert research.__all__[-6:] == [
+    assert len(research.__all__) == 93
+    assert research.__all__[-9:-3] == [
         "DailyTechnicalInterpretationPolicy",
         "DailyTechnicalAssessmentPolicy",
         "DailyTechnicalInterpretation",
@@ -1082,6 +1085,24 @@ def test_root_exports_are_exact_append_and_models_are_non_actionable() -> None:
         "interpret_daily_technical_research",
         "assess_daily_technical_interpretation",
     ]
+    assert research.__all__[-3:] == [
+        "DailyTechnicalStrategyPolicy",
+        "DailyTechnicalStrategy",
+        "derive_daily_technical_strategy",
+    ]
+    assert research.DailyTechnicalStrategyPolicy is DailyTechnicalStrategyPolicy
+    assert research.DailyTechnicalStrategy is DailyTechnicalStrategy
+    assert research.derive_daily_technical_strategy is derive_daily_technical_strategy
+    non_root_strategy_exports = {
+        "DailyTechnicalStrategyMode",
+        "DailyTechnicalStrategyRuleCode",
+        "ClassicDailyTechnicalStrategyPolicy",
+        "ClassicDailyTechnicalStrategyConfiguration",
+        "TechnicalPolicyKind",
+        "TechnicalPolicyIdentity",
+    }
+    assert non_root_strategy_exports.isdisjoint(research.__all__)
+    assert all(not hasattr(research, name) for name in non_root_strategy_exports)
     assert not {
         "recommendation",
         "action",
