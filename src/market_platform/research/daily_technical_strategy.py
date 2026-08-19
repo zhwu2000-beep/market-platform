@@ -2,14 +2,30 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import Protocol, runtime_checkable
 
 from market_platform._fingerprint import canonical_fingerprint
 from market_platform.instruments.identity import CanonicalInstrumentId
+from market_platform.research.daily_technical_assessment import (
+    DailyTechnicalAssessment,
+    DailyTechnicalAssessmentFinding,
+    DailyTechnicalAssessmentOutcome,
+    _detach_interpretation_semantics,
+    build_classic_assessment_findings,
+    classic_assessment_outcome,
+)
+from market_platform.research.daily_technical_interpretation import (
+    DailyTechnicalInterpretation,
+)
 from market_platform.research.technical_policy import (
+    CLASSIC_DAILY_TECHNICAL_INTERPRETATION_CONFIGURATION_SCHEMA,
+    ClassicDailyTechnicalAssessmentConfiguration,
+    ClassicDailyTechnicalInterpretationConfiguration,
     TechnicalPolicyIdentity,
     TechnicalPolicyKind,
     copy_technical_policy_identity,
@@ -170,7 +186,164 @@ class DailyTechnicalStrategy:
         return {**self._projection(), "fingerprint": self.fingerprint}
 
 
+@runtime_checkable
+class DailyTechnicalStrategyPolicy(Protocol):
+    @property
+    def policy_identity(self) -> TechnicalPolicyIdentity: ...
+
+    def determine(
+        self,
+        interpretation: DailyTechnicalInterpretation,
+        assessment: DailyTechnicalAssessment,
+    ) -> DailyTechnicalStrategy: ...
+
+
+@dataclass(frozen=True, slots=True)
+class _DetachedAssessmentSemantics:
+    schema_version: str
+    canonical_instrument_id: tuple[tuple[str, object], ...]
+    analysis_as_of: datetime
+    source_interpretation_fingerprint: str
+    assessment_policy_identity: TechnicalPolicyIdentity
+    outcome: DailyTechnicalAssessmentOutcome
+    findings: tuple[DailyTechnicalAssessmentFinding, ...]
+    fingerprint: str
+    complete_source_projection: str
+
+
+def _detach_assessment_semantics(
+    assessment: DailyTechnicalAssessment,
+) -> _DetachedAssessmentSemantics:
+    findings = tuple(
+        DailyTechnicalAssessmentFinding(
+            item.kind,
+            item.code,
+            tuple(item.comparison_evidence_ids),
+        )
+        for item in assessment.findings
+    )
+    return _DetachedAssessmentSemantics(
+        schema_version=assessment.schema_version,
+        canonical_instrument_id=tuple(
+            sorted(assessment.canonical_instrument_id.to_dict().items())
+        ),
+        analysis_as_of=assessment.analysis_as_of,
+        source_interpretation_fingerprint=(
+            assessment.source_interpretation_fingerprint
+        ),
+        assessment_policy_identity=copy_technical_policy_identity(
+            assessment.assessment_policy_identity
+        ),
+        outcome=assessment.outcome,
+        findings=findings,
+        fingerprint=assessment.fingerprint,
+        complete_source_projection=json.dumps(
+            assessment.to_dict(), sort_keys=True, separators=(",", ":")
+        ),
+    )
+
+
+def derive_daily_technical_strategy(
+    interpretation: DailyTechnicalInterpretation,
+    assessment: DailyTechnicalAssessment,
+    policy: DailyTechnicalStrategyPolicy,
+) -> DailyTechnicalStrategy:
+    if type(interpretation) is not DailyTechnicalInterpretation:
+        raise TypeError("interpretation must be an exact DailyTechnicalInterpretation")
+    if type(assessment) is not DailyTechnicalAssessment:
+        raise TypeError("assessment must be an exact DailyTechnicalAssessment")
+    interpretation._validate()
+    assessment._validate()
+    interpretation_before = _detach_interpretation_semantics(interpretation)
+    assessment_before = _detach_assessment_semantics(assessment)
+    interpretation_policy = interpretation_before.interpretation_policy_identity
+    if (
+        interpretation_policy.policy_id != "classic_daily_technical"
+        or interpretation_policy.behavioral_revision != "1.0.0"
+        or interpretation_policy.configuration_schema
+        != CLASSIC_DAILY_TECHNICAL_INTERPRETATION_CONFIGURATION_SCHEMA
+        or type(interpretation_policy.configuration)
+        is not ClassicDailyTechnicalInterpretationConfiguration
+    ):
+        raise ValueError(
+            "interpretation policy is incompatible with classic assessment"
+        )
+    assessment_policy = assessment_before.assessment_policy_identity
+    if (
+        assessment_policy.policy_kind
+        is not TechnicalPolicyKind.DAILY_TECHNICAL_ASSESSMENT
+    ):
+        raise ValueError("assessment policy identity kind is invalid")
+    if type(assessment_policy.configuration) is not (
+        ClassicDailyTechnicalAssessmentConfiguration
+    ):
+        raise ValueError("assessment policy configuration type is unsupported")
+    if (
+        assessment_before.canonical_instrument_id
+        != interpretation_before.canonical_instrument_id
+        or assessment_before.analysis_as_of != interpretation_before.analysis_as_of
+        or assessment_before.source_interpretation_fingerprint
+        != interpretation_before.fingerprint
+    ):
+        raise ValueError("interpretation and assessment source chain is incoherent")
+    if any(
+        evidence_id not in interpretation_before.comparison_evidence_ids
+        for finding in assessment_before.findings
+        for evidence_id in finding.comparison_evidence_ids
+    ):
+        raise ValueError("assessment finding references missing comparison evidence")
+    expected_findings = build_classic_assessment_findings(
+        interpretation_before  # type: ignore[arg-type]
+    )
+    if assessment_before.findings != expected_findings:
+        raise ValueError("assessment findings are not complete and exact")
+    expected_outcome = classic_assessment_outcome(
+        interpretation_before,  # type: ignore[arg-type]
+        expected_findings,
+    )
+    if assessment_before.outcome is not expected_outcome:
+        raise ValueError("assessment outcome does not match precedence rules")
+    try:
+        policy_before = copy_technical_policy_identity(policy.policy_identity)
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("strategy policy identity is invalid") from exc
+    if policy_before.policy_kind is not TechnicalPolicyKind.DAILY_TECHNICAL_STRATEGY:
+        raise ValueError("strategy policy identity kind is invalid")
+    result = policy.determine(interpretation, assessment)
+    interpretation._validate()
+    assessment._validate()
+    interpretation_after = _detach_interpretation_semantics(interpretation)
+    assessment_after = _detach_assessment_semantics(assessment)
+    if interpretation_after != interpretation_before:
+        raise ValueError("source interpretation drifted during invocation")
+    if assessment_after != assessment_before:
+        raise ValueError("source assessment drifted during invocation")
+    try:
+        policy_after = copy_technical_policy_identity(policy.policy_identity)
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("post-call strategy policy identity is invalid") from exc
+    if policy_before.to_dict() != policy_after.to_dict():
+        raise ValueError("strategy policy identity drifted during invocation")
+    if type(result) is not DailyTechnicalStrategy:
+        raise TypeError("policy must return an exact DailyTechnicalStrategy")
+    result._validate()
+    if result.strategy_policy_identity.to_dict() != policy_before.to_dict():
+        raise ValueError("strategy does not correspond to pre-call policy identity")
+    result_instrument = tuple(sorted(result.canonical_instrument_id.to_dict().items()))
+    if (
+        result_instrument != interpretation_before.canonical_instrument_id
+        or result_instrument != assessment_before.canonical_instrument_id
+        or result.analysis_as_of != interpretation_before.analysis_as_of
+        or result.analysis_as_of != assessment_before.analysis_as_of
+        or result.source_assessment_fingerprint != assessment_before.fingerprint
+    ):
+        raise ValueError("strategy source correspondence is invalid")
+    return result
+
+
 __all__ = [
+    "DailyTechnicalStrategyPolicy",
+    "derive_daily_technical_strategy",
     "DAILY_TECHNICAL_STRATEGY_SCHEMA",
     "DailyTechnicalStrategy",
     "DailyTechnicalStrategyMode",
