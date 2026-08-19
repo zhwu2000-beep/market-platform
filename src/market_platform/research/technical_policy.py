@@ -17,6 +17,9 @@ CLASSIC_DAILY_TECHNICAL_INTERPRETATION_CONFIGURATION_SCHEMA = (
 CLASSIC_DAILY_TECHNICAL_ASSESSMENT_CONFIGURATION_SCHEMA = (
     "classic_daily_technical_assessment_configuration/v1"
 )
+CLASSIC_DAILY_TECHNICAL_STRATEGY_CONFIGURATION_SCHEMA = (
+    "classic_daily_technical_strategy_configuration/v1"
+)
 
 _IDENTIFIER_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,127}", re.ASCII)
 _REVISION_PATTERN = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+", re.ASCII)
@@ -27,6 +30,7 @@ _FINGERPRINT_PATTERN = re.compile(r"sha256:[0-9a-f]{64}", re.ASCII)
 class TechnicalPolicyKind(StrEnum):
     DAILY_TECHNICAL_INTERPRETATION = "daily_technical_interpretation"
     DAILY_TECHNICAL_ASSESSMENT = "daily_technical_assessment"
+    DAILY_TECHNICAL_STRATEGY = "daily_technical_strategy"
 
 
 def _number(value: object, name: str) -> float:
@@ -95,9 +99,21 @@ class ClassicDailyTechnicalAssessmentConfiguration:
         return {}
 
 
+@dataclass(frozen=True, slots=True)
+class ClassicDailyTechnicalStrategyConfiguration:
+    def _validate(self) -> None:
+        if self.to_dict():
+            raise ValueError("strategy configuration must remain empty")
+
+    def to_dict(self, *, fingerprint_floats: bool = False) -> dict[str, object]:
+        del fingerprint_floats
+        return {}
+
+
 type TechnicalPolicyConfiguration = (
     ClassicDailyTechnicalInterpretationConfiguration
     | ClassicDailyTechnicalAssessmentConfiguration
+    | ClassicDailyTechnicalStrategyConfiguration
 )
 
 
@@ -115,6 +131,9 @@ def _copy_configuration(value: object) -> TechnicalPolicyConfiguration:
     if type(value) is ClassicDailyTechnicalAssessmentConfiguration:
         value._validate()
         return ClassicDailyTechnicalAssessmentConfiguration()
+    if type(value) is ClassicDailyTechnicalStrategyConfiguration:
+        value._validate()
+        return ClassicDailyTechnicalStrategyConfiguration()
     raise TypeError("configuration must be an exact supported typed configuration")
 
 
@@ -196,6 +215,10 @@ class TechnicalPolicyIdentity:
                 ClassicDailyTechnicalAssessmentConfiguration,
                 CLASSIC_DAILY_TECHNICAL_ASSESSMENT_CONFIGURATION_SCHEMA,
             ),
+            TechnicalPolicyKind.DAILY_TECHNICAL_STRATEGY: (
+                ClassicDailyTechnicalStrategyConfiguration,
+                CLASSIC_DAILY_TECHNICAL_STRATEGY_CONFIGURATION_SCHEMA,
+            ),
         }[retained["policy_kind"]]
         if type(configuration) is not expected_type:
             raise ValueError("policy kind and configuration type do not correspond")
@@ -241,8 +264,10 @@ __all__ = [
     "TECHNICAL_POLICY_IDENTITY_SCHEMA",
     "CLASSIC_DAILY_TECHNICAL_INTERPRETATION_CONFIGURATION_SCHEMA",
     "CLASSIC_DAILY_TECHNICAL_ASSESSMENT_CONFIGURATION_SCHEMA",
+    "CLASSIC_DAILY_TECHNICAL_STRATEGY_CONFIGURATION_SCHEMA",
     "TechnicalPolicyKind",
     "TechnicalPolicyIdentity",
     "ClassicDailyTechnicalInterpretationConfiguration",
     "ClassicDailyTechnicalAssessmentConfiguration",
+    "ClassicDailyTechnicalStrategyConfiguration",
 ]
