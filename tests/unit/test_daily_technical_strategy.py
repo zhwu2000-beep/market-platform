@@ -10,6 +10,9 @@ import pytest
 
 from market_platform._fingerprint import canonical_fingerprint
 from market_platform.instruments.identity import CanonicalInstrumentId
+from market_platform.research.classic_daily_technical import (
+    ClassicDailyTechnicalStrategyPolicy,
+)
 from market_platform.research.daily_technical_assessment import (
     DailyTechnicalAssessment,
     DailyTechnicalAssessmentFinding,
@@ -19,6 +22,7 @@ from market_platform.research.daily_technical_assessment import (
     classic_assessment_outcome,
 )
 from market_platform.research.daily_technical_interpretation import (
+    DailyTechnicalDirectionalState,
     DailyTechnicalInterpretation,
     build_classic_comparison_evidence,
     classic_states,
@@ -118,19 +122,31 @@ def _strategy(
     )
 
 
-def _interpretation(**changes: object) -> DailyTechnicalInterpretation:
+def _interpretation(
+    *,
+    snapshot_changes: dict[str, object] | None = None,
+    **changes: object,
+) -> DailyTechnicalInterpretation:
     configuration = ClassicDailyTechnicalInterpretationConfiguration()
+    snapshot_values: dict[str, object] = {
+        "ema_8": 12.0,
+        "ema_20": 11.0,
+        "latest_close": 20.0,
+        "ema_144": 10.0,
+        "ema_169": 9.0,
+        "macd_line": 2.0,
+        "macd_signal": 1.0,
+        "rsi_14": 60.0,
+        "realized_volatility": 0.2,
+        "distance_from_ema20_percent": 0.0,
+    }
+    snapshot_values.update(snapshot_changes or {})
+    distance = snapshot_values.pop("distance_from_ema20_percent")
     snapshot = SimpleNamespace(
-        ema_8=12.0,
-        ema_20=11.0,
-        latest_close=20.0,
-        ema_144=10.0,
-        ema_169=9.0,
-        macd_line=2.0,
-        macd_signal=1.0,
-        rsi_14=60.0,
-        realized_volatility=0.2,
-        volatility_references=SimpleNamespace(distance_from_ema20_percent=0.0),
+        **snapshot_values,
+        volatility_references=SimpleNamespace(
+            distance_from_ema20_percent=distance
+        ),
     )
     trend, momentum, volatility, extension = classic_states(
         snapshot,
@@ -179,6 +195,13 @@ def _assessment(
 
 def _source_chain() -> tuple[DailyTechnicalInterpretation, DailyTechnicalAssessment]:
     interpretation = _interpretation()
+    return interpretation, _assessment(interpretation)
+
+
+def _source_chain_for_snapshot(
+    **snapshot_changes: object,
+) -> tuple[DailyTechnicalInterpretation, DailyTechnicalAssessment]:
+    interpretation = _interpretation(snapshot_changes=snapshot_changes)
     return interpretation, _assessment(interpretation)
 
 
@@ -568,6 +591,196 @@ def test_strategy_policy_identity_is_deterministic_and_canonical() -> None:
     assert first.to_dict() == expected
     assert second.to_dict() == expected
     assert first.fingerprint == second.fingerprint
+
+
+def test_classic_strategy_policy_has_exact_deterministic_identity_and_configuration(
+) -> None:
+    first = ClassicDailyTechnicalStrategyPolicy()
+    second = ClassicDailyTechnicalStrategyPolicy()
+
+    assert isinstance(first, DailyTechnicalStrategyPolicy)
+    assert type(first.configuration) is ClassicDailyTechnicalStrategyConfiguration
+    assert first.configuration.to_dict() == {}
+    assert not hasattr(first.configuration, "__dict__")
+    assert first.policy_identity.to_dict() == _strategy_identity().to_dict()
+    assert second.policy_identity.to_dict() == first.policy_identity.to_dict()
+    assert second.policy_identity.fingerprint == first.policy_identity.fingerprint
+
+
+@pytest.mark.parametrize(
+    (
+        "snapshot_changes",
+        "trend_direction",
+        "momentum_direction",
+        "outcome",
+        "mode",
+        "rule_code",
+    ),
+    [
+        (
+            {},
+            DailyTechnicalDirectionalState.POSITIVE,
+            DailyTechnicalDirectionalState.POSITIVE,
+            DailyTechnicalAssessmentOutcome.ALIGNED,
+            DailyTechnicalStrategyMode.POSITIVE_DIRECTIONAL_CONTINUATION,
+            DailyTechnicalStrategyRuleCode.ALIGNED_POSITIVE_CONTINUATION,
+        ),
+        (
+            {
+                "ema_8": 8.0,
+                "ema_20": 11.0,
+                "latest_close": 5.0,
+                "ema_144": 10.0,
+                "ema_169": 9.0,
+                "macd_line": -2.0,
+                "macd_signal": -1.0,
+                "rsi_14": 40.0,
+            },
+            DailyTechnicalDirectionalState.NEGATIVE,
+            DailyTechnicalDirectionalState.NEGATIVE,
+            DailyTechnicalAssessmentOutcome.ALIGNED,
+            DailyTechnicalStrategyMode.NEGATIVE_DIRECTIONAL_CONTINUATION,
+            DailyTechnicalStrategyRuleCode.ALIGNED_NEGATIVE_CONTINUATION,
+        ),
+        (
+            {"latest_close": 5.0},
+            DailyTechnicalDirectionalState.MIXED,
+            DailyTechnicalDirectionalState.POSITIVE,
+            DailyTechnicalAssessmentOutcome.MIXED,
+            DailyTechnicalStrategyMode.NO_ACTIVE_STRATEGY,
+            DailyTechnicalStrategyRuleCode.MIXED_NO_ACTIVE_STRATEGY,
+        ),
+        (
+            {"rsi_14": 75.0},
+            DailyTechnicalDirectionalState.POSITIVE,
+            DailyTechnicalDirectionalState.POSITIVE,
+            DailyTechnicalAssessmentOutcome.CAUTION,
+            DailyTechnicalStrategyMode.NO_ACTIVE_STRATEGY,
+            DailyTechnicalStrategyRuleCode.CAUTION_NO_ACTIVE_STRATEGY,
+        ),
+        (
+            {"macd_line": None},
+            DailyTechnicalDirectionalState.POSITIVE,
+            DailyTechnicalDirectionalState.UNAVAILABLE,
+            DailyTechnicalAssessmentOutcome.INSUFFICIENT_DATA,
+            DailyTechnicalStrategyMode.NO_ACTIVE_STRATEGY,
+            (
+                DailyTechnicalStrategyRuleCode
+                .INSUFFICIENT_DATA_NO_ACTIVE_STRATEGY
+            ),
+        ),
+    ],
+)
+def test_classic_strategy_policy_implements_exact_five_row_mapping(
+    snapshot_changes: dict[str, object],
+    trend_direction: DailyTechnicalDirectionalState,
+    momentum_direction: DailyTechnicalDirectionalState,
+    outcome: DailyTechnicalAssessmentOutcome,
+    mode: DailyTechnicalStrategyMode,
+    rule_code: DailyTechnicalStrategyRuleCode,
+) -> None:
+    interpretation, assessment = _source_chain_for_snapshot(**snapshot_changes)
+
+    assert interpretation.trend_direction is trend_direction
+    assert interpretation.momentum_direction is momentum_direction
+    assert assessment.outcome is outcome
+
+    result = ClassicDailyTechnicalStrategyPolicy().determine(
+        interpretation, assessment
+    )
+
+    assert result.mode is mode
+    assert result.rule_code is rule_code
+    assert result.canonical_instrument_id.to_dict() == (
+        interpretation.canonical_instrument_id.to_dict()
+    )
+    assert result.analysis_as_of == interpretation.analysis_as_of
+    assert result.source_assessment_fingerprint == assessment.fingerprint
+    assert result.strategy_policy_identity.to_dict() == (
+        ClassicDailyTechnicalStrategyPolicy().policy_identity.to_dict()
+    )
+    assert set(result.to_dict()) == {
+        "schema_version",
+        "canonical_instrument_id",
+        "analysis_as_of",
+        "source_assessment_fingerprint",
+        "strategy_policy_identity",
+        "mode",
+        "rule_code",
+        "fingerprint",
+    }
+
+
+def test_classic_strategy_policy_fails_closed_for_forged_aligned_mixed_state(
+) -> None:
+    interpretation, assessment = _source_chain_for_snapshot(latest_close=5.0)
+    assert interpretation.trend_direction is DailyTechnicalDirectionalState.MIXED
+    assert assessment.outcome is DailyTechnicalAssessmentOutcome.MIXED
+
+    object.__setattr__(
+        assessment,
+        "outcome",
+        DailyTechnicalAssessmentOutcome.ALIGNED,
+    )
+    object.__setattr__(
+        assessment,
+        "fingerprint",
+        canonical_fingerprint(assessment._fingerprint_payload()),
+    )
+    assessment._validate()
+
+    with pytest.raises(
+        ValueError, match="aligned assessment has unsupported direction semantics"
+    ):
+        ClassicDailyTechnicalStrategyPolicy().determine(interpretation, assessment)
+
+
+def test_classic_strategy_policy_is_deterministic_and_succeeds_through_runner(
+) -> None:
+    interpretation, assessment = _source_chain()
+    policy = ClassicDailyTechnicalStrategyPolicy()
+
+    direct_first = policy.determine(interpretation, assessment)
+    direct_second = policy.determine(interpretation, assessment)
+    derived = derive_daily_technical_strategy(interpretation, assessment, policy)
+
+    assert direct_first.to_dict() == direct_second.to_dict()
+    assert direct_first.fingerprint == direct_second.fingerprint
+    assert derived.to_dict() == direct_first.to_dict()
+    assert derived.fingerprint == direct_first.fingerprint
+
+
+def test_classic_strategy_semantics_do_not_depend_on_raw_indicator_values() -> None:
+    baseline_interpretation, baseline_assessment = _source_chain()
+    changed_interpretation, changed_assessment = _source_chain_for_snapshot(
+        ema_8=13.0,
+        ema_20=10.0,
+        latest_close=21.0,
+        ema_144=9.0,
+        ema_169=8.0,
+        macd_line=3.0,
+        macd_signal=0.0,
+        rsi_14=55.0,
+        realized_volatility=0.22,
+        distance_from_ema20_percent=1.0,
+    )
+    assert baseline_interpretation.fingerprint != changed_interpretation.fingerprint
+    assert baseline_assessment.fingerprint != changed_assessment.fingerprint
+    assert (
+        baseline_interpretation.trend_direction,
+        baseline_interpretation.momentum_direction,
+        baseline_assessment.outcome,
+    ) == (
+        changed_interpretation.trend_direction,
+        changed_interpretation.momentum_direction,
+        changed_assessment.outcome,
+    )
+
+    policy = ClassicDailyTechnicalStrategyPolicy()
+    baseline = policy.determine(baseline_interpretation, baseline_assessment)
+    changed = policy.determine(changed_interpretation, changed_assessment)
+
+    assert (baseline.mode, baseline.rule_code) == (changed.mode, changed.rule_code)
 
 
 def test_released_interpretation_policy_identity_is_unchanged() -> None:
