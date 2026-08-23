@@ -2,10 +2,13 @@
 
 ## Status
 
-Proposed.
+Accepted for v0.76.0 Agent Exposure Foundation.
 
-This decision is not part of the v0.75.0 implementation scope. It constrains
-future Agent exposure work only.
+This acceptance establishes only the Agent Exposure architecture foundation.
+V0.76 implements explicit capability metadata and allow-listing, a
+capability-specific Python facade, and a bounded Agent response projection.
+Remote Agent runtime, Agent-facing API, LLM, MCP, and transport work remain
+future scope.
 
 ## Context
 
@@ -26,19 +29,20 @@ determines what descriptive strategy logic is applicable. None of these values
 is a trade instruction, portfolio decision, risk approval, or execution
 authorization.
 
-ADR 0032 proposes a transport-neutral application boundary that composes this
+ADR 0032 establishes a transport-neutral application boundary that composes this
 pipeline while preserving domain authority and correspondence. It also
-establishes that future CLI, HTTP, UI, and Agent consumers must use the
-application service rather than reproduce domain orchestration.
+establishes that consumer and exposure layers must use the application service
+rather than reproduce domain orchestration.
 
-A future AI Agent may make these capabilities easier to discover and use
-through natural-language interaction. Without an explicit boundary, however,
-the Agent could become a second source of financial semantics, call internal
-runners directly, reinterpret descriptive Strategy as trading action, or
-connect intelligence output to execution authority.
+A future remote AI Agent runtime may make these capabilities easier to
+discover and use through natural-language interaction. Without an explicit
+boundary, however, the Agent could become a second source of financial
+semantics, call internal runners directly, reinterpret descriptive Strategy as
+trading action, or connect intelligence output to execution authority.
 
 This decision defines the dependency direction and semantic limits for such an
-Agent. It does not implement the Agent or any Agent-facing API.
+Agent. V0.76 implements only the in-process Agent Exposure Foundation; it does
+not implement a remote Agent runtime or Agent-facing API.
 
 ## Decision
 
@@ -114,12 +118,14 @@ explicitly included in the Agent exposure allow-list may be invoked through
 the facade. Reflection, generic service invocation, and automatic exposure of
 new application services are prohibited.
 
-The Agent Exposure Adapter or Facade owns only transport adaptation, Agent tool
-schemas, capability discovery metadata, and the explicit capability
-allow-list. It owns no financial semantics, policy selection logic, domain
+The implemented Agent Exposure Boundary owns only capability discovery
+metadata, the explicit capability allow-list, a capability-specific facade,
+and bounded response projections. Separately approved future adapters may own
+transport adaptation and Agent tool schemas. Neither the foundation nor those
+adapters own financial semantics, policy selection logic, domain
 orchestration, canonicalization, or result reinterpretation. Capability
-metadata describes availability and request and response shapes; it does not
-duplicate financial rules.
+metadata describes availability and application request, application
+response, and Agent projection shapes; it does not duplicate financial rules.
 
 Application adapters receive caller intent and own request decoding,
 canonicalization, validation, timestamp normalization, and identity resolution
@@ -200,9 +206,10 @@ Its outputs remain descriptive and non-actionable. In particular:
 - positive directional continuation is not buy or open long; and
 - negative directional continuation is not sell, short, or exit long.
 
-ADR 0032's application service is the intended initial composition pattern.
-Any Agent-accessible transport projection is a separate contract and must not
-bypass that service or recreate its orchestration.
+ADR 0032's application service is the implemented initial composition
+boundary. The v0.76 Agent response projection is a separate bounded contract.
+Any future transport projection must not bypass that service or recreate its
+orchestration.
 
 #### Options Intelligence
 
@@ -359,9 +366,10 @@ ingress must not bypass the existing Trading Signal and Order Intent separation
 or create a path from webhook delivery to Trade Planning, Risk, Execution, or
 broker activity. Detailed ingress behavior requires a separate ADR.
 
-### Future API capability principles
+### Agent exposure and future remote API principles
 
-Future Agent-facing APIs follow these principles:
+The implemented Agent Exposure Foundation and future Agent-facing remote APIs
+follow these principles:
 
 1. **Explicit exposure**
    Only allow-listed intelligence capabilities are available through the Agent
@@ -452,7 +460,7 @@ Future Agent-facing APIs follow these principles:
 - The Agent Exposure Boundary provides an explicit allow-list rather than
   exposing the generic application surface.
 - Application capabilities remain the sole supported composition surface
-  behind exposed Agent tools.
+  behind the exposed Agent facade and any future Agent tools.
 - Domain exports remain available to trusted application composition but are
   not Agent contracts.
 - Agent memory and preferences remain outside the platform and cannot become
@@ -467,11 +475,12 @@ Future Agent-facing APIs follow these principles:
   trade intent or execution authority.
 - TradingView visualization and untrusted event ingress cannot share an
   authority boundary.
-- Agent-facing transport work requires separate versioned projections,
-  authentication, resource limits, and operational design.
-- This decision does not make ADR 0032's proposed v0.75 service externally
-  accessible and does not alter its request, response, policy, or failure
-  contracts.
+- Agent-facing remote API and transport work remains future scope and requires
+  separate authentication, resource limits, protocol mapping, and operational
+  design.
+- V0.76 exposes ADR 0032's released v0.75 operation only through the explicit
+  in-process facade and bounded projection; it does not alter the application
+  request, response, policy, or failure contracts.
 
 ## Rejected alternatives
 
@@ -524,7 +533,9 @@ authorization, broker mapping, and submission into one authority boundary.
 This decision introduces:
 
 - no LLM dependency inside `market-platform`;
-- no Agent implementation;
+- no remote Agent runtime;
+- no Agent-facing remote API;
+- no MCP server, client, or tool integration;
 - no Agent memory or user-profile storage;
 - no conversational interface;
 - no autonomous trading;
@@ -537,7 +548,7 @@ This decision introduces:
 - no portfolio allocation, rebalancing, or investment decision;
 - no TradingView visualization integration;
 - no TradingView webhook ingress;
-- no new API transport;
+- no HTTP or other transport;
 - no changes to existing domain semantics;
 - no compatibility bridge to the legacy Strategy family; and
-- no code or application behavior.
+- no changes to existing application or domain behavior.
