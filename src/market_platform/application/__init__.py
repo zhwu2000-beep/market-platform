@@ -1,5 +1,14 @@
 """Transport-neutral application boundary."""
 
+from market_platform.application.daily_technical_strategy import (
+    DAILY_TECHNICAL_STRATEGY_APPLICATION_REQUEST_SCHEMA_VERSION,
+    DAILY_TECHNICAL_STRATEGY_APPLICATION_RESPONSE_SCHEMA_VERSION,
+    DailyTechnicalStrategyApplicationRequest,
+    DailyTechnicalStrategyApplicationResponse,
+)
+from market_platform.application.daily_technical_strategy_service import (
+    DailyTechnicalStrategyApplicationService,
+)
 from market_platform.application.errors import (
     HistoricalReplayResearchApplicationError,
     HistoricalReplayResearchApplicationRequestError,
@@ -104,4 +113,9 @@ __all__ = [
     "decode_order_intent_application_request",
     "decode_trading_signal_application_request",
     "decode_historical_replay_research_application_request",
+    "DAILY_TECHNICAL_STRATEGY_APPLICATION_REQUEST_SCHEMA_VERSION",
+    "DAILY_TECHNICAL_STRATEGY_APPLICATION_RESPONSE_SCHEMA_VERSION",
+    "DailyTechnicalStrategyApplicationRequest",
+    "DailyTechnicalStrategyApplicationResponse",
+    "DailyTechnicalStrategyApplicationService",
 ]
