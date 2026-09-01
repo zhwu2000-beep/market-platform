@@ -535,7 +535,9 @@ def test_governed_approval_source_is_private_closed_and_not_replaceable_from_roo
         "_resolve_governed_evidence_contract_authorization",
     }
 
-    assert authorization._GOVERNED_EVIDENCE_AUTHORIZATION_CATALOG.authorizations == ()
+    assert (
+        len(authorization._GOVERNED_EVIDENCE_AUTHORIZATION_CATALOG.authorizations) == 1
+    )
     assert private_names.isdisjoint(authorization.__all__)
     assert all(not hasattr(evidence, name) for name in private_names)
     assert all(
