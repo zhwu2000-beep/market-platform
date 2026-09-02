@@ -1,9 +1,13 @@
 """Shared HTTP client for provider network access."""
 
+import json as json_module
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from datetime import UTC, datetime
+from decimal import Decimal
+from types import MappingProxyType
+from typing import Any, cast
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
@@ -20,7 +24,17 @@ from market_platform.logging import get_logger
 type JsonValue = (
     dict[str, JsonValue] | list[JsonValue] | str | int | float | bool | None
 )
+type ExactJsonValue = (
+    Mapping[str, ExactJsonValue]
+    | tuple[ExactJsonValue, ...]
+    | str
+    | int
+    | Decimal
+    | bool
+    | None
+)
 type SleepFn = Callable[[float], None]
+type ResponseClock = Callable[[], datetime]
 
 DEFAULT_USER_AGENT = "market-platform/0.1.0"
 RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
@@ -31,6 +45,37 @@ SENSITIVE_QUERY_PARAM_NAMES = {
     "key",
     "token",
 }
+_EXACT_JSON_RESULT_SEAL = object()
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class ExactJsonResult:
+    """One immutable exact-decimal JSON transport observation."""
+
+    value: ExactJsonValue
+    response_received_at: datetime
+
+    def __init__(self) -> None:
+        raise TypeError("ExactJsonResult must be created by HTTPClient")
+
+    @classmethod
+    def _create(
+        cls,
+        *,
+        value: object,
+        response_received_at: datetime,
+        seal: object,
+    ) -> ExactJsonResult:
+        if seal is not _EXACT_JSON_RESULT_SEAL:
+            raise TypeError("ExactJsonResult construction is private")
+        result = object.__new__(cls)
+        object.__setattr__(result, "value", _freeze_exact_json(value))
+        object.__setattr__(
+            result,
+            "response_received_at",
+            _canonical_response_received_at(response_received_at),
+        )
+        return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,9 +97,11 @@ class HTTPClient:
         config: HttpClientConfig | None = None,
         client: httpx.Client | None = None,
         sleep: SleepFn = time.sleep,
+        response_clock: ResponseClock | None = None,
     ) -> None:
         self.config = config or HttpClientConfig()
         self._sleep = sleep
+        self._response_clock = _utc_now if response_clock is None else response_clock
         self._owns_client = client is None
         self._client = client or httpx.Client(
             timeout=httpx.Timeout(self.config.timeout_seconds),
@@ -84,6 +131,49 @@ class HTTPClient:
     ) -> JsonValue:
         """Send an HTTP request with retry, logging, and normalized errors."""
 
+        response = self._send_request(
+            method,
+            url,
+            params=params,
+            json=json,
+            headers=headers,
+        )
+        return self._parse_json(response)
+
+    def get_exact_json(
+        self,
+        url: str,
+        *,
+        params: Mapping[str, Any] | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> ExactJsonResult:
+        """Send GET and return immutable JSON with exact decimal numbers."""
+
+        response = self._send_request(
+            "GET",
+            url,
+            params=params,
+            json=None,
+            headers=headers,
+        )
+        response_received_at = self._response_clock()
+        return ExactJsonResult._create(
+            value=self._parse_exact_json(response),
+            response_received_at=response_received_at,
+            seal=_EXACT_JSON_RESULT_SEAL,
+        )
+
+    def _send_request(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: Mapping[str, Any] | None,
+        json: JsonValue | None,
+        headers: Mapping[str, str] | None,
+    ) -> httpx.Response:
+        """Return one successful response through the shared transport policy."""
+
         merged_headers = self._headers(headers)
         attempts = self.config.max_retries + 1
         last_error: DataProviderError | None = None
@@ -111,7 +201,7 @@ class HTTPClient:
                     continue
 
                 self._raise_for_status(response)
-                return self._parse_json(response)
+                return response
             except httpx.RequestError as exc:
                 last_error = NetworkError(f"Network request failed: {exc}")
             except DataProviderError:
@@ -181,6 +271,17 @@ class HTTPClient:
             raise DataProviderError("HTTP response did not contain valid JSON") from exc
         return parsed
 
+    def _parse_exact_json(self, response: httpx.Response) -> object:
+        try:
+            parsed: object = json_module.loads(
+                response.content,
+                parse_float=Decimal,
+                parse_constant=_reject_non_json_number,
+            )
+        except ValueError as exc:
+            raise DataProviderError("HTTP response did not contain valid JSON") from exc
+        return parsed
+
     def _redact_url(self, url: str) -> str:
         parts = urlsplit(url)
         if not parts.query:
@@ -205,6 +306,39 @@ class HTTPClient:
         if key.strip().lower() in SENSITIVE_QUERY_PARAM_NAMES:
             return "[REDACTED]"
         return value
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _canonical_response_received_at(value: object) -> datetime:
+    if type(value) is not datetime:
+        raise TypeError("response clock must return an exact datetime")
+    timestamp = value
+    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+        raise ValueError("response clock must return a timezone-aware datetime")
+    return timestamp.astimezone(UTC)
+
+
+def _reject_non_json_number(value: str) -> object:
+    raise ValueError(f"non-JSON numeric constant is not supported: {value}")
+
+
+def _freeze_exact_json(value: object) -> ExactJsonValue:
+    if value is None or type(value) in (str, int, bool, Decimal):
+        return cast(str | int | bool | Decimal | None, value)
+    if type(value) is list:
+        return tuple(_freeze_exact_json(item) for item in cast(list[object], value))
+    if type(value) is dict:
+        items = cast(dict[object, object], value)
+        if any(type(key) is not str for key in items):
+            raise DataProviderError("HTTP response JSON object keys must be strings")
+        frozen = {
+            cast(str, key): _freeze_exact_json(item) for key, item in items.items()
+        }
+        return MappingProxyType(frozen)
+    raise DataProviderError("HTTP response contained an unsupported JSON value")
 
 
 def create_http_client() -> HTTPClient:
