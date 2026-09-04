@@ -46,6 +46,11 @@ from market_platform.application.historical_replay_research_resolvers import (
 from market_platform.application.historical_replay_research_service import (
     HistoricalReplayResearchApplicationService,
 )
+from market_platform.application.polygon_completed_daily_evidence_candidate import (
+    PolygonCompletedDailyAcquirer,
+    PolygonCompletedDailyEvidenceCandidateApplicationRequest,
+    PolygonCompletedDailyEvidenceCandidateApplicationService,
+)
 from market_platform.application.trading_signal import (
     ORDER_INTENT_APPLICATION_REQUEST_SCHEMA_VERSION,
     ORDER_INTENT_APPLICATION_RESPONSE_SCHEMA_VERSION,
@@ -118,4 +123,7 @@ __all__ = [
     "DailyTechnicalStrategyApplicationRequest",
     "DailyTechnicalStrategyApplicationResponse",
     "DailyTechnicalStrategyApplicationService",
+    "PolygonCompletedDailyAcquirer",
+    "PolygonCompletedDailyEvidenceCandidateApplicationRequest",
+    "PolygonCompletedDailyEvidenceCandidateApplicationService",
 ]

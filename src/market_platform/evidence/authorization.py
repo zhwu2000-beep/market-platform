@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 
 from market_platform._fingerprint import canonical_fingerprint
 from market_platform.evidence.classification import (
@@ -24,6 +26,181 @@ EVIDENCE_CONTRACT_AUTHORIZATION_SCHEMA_VERSION = "evidence_contract_authorizatio
 _AUTHORIZATION_RECORD_SEAL = object()
 _FINGERPRINT_PATTERN = re.compile(r"sha256:[0-9a-f]{64}", flags=re.ASCII)
 _IDENTITY_PATTERN = re.compile(r"[a-z][a-z0-9._-]{0,127}", flags=re.ASCII)
+
+_POLYGON_COMPLETED_DAILY_OHLCV_GOVERNING_ADR = (
+    "docs/adr/0037-polygon-completed-daily-ohlcv-evidence-ingress.md@"
+    "d9c30a57fef451eb7b5e66850af2d94be128f5fb"
+)
+_POLYGON_COMPLETED_DAILY_OHLCV_SOURCE_DEFINITION: Mapping[str, object] = (
+    MappingProxyType(
+        {
+            "schema_version": "evidence_source_definition/v1",
+            "governing_adr": _POLYGON_COMPLETED_DAILY_OHLCV_GOVERNING_ADR,
+            "vendor_service": "massive.com_formerly_polygon.io",
+            "source_namespace": "massive",
+            "source_id": "stocks_custom_bars_1_day_adjusted_api_polygon_io",
+            "source_version": "1.0.0",
+            "capability": "stocks_custom_bars_aggregates",
+            "http_method": "GET",
+            "api_base": "https://api.polygon.io",
+            "route_template": (
+                "/v2/aggs/ticker/{ticker}/range/{multiplier}/{timespan}/{from}/{to}"
+            ),
+            "multiplier": 1,
+            "timespan": "day",
+            "adjusted": True,
+            "sort": "asc",
+            "limit": 50000,
+            "adjusted_response_proof": "exact_boolean_true",
+            "market_timezone": "America/New_York",
+            "aggregate_window_semantics": "provider_documented_eastern_time",
+            "session_scope": "polygon_qualifying_trades_all_sessions",
+            "timestamp_semantics": "unix_milliseconds_window_start",
+            "completion_filter": (
+                "session_date_before_query_as_of_america_new_york_date"
+            ),
+            "price_adjustment": "split_adjusted_not_dividend_adjusted",
+            "split_adjustment_formula": (
+                "provider_internal_undocumented_not_asserted_or_reconstructed"
+            ),
+            "volume_semantics": (
+                "provider_reported_split_adjusted_aggregate_decimal_capable"
+            ),
+            "numeric_semantics": "finite_decimal_compatible_exact_value",
+            "completeness": (
+                "bounded_single_response_no_unconsumed_next_url_consistent_counts"
+            ),
+        }
+    )
+)
+_POLYGON_COMPLETED_DAILY_OHLCV_SOURCE_DEFINITION_FINGERPRINT = canonical_fingerprint(
+    _POLYGON_COMPLETED_DAILY_OHLCV_SOURCE_DEFINITION
+)
+
+_POLYGON_COMPLETED_DAILY_OHLCV_MATERIAL_DEFINITION: Mapping[str, object] = (
+    MappingProxyType(
+        {
+            "schema_version": "evidence_material_definition/v1",
+            "governing_adr": _POLYGON_COMPLETED_DAILY_OHLCV_GOVERNING_ADR,
+            "schema_id": "polygon_completed_daily_ohlcv_material",
+            "schema_version_id": "1.0.0",
+            "source_definition_fingerprint": (
+                _POLYGON_COMPLETED_DAILY_OHLCV_SOURCE_DEFINITION_FINGERPRINT
+            ),
+            "vendor_service": "massive.com_formerly_polygon.io",
+            "api_base": "https://api.polygon.io",
+            "route_template": (
+                "/v2/aggs/ticker/{ticker}/range/{multiplier}/{timespan}/{from}/{to}"
+            ),
+            "multiplier": 1,
+            "timespan": "1_day",
+            "adjusted": True,
+            "sort": "asc",
+            "limit": 50000,
+            "market_timezone": "America/New_York",
+            "session_scope": "polygon_qualifying_trades_all_sessions",
+            "price_adjustment": "split_adjusted_not_dividend_adjusted",
+            "adjusted_response": True,
+            "volume_semantics": (
+                "provider_reported_split_adjusted_aggregate_decimal_capable"
+            ),
+            "split_adjustment_formula": (
+                "provider_internal_undocumented_not_asserted_or_reconstructed"
+            ),
+            "envelope_fields": (
+                "material_schema",
+                "source_reference",
+                "vendor_service",
+                "api_base",
+                "route_template",
+                "multiplier",
+                "timespan",
+                "adjusted",
+                "sort",
+                "limit",
+                "external_instrument_identity",
+                "canonical_subject",
+                "mapping_resolution_provenance",
+                "start_session_date",
+                "end_session_date",
+                "query_as_of",
+                "market_timezone",
+                "session_scope",
+                "price_adjustment",
+                "adjusted_response",
+                "request_provenance",
+                "provider_request_id",
+                "rows",
+                "row_count",
+            ),
+            "row_fields": (
+                "session_date",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+            ),
+            "date_bounds": "inclusive_start_and_end_start_not_after_end",
+            "row_order": "strictly_ascending_session_date",
+            "duplicate_policy": "reject_duplicate_session_date",
+            "missing_session_policy": "absence_only_no_synthesis",
+            "numeric_normalization": (
+                "finite_base10_no_exponent_no_trailing_fractional_zero_"
+                "nonnegative_zero_no_rounding"
+            ),
+            "volume_type": "decimal_capable_provider_reported_value",
+            "timestamp_to_session_date": "convert_source_t_to_america_new_york",
+            "completion_filter": (
+                "exclude_current_and_future_america_new_york_calendar_dates"
+            ),
+            "empty_material": "permitted_and_not_completeness_proof",
+            "credentials_in_provenance": False,
+            "material_fingerprint": "complete_envelope_excluding_fingerprint",
+        }
+    )
+)
+_POLYGON_COMPLETED_DAILY_OHLCV_MATERIAL_DEFINITION_FINGERPRINT = canonical_fingerprint(
+    _POLYGON_COMPLETED_DAILY_OHLCV_MATERIAL_DEFINITION
+)
+
+_POLYGON_COMPLETED_DAILY_OHLCV_CONTRACT_DEFINITION: Mapping[str, object] = (
+    MappingProxyType(
+        {
+            "schema_version": "governing_evidence_contract_definition/v1",
+            "governing_adr": _POLYGON_COMPLETED_DAILY_OHLCV_GOVERNING_ADR,
+            "contract_namespace": "market_platform.evidence",
+            "contract_id": "polygon_completed_daily_ohlcv",
+            "contract_version": "1.0.0",
+            "evidence_type": "polygon_completed_daily_ohlcv",
+            "information_class": "source_measurement",
+            "authority": "external_origin",
+            "source_definition_fingerprint": (
+                _POLYGON_COMPLETED_DAILY_OHLCV_SOURCE_DEFINITION_FINGERPRINT
+            ),
+            "material_definition_fingerprint": (
+                _POLYGON_COMPLETED_DAILY_OHLCV_MATERIAL_DEFINITION_FINGERPRINT
+            ),
+            "subject_scope": (
+                "one_canonically_resolved_us_equity_or_etf_per_bounded_interval"
+            ),
+            "observation_interval": (
+                "requested_session_bounds_as_half_open_america_new_york_midnights_utc"
+            ),
+            "observed_at": "absent_for_multi_row_interval",
+            "effective_interval": "absent",
+            "published_at": "absent_provider_does_not_supply",
+            "source_revision": "material_fingerprint",
+            "platform_received_at": "explicit_utc_response_receipt",
+            "artifact_created_at": "explicit_utc_not_before_receipt",
+            "query_as_of": "material_provenance_and_completion_cutoff_only",
+            "lifecycle": "candidate_unvalidated_unadmitted_not_consumable",
+        }
+    )
+)
+_POLYGON_COMPLETED_DAILY_OHLCV_CONTRACT_DEFINITION_FINGERPRINT = canonical_fingerprint(
+    _POLYGON_COMPLETED_DAILY_OHLCV_CONTRACT_DEFINITION
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -373,15 +550,6 @@ def _copy_contract_authorization(value: object) -> EvidenceContractAuthorization
     )
 
 
-# ADR0035 approves no production Evidence ingress or source adapter in v0.77.
-# Future governed adapters must add exact immutable records here through a
-# separately reviewed source-code change; runtime callers cannot supply a
-# replacement catalog to artifact construction.
-_GOVERNED_EVIDENCE_AUTHORIZATION_CATALOG = _EvidenceAuthorizationApprovalCatalog(
-    authorizations=()
-)
-
-
 def _identity(value: object, field_name: str) -> str:
     if type(value) is not str or _IDENTITY_PATTERN.fullmatch(value) is None:
         raise ValueError(f"{field_name} must match [a-z][a-z0-9._-]{{0,127}}")
@@ -404,6 +572,51 @@ def _fingerprint(value: object, field_name: str) -> str:
     if type(value) is not str or _FINGERPRINT_PATTERN.fullmatch(value) is None:
         raise ValueError(f"{field_name} must be a lowercase sha256 fingerprint")
     return value
+
+
+_POLYGON_COMPLETED_DAILY_OHLCV_SOURCE = EvidenceSourceReference(
+    namespace="massive",
+    source_id="stocks_custom_bars_1_day_adjusted_api_polygon_io",
+    source_version="1.0.0",
+    authority=EvidenceAuthority.EXTERNAL_ORIGIN,
+    source_fingerprint=(_POLYGON_COMPLETED_DAILY_OHLCV_SOURCE_DEFINITION_FINGERPRINT),
+)
+_POLYGON_COMPLETED_DAILY_OHLCV_MATERIAL_SCHEMA = EvidenceMaterialSchemaReference(
+    schema_id="polygon_completed_daily_ohlcv_material",
+    schema_version_id="1.0.0",
+    schema_fingerprint=(_POLYGON_COMPLETED_DAILY_OHLCV_MATERIAL_DEFINITION_FINGERPRINT),
+)
+_POLYGON_COMPLETED_DAILY_OHLCV_GOVERNING_CONTRACT = EvidenceContractReference(
+    namespace="market_platform.evidence",
+    contract_id="polygon_completed_daily_ohlcv",
+    contract_version="1.0.0",
+    information_class=EvidenceInformationClass.SOURCE_MEASUREMENT,
+    contract_fingerprint=(
+        _POLYGON_COMPLETED_DAILY_OHLCV_CONTRACT_DEFINITION_FINGERPRINT
+    ),
+)
+_POLYGON_COMPLETED_DAILY_OHLCV_AUTHORIZATION = (
+    _create_evidence_contract_authorization_record(
+        authorization_id="production.polygon_completed_daily_ohlcv",
+        authorization_version="1.0.0",
+        contract_definition=EvidenceContractDefinition(
+            governing_contract=(_POLYGON_COMPLETED_DAILY_OHLCV_GOVERNING_CONTRACT),
+            evidence_type="polygon_completed_daily_ohlcv",
+            information_class=EvidenceInformationClass.SOURCE_MEASUREMENT,
+            material_schema=_POLYGON_COMPLETED_DAILY_OHLCV_MATERIAL_SCHEMA,
+        ),
+        authorized_source=_POLYGON_COMPLETED_DAILY_OHLCV_SOURCE,
+        authority=EvidenceAuthority.EXTERNAL_ORIGIN,
+    )
+)
+
+# ADR0037 approves exactly this one production Evidence semantic conjunction.
+# Future governed adapters must add exact immutable records here through a
+# separately reviewed source-code change; runtime callers cannot supply a
+# replacement catalog to artifact construction.
+_GOVERNED_EVIDENCE_AUTHORIZATION_CATALOG = _EvidenceAuthorizationApprovalCatalog(
+    authorizations=(_POLYGON_COMPLETED_DAILY_OHLCV_AUTHORIZATION,)
+)
 
 
 __all__ = [

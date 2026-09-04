@@ -48,7 +48,7 @@ def create_test_authorization(
 def govern_test_authorizations(
     *authorizations: EvidenceContractAuthorization,
 ) -> Iterator[None]:
-    """Temporarily replace the empty production catalog within one test scope."""
+    """Temporarily replace the production catalog within one test scope."""
 
     test_catalog = _EvidenceAuthorizationApprovalCatalog(
         authorizations=tuple(authorizations)

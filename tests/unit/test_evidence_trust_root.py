@@ -292,10 +292,10 @@ def test_external_origin_approval_cannot_be_laundered_to_platform_origin() -> No
             _mint(reconstructed_platform)
 
 
-def test_production_governance_catalog_is_closed_and_empty_by_default() -> None:
+def test_production_governance_catalog_is_closed_and_rejects_unapproved() -> None:
     catalog = evidence_authorization._GOVERNED_EVIDENCE_AUTHORIZATION_CATALOG
 
-    assert catalog.authorizations == ()
+    assert len(catalog.authorizations) == 1
     with pytest.raises(ValueError, match="not governed/approved"):
         _mint(_authorization())
     assert not hasattr(evidence, "authorize_evidence_contract")
@@ -312,13 +312,14 @@ def test_all_three_test_governed_source_classes_complete_the_lifecycle(
 
 def test_test_scoped_catalog_restores_production_default_deterministically() -> None:
     authorization = _authorization()
+    production_catalog = evidence_authorization._GOVERNED_EVIDENCE_AUTHORIZATION_CATALOG
 
     with govern_test_authorizations(authorization):
         assert _mint(authorization).contract_authorization == authorization
 
     assert (
-        evidence_authorization._GOVERNED_EVIDENCE_AUTHORIZATION_CATALOG.authorizations
-        == ()
+        evidence_authorization._GOVERNED_EVIDENCE_AUTHORIZATION_CATALOG
+        is production_catalog
     )
     with pytest.raises(ValueError, match="not governed/approved"):
         _mint(authorization)

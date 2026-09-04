@@ -34,6 +34,32 @@ finite available values, and all four fingerprints without asserting an exact
 live price. Missing opt-in or credentials remains a skip, not an ordinary-suite
 failure.
 
+## Polygon completed-daily Evidence Candidate smoke
+
+The v0.78 Candidate smoke is opt-in and requires all of:
+
+- `MARKET_PLATFORM_RUN_INTEGRATION_SMOKE=1`;
+- a configured `POLYGON_API_KEY`;
+- `MARKET_PLATFORM_POLYGON_CANDIDATE_MAPPING_PATH` pointing to an external,
+  operator-owned trusted instrument mapping document.
+
+No production mapping document is bundled with the repository. After the
+operator-owned mapping has been separately reviewed, run:
+
+```powershell
+$env:MARKET_PLATFORM_RUN_INTEGRATION_SMOKE = "1"
+$env:MARKET_PLATFORM_POLYGON_CANDIDATE_MAPPING_PATH = "C:\operator\trusted_mapping.json"
+uv run pytest -p no:cacheprovider tests/integration/test_real_provider_smoke.py::test_polygon_completed_daily_evidence_candidate_smoke
+```
+
+Without the opt-in, credential, or external mapping path, the smoke skips before
+constructing the provider and makes no network request. A pass proves only that
+the configured Polygon provider, trusted mapping load, application composition,
+real acquisition, and pure ingress constructed a production-authorized
+Candidate. The Candidate remains unvalidated, unadmitted, and non-consumable;
+no validation, admission, research analysis, or research consumption occurs.
+Live prices and retained row counts are intentionally not fixed expectations.
+
 Real-provider smoke requires `TWELVE_DATA_API_KEY`.
 
 The smoke workflow may create:
