@@ -10,7 +10,7 @@ import asyncio
 import json
 import math
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from numbers import Real
 from pathlib import Path
 
@@ -19,9 +19,17 @@ import pytest
 from market_platform.application.instrument_mapping_codec import (
     load_trusted_instrument_mapping_registry,
 )
+from market_platform.application.polygon_completed_daily_evidence_candidate import (
+    PolygonCompletedDailyEvidenceCandidateApplicationRequest,
+    PolygonCompletedDailyEvidenceCandidateApplicationService,
+)
 from market_platform.config import get_settings
-from market_platform.data.factory import create_default_market_data_service
+from market_platform.data.factory import (
+    create_default_market_data_service,
+    create_polygon_provider,
+)
 from market_platform.data.models import PRICE_COLUMNS
+from market_platform.instruments import ExternalInstrumentIdentity
 from market_platform.research import (
     DailyTechnicalResearchRequest,
     DailyTechnicalResearchWorkflow,
@@ -194,3 +202,58 @@ def test_polygon_verified_daily_technical_research_smoke(tmp_path: Path) -> None
     assert result.research.snapshot.evidence.dataset_content_fingerprint == (
         result.integrity.admitted_dataset_fingerprint
     )
+
+
+@pytest.mark.integration
+def test_polygon_completed_daily_evidence_candidate_smoke() -> None:
+    """Construct one real Candidate from external operator-owned mapping data."""
+
+    settings = get_settings()
+    if not settings.polygon_api_key:
+        pytest.skip("POLYGON_API_KEY is not configured")
+    mapping_path = os.environ.get("MARKET_PLATFORM_POLYGON_CANDIDATE_MAPPING_PATH")
+    if not mapping_path:
+        pytest.skip("MARKET_PLATFORM_POLYGON_CANDIDATE_MAPPING_PATH is not configured")
+
+    registry = load_trusted_instrument_mapping_registry(mapping_path)
+    query_as_of = datetime.now(UTC)
+    requested_to = query_as_of.date() - timedelta(days=1)
+    request = PolygonCompletedDailyEvidenceCandidateApplicationRequest(
+        external_identity=ExternalInstrumentIdentity(
+            namespace="polygon",
+            external_symbol="AAPL",
+            external_venue="NASDAQ",
+        ),
+        mappings=registry.mappings,
+        requested_from=requested_to - timedelta(days=10),
+        requested_to=requested_to,
+        query_as_of=query_as_of,
+    )
+    result = asyncio.run(
+        PolygonCompletedDailyEvidenceCandidateApplicationService(
+            create_polygon_provider()
+        ).execute(request)
+    )
+
+    authorization = result.artifact.contract_authorization
+    assert authorization.authorization_id == (
+        "production.polygon_completed_daily_ohlcv"
+    )
+    assert authorization.authorization_version == "1.0.0"
+    assert result.artifact.evidence_type == "polygon_completed_daily_ohlcv"
+    assert result.material.api_base == "https://api.polygon.io"
+    assert (
+        result.material.query_as_of
+        <= result.artifact.temporal_identity.platform_received_at
+        <= result.artifact.temporal_identity.artifact_created_at
+    )
+    assert not hasattr(result.artifact, "validation")
+    assert not hasattr(result.artifact, "admission")
+    assert not hasattr(result.artifact, "consumable")
+    serialized = json.dumps(
+        {
+            "artifact": result.artifact.to_dict(),
+            "material": result.material.to_dict(),
+        }
+    )
+    assert settings.polygon_api_key not in serialized

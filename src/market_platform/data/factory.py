@@ -6,9 +6,21 @@ from collections.abc import Sequence
 
 from market_platform.config import get_settings
 from market_platform.data.capabilities import parse_provider_order
+from market_platform.data.http import create_http_client
+from market_platform.data.providers.polygon import PolygonProvider
 from market_platform.data.registry import create_default_registry
 from market_platform.data.selection import ProviderCandidate, ProviderSelectionPolicy
 from market_platform.data.service import MarketDataService
+
+
+def create_polygon_provider() -> PolygonProvider:
+    """Create the exact configured Polygon provider."""
+
+    settings = get_settings()
+    return PolygonProvider(
+        http_client=create_http_client(),
+        api_key=settings.polygon_api_key,
+    )
 
 
 def create_default_market_data_service(

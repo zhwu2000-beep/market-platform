@@ -11,10 +11,14 @@ import sys
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 
 import pandas as pd
 
+from market_platform.application import (
+    PolygonCompletedDailyEvidenceCandidateApplicationRequest,
+    PolygonCompletedDailyEvidenceCandidateApplicationService,
+)
 from market_platform.application.instrument_mapping_codec import (
     load_trusted_instrument_mapping_registry,
 )
@@ -30,13 +34,19 @@ from market_platform.data.diagnostics import (
     render_provider_diagnostics_report,
 )
 from market_platform.data.exceptions import ConfigurationError, DataProviderError
-from market_platform.data.factory import create_default_market_data_service
+from market_platform.data.factory import (
+    create_default_market_data_service,
+    create_polygon_provider,
+)
 from market_platform.data.health import (
     ProviderHealthReport,
     build_provider_health_report,
     render_provider_health_report,
 )
-from market_platform.instruments import InstrumentMappingError
+from market_platform.instruments import (
+    ExternalInstrumentIdentity,
+    InstrumentMappingError,
+)
 from market_platform.logging import configure_logging, get_logger
 from market_platform.replay import (
     HistoricalReplayResult,
@@ -81,6 +91,7 @@ from market_platform.trading.instrument import TradingInstrumentIdentity
 
 _REPLAY_DAILY_INTERVAL = "1day"
 _DEFAULT_REPLAY_MAX_BARS = 500
+_CANDIDATE_WARNING = "UNVALIDATED, UNADMITTED CANDIDATE — NOT PERMITTED FOR RESEARCH"
 
 
 class CommandHandler(Protocol):
@@ -236,6 +247,76 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     health_parser.set_defaults(handler=_handle_data_provider_health)
+
+    evidence_parser = subparsers.add_parser(
+        "evidence",
+        help="Evidence inspection commands.",
+    )
+    evidence_subparsers = evidence_parser.add_subparsers(dest="evidence_command")
+    candidate_parser = evidence_subparsers.add_parser(
+        "candidate",
+        help="Candidate construction commands.",
+    )
+    candidate_subparsers = candidate_parser.add_subparsers(dest="candidate_command")
+    polygon_daily_parser = candidate_subparsers.add_parser(
+        "polygon-daily",
+        help="Construct and inspect one Polygon completed-daily Candidate.",
+    )
+    polygon_daily_parser.add_argument(
+        "--ticker",
+        required=True,
+        action=_StoreOnceAction,
+        help="Exact Polygon ticker.",
+    )
+    polygon_daily_parser.add_argument(
+        "--venue",
+        required=True,
+        action=_StoreOnceAction,
+        help="Exact external venue.",
+    )
+    polygon_daily_parser.add_argument(
+        "--instrument-mappings",
+        required=True,
+        action=_StoreOnceAction,
+        metavar="PATH",
+        help="External trusted instrument-mapping document.",
+    )
+    polygon_daily_parser.add_argument(
+        "--requested-from",
+        required=True,
+        type=_parse_iso_date,
+        action=_StoreOnceAction,
+        metavar="YYYY-MM-DD",
+    )
+    polygon_daily_parser.add_argument(
+        "--requested-to",
+        required=True,
+        type=_parse_iso_date,
+        action=_StoreOnceAction,
+        metavar="YYYY-MM-DD",
+    )
+    polygon_daily_parser.add_argument(
+        "--query-as-of",
+        required=True,
+        type=_parse_aware_iso_datetime,
+        action=_StoreOnceAction,
+        metavar="AWARE_ISO_8601_DATETIME",
+    )
+    polygon_daily_parser.add_argument(
+        "--format",
+        choices=["table", "json"],
+        default="table",
+        action=_StoreOnceAction,
+        help="Output format.",
+    )
+    polygon_daily_parser.add_argument(
+        "--view",
+        choices=["summary", "full"],
+        default="summary",
+        action=_StoreOnceAction,
+        help="Inspection view.",
+    )
+    polygon_daily_parser.set_defaults(handler=_handle_evidence_candidate_polygon_daily)
 
     signals_parser = subparsers.add_parser(
         "signals",
@@ -450,6 +531,107 @@ def main(argv: Sequence[str] | None = None) -> None:
     raise SystemExit(run(argv))
 
 
+def _handle_evidence_candidate_polygon_daily(args: argparse.Namespace) -> int:
+    logger = get_logger(__name__)
+    if args.view == "full" and args.format != "json":
+        print(
+            "error: Candidate full view only supports --format json.",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        external_identity = ExternalInstrumentIdentity(
+            namespace="polygon",
+            external_symbol=args.ticker,
+            external_venue=args.venue,
+        )
+    except TypeError, ValueError:
+        print(
+            "error: ticker and venue must be exact canonical values.", file=sys.stderr
+        )
+        return 2
+    if args.requested_from > args.requested_to:
+        print(
+            "error: requested-from must be earlier than or equal to requested-to.",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        registry = load_trusted_instrument_mapping_registry(args.instrument_mappings)
+    except Exception:
+        return _candidate_command_error(
+            logger,
+            "trusted instrument mapping configuration failed",
+        )
+
+    try:
+        provider = create_polygon_provider()
+    except Exception:
+        return _candidate_command_error(
+            logger,
+            "Polygon provider configuration failed",
+        )
+
+    try:
+        request = PolygonCompletedDailyEvidenceCandidateApplicationRequest(
+            external_identity=external_identity,
+            mappings=registry.mappings,
+            requested_from=args.requested_from,
+            requested_to=args.requested_to,
+            query_as_of=args.query_as_of,
+        )
+        service = PolygonCompletedDailyEvidenceCandidateApplicationService(provider)
+    except TypeError, ValueError:
+        return _candidate_command_error(logger, "Candidate construction failed")
+    except Exception:
+        return _candidate_command_error(
+            logger,
+            "unexpected Candidate command failure",
+        )
+
+    try:
+        result = asyncio.run(service.execute(request))
+    except InstrumentMappingError:
+        return _candidate_command_error(
+            logger,
+            "canonical instrument resolution failed",
+        )
+    except DataProviderError:
+        return _candidate_command_error(
+            logger,
+            "Polygon completed-daily acquisition failed",
+        )
+    except TypeError, ValueError:
+        return _candidate_command_error(logger, "Candidate construction failed")
+    except Exception:
+        return _candidate_command_error(
+            logger,
+            "unexpected Candidate command failure",
+        )
+
+    try:
+        rendered_output = _render_polygon_daily_candidate(
+            result,
+            view=args.view,
+            output_format=args.format,
+        )
+    except Exception:
+        return _candidate_command_error(
+            logger,
+            "unexpected Candidate command failure",
+        )
+    print(rendered_output, end="" if rendered_output.endswith("\n") else "\n")
+    return 0
+
+
+def _candidate_command_error(logger: Any, category: str) -> int:
+    message = f"error: {category}."
+    logger.error(message)
+    print(message, file=sys.stderr)
+    return 1
+
+
 def _handle_data_fetch(args: argparse.Namespace) -> int:
     logger = get_logger(__name__)
     symbol = args.symbol.strip().upper()
@@ -630,9 +812,7 @@ def _handle_data_provider_health(args: argparse.Namespace) -> int:
     rendered_output = _render_provider_health_report(report, output_format)
     if output_path is not None:
         _write_output(Path(output_path), rendered_output)
-        print(
-            f"Wrote provider health report to {output_path} as {output_format}."
-        )
+        print(f"Wrote provider health report to {output_path} as {output_format}.")
         return _provider_health_exit_code(report.status, fail_on)
 
     print(rendered_output, end="" if rendered_output.endswith("\n") else "\n")
@@ -1219,6 +1399,128 @@ def _render_replay_output(
     if view == "steps" and output_format == "json":
         return json.dumps(replay_result.to_dict(), ensure_ascii=False) + "\n"
     raise ValueError(f"Unsupported replay view/format: {view}/{output_format}")
+
+
+def _render_polygon_daily_candidate(
+    result: Any,
+    *,
+    view: str,
+    output_format: str,
+) -> str:
+    summary = _polygon_daily_candidate_summary(result)
+    if view == "summary" and output_format == "table":
+        return _render_polygon_daily_candidate_table(summary)
+    if output_format != "json":
+        raise ValueError("unsupported Candidate output format")
+    projection: dict[str, object] = {"candidate_summary": summary}
+    if view == "full":
+        projection["artifact"] = result.artifact.to_dict()
+        projection["material"] = result.material.to_dict()
+    elif view != "summary":
+        raise ValueError("unsupported Candidate view")
+    return json.dumps(projection, ensure_ascii=False) + "\n"
+
+
+def _polygon_daily_candidate_summary(result: Any) -> dict[str, object]:
+    artifact = result.artifact
+    material = result.material
+    authorization = artifact.contract_authorization
+    temporal = artifact.temporal_identity
+    resolution = material.mapping_resolution_provenance
+    request_provenance = material.request_provenance
+    latest_session_date = None if not material.rows else material.rows[-1].session_date
+    return {
+        "candidate": {
+            "lifecycle_state": "candidate",
+            "semantic_authorization": "exact_production_membership",
+            "validation": "not_performed",
+            "admission": "absent",
+            "validity": "not_evaluated",
+            "freshness": "not_evaluated",
+            "consumable": False,
+            "research_permitted": False,
+            "warning": _CANDIDATE_WARNING,
+        },
+        "artifact": {
+            "schema_version": artifact.schema_version,
+            "artifact_id": artifact.artifact_id,
+            "artifact_version": artifact.artifact_version,
+            "artifact_fingerprint": artifact.fingerprint,
+            "evidence_type": artifact.evidence_type,
+            "authority": artifact.authority.value,
+            "information_class": artifact.information_class.value,
+        },
+        "contract_authorization": {
+            "governing_contract_reference": artifact.governing_contract.to_dict(),
+            "authorization_id": authorization.authorization_id,
+            "authorization_version": authorization.authorization_version,
+            "authorization_fingerprint": authorization.fingerprint,
+            "material_schema": material.material_schema.to_dict(),
+        },
+        "source": {
+            "vendor_service": material.vendor_service,
+            "source_identity": material.source_reference.to_dict(),
+            "api_base": material.api_base,
+            "resolved_route": request_provenance.resolved_route,
+            "multiplier": request_provenance.multiplier,
+            "timespan": request_provenance.timespan,
+            "adjusted": request_provenance.adjusted,
+            "sort": request_provenance.sort,
+            "limit": request_provenance.limit,
+        },
+        "subject_mapping": {
+            "external_identity": material.external_instrument_identity.to_dict(),
+            "canonical_subject": material.canonical_subject.to_dict(),
+            "selected_mapping_fingerprint": resolution.mapping.fingerprint,
+            "mapping_source": resolution.mapping.source.to_dict(),
+            "resolved_as_of": resolution.resolved_as_of.isoformat(),
+        },
+        "range_time": {
+            "requested_from": material.start_session_date,
+            "requested_to": material.end_session_date,
+            "query_as_of": material.query_as_of.isoformat(),
+            "observation_period_start": (temporal.observation_period_start.isoformat()),
+            "observation_period_end": temporal.observation_period_end.isoformat(),
+            "response_received_at": temporal.platform_received_at.isoformat(),
+            "artifact_created_at": temporal.artifact_created_at.isoformat(),
+        },
+        "material": {
+            "material_fingerprint": material.fingerprint,
+            "row_count": material.row_count,
+            "latest_retained_session_date": latest_session_date,
+        },
+    }
+
+
+def _render_polygon_daily_candidate_table(summary: dict[str, object]) -> str:
+    rows: list[tuple[str, str, object]] = []
+    for section, raw_fields in summary.items():
+        fields = cast(dict[str, object], raw_fields)
+        ordered_fields = (
+            {"warning": fields["warning"], **fields}
+            if section == "candidate"
+            else fields
+        )
+        for field_name, value in ordered_fields.items():
+            rows.append(
+                (
+                    section.replace("_", " ").title(),
+                    field_name.replace("_", " ").title(),
+                    _candidate_table_value(value),
+                )
+            )
+    table = pd.DataFrame(rows, columns=["Section", "Field", "Value"])
+    return f"{table.to_string(index=False)}\n"
+
+
+def _candidate_table_value(value: object) -> object:
+    if value is None:
+        return "-"
+    if type(value) is bool:
+        return "true" if value else "false"
+    if type(value) is dict:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return value
 
 
 def _render_replay_summary(

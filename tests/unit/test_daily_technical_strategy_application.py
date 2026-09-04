@@ -107,6 +107,11 @@ V075_APPLICATION_EXPORTS = [
     "DailyTechnicalStrategyApplicationResponse",
     "DailyTechnicalStrategyApplicationService",
 ]
+V078_APPLICATION_EXPORTS = [
+    "PolygonCompletedDailyAcquirer",
+    "PolygonCompletedDailyEvidenceCandidateApplicationRequest",
+    "PolygonCompletedDailyEvidenceCandidateApplicationService",
+]
 DAILY_TECHNICAL_RESEARCH_PACKAGE_EXPORTS = [
     "DailyTechnicalResearchRequest",
     "DailyTechnicalResearchResult",
@@ -134,14 +139,13 @@ def test_daily_technical_strategy_public_application_api_is_stable() -> None:
     assert application_package.__all__ == [
         *PRE_V075_APPLICATION_EXPORTS,
         *V075_APPLICATION_EXPORTS,
+        *V078_APPLICATION_EXPORTS,
     ]
     assert contract_module.__all__ == V075_APPLICATION_EXPORTS[:2] + [
         "DailyTechnicalStrategyApplicationRequest",
         "DailyTechnicalStrategyApplicationResponse",
     ]
-    assert service_module.__all__ == [
-        "DailyTechnicalStrategyApplicationService"
-    ]
+    assert service_module.__all__ == ["DailyTechnicalStrategyApplicationService"]
 
     assert (
         application_package.DailyTechnicalStrategyApplicationRequest
@@ -847,8 +851,7 @@ def test_application_modules_do_not_import_private_domain_semantic_helpers() -> 
             forbidden_imports.update(
                 (node.module, alias.name)
                 for alias in node.names
-                if alias.name.startswith("_")
-                or alias.name in semantic_helper_names
+                if alias.name.startswith("_") or alias.name in semantic_helper_names
             )
 
     assert forbidden_imports == set()
