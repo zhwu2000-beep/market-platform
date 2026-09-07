@@ -27,6 +27,9 @@ CATALOG = governance._PRODUCTION_GOVERNANCE_APPROVAL_CATALOG
 SCOPE = "research.daily_technical.completed_daily"
 VERSION = "1.0.0"
 EXPECTED_PROFILE_FINGERPRINT = (
+    "sha256:341279ccfd6839287e5e5c9af46f9eb834577a07e9ffd1a16c0e27ccc35cfd49"
+)
+SUPERSEDED_PROFILE_FINGERPRINT = (
     "sha256:6bff0d17036920f657e44816f434ca357c803d99d77a06bd877b3c00aa64036f"
 )
 
@@ -132,6 +135,14 @@ def test_ruleset_and_distinct_equal_configuration_freshness_are_exact() -> None:
     )
     assert task.rule.rule_id == (
         "production.polygon_completed_daily.freshness.daily_technical"
+    )
+    assert admission.rule.declared_temporal_anchor == "observation_period_end"
+    assert task.rule.declared_temporal_anchor == "observation_period_end"
+    assert admission.fingerprint == (
+        "sha256:e8df041cf572cc8764980481d39a8c06463c2bf44be8def5f2dc3619ee8183ce"
+    )
+    assert task.fingerprint == (
+        "sha256:42f564d9a886640a309c6c70da6c8718aa5bb069414f151e11a08477fb40003a"
     )
     assert admission.rule != task.rule
     assert admission._configuration_payload() == task._configuration_payload()
@@ -242,6 +253,7 @@ def test_aggregate_fingerprint_is_deterministic_and_canonical() -> None:
     assert PROFILE.fingerprint == canonical_fingerprint(PROFILE._fingerprint_payload())
     assert resolved.fingerprint == PROFILE.fingerprint
     assert resolved.to_dict() == PROFILE.to_dict()
+    assert PROFILE.fingerprint != SUPERSEDED_PROFILE_FINGERPRINT
 
 
 def test_changed_threshold_with_matching_name_and_version_is_not_approved() -> None:

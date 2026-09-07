@@ -499,7 +499,7 @@ def _freshness(rule_id: str) -> _FreshnessRuleDefinition:
         EvidenceFreshnessRule(
             rule_id,
             _VERSION,
-            "latest_retained_completed_session_date",
+            "observation_period_end",
             _SCOPE,
         ),
         _FRESHNESS_CONFIGURATION,
