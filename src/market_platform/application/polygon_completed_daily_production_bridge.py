@@ -45,6 +45,9 @@ _FIELDS = ("open", "high", "low", "close", "volume")
 _TRANSFORMATION = q._PROFILE.transformation
 _OPERATION = "production.polygon_completed_daily.bridge.completed_daily_price_series"
 _EXECUTOR = "market_platform.application.polygon_completed_daily_production_bridge/v1"
+# Exact binary64 endpoints; construction is independent of Decimal context.
+_MINIMUM_NORMAL_SOURCE = Decimal.from_float(float.fromhex("0x1.0000000000000p-1022"))
+_MAXIMUM_FINITE_SOURCE = Decimal.from_float(float.fromhex("0x1.fffffffffffffp+1023"))
 
 
 class PolygonCompletedDailyBridgeRefusalReason(StrEnum):
@@ -110,6 +113,8 @@ def _convert_numeric(source: str, field: str) -> float:
     decimal = Decimal(source)
     if not decimal.is_finite() or _canonical_numeric_text(decimal, field) != source:
         raise ValueError("source decimal is not canonical finite material")
+    if decimal != 0 and not _MINIMUM_NORMAL_SOURCE <= decimal <= _MAXIMUM_FINITE_SOURCE:
+        raise ValueError("exact source is outside the approved positive normal range")
     # Direct Decimal conversion only: no quantization or intervening decimal float.
     result = float(decimal)
     bits = int(_binary64(result), 16)

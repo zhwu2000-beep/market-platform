@@ -402,6 +402,58 @@ def test_unsafe_binary64_refused_no_repair(source):
         b._convert_numeric(source, "volume")
 
 
+@pytest.mark.parametrize("field", ["open", "high", "low", "close", "volume"])
+@pytest.mark.parametrize(
+    "source,endpoint_hex,below",
+    [
+        ("2.2250738585072013e-308", "0x1.0000000000000p-1022", True),
+        ("1.7976931348623158e308", "0x1.fffffffffffffp+1023", False),
+    ],
+)
+def test_exact_source_range_refuses_inward_rounding(field, source, endpoint_hex, below):
+    with localcontext() as context:
+        context.prec = 2
+        context.rounding = "ROUND_UP"
+        decimal = Decimal(source)
+        endpoint = float.fromhex(endpoint_hex)
+        exact_endpoint = Decimal.from_float(endpoint)
+        assert decimal < exact_endpoint if below else decimal > exact_endpoint
+        assert float(decimal) == endpoint
+        assert math.isfinite(endpoint)
+        assert 0 < (int(b._binary64(endpoint), 16) >> 52) & 0x7FF < 0x7FF
+        canonical = b._canonical_numeric_text(decimal, field)
+        assert len(canonical) <= 1024
+        with pytest.raises(ValueError, match="exact source.*range"):
+            b._convert_numeric(canonical, field)
+
+
+@pytest.mark.parametrize("field", ["open", "high", "low", "close", "volume"])
+@pytest.mark.parametrize(
+    "source,endpoint_hex",
+    [
+        (None, "0x1.0000000000000p-1022"),
+        (None, "0x1.fffffffffffffp+1023"),
+        ("2.2250738585072014e-308", "0x1.0000000000000p-1022"),
+        ("1.7976931348623157e308", "0x1.fffffffffffffp+1023"),
+    ],
+)
+def test_exact_source_range_accepts_endpoints_and_inside(field, source, endpoint_hex):
+    with localcontext() as context:
+        context.prec = 2
+        context.rounding = "ROUND_UP"
+        minimum = Decimal.from_float(float.fromhex("0x1.0000000000000p-1022"))
+        maximum = Decimal.from_float(float.fromhex("0x1.fffffffffffffp+1023"))
+        endpoint = float.fromhex(endpoint_hex)
+        decimal = Decimal.from_float(endpoint) if source is None else Decimal(source)
+        assert minimum <= decimal <= maximum
+        if source is not None:
+            assert minimum < decimal < maximum
+            assert decimal != Decimal.from_float(endpoint)
+        canonical = b._canonical_numeric_text(decimal, field)
+        converted = b._convert_numeric(canonical, field)
+        assert b._binary64(converted) == b._binary64(endpoint)
+
+
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
 def test_nonfinite_target_projection_refused(value):
     with pytest.raises(ValueError):
@@ -663,6 +715,23 @@ def test_authentic_qualified_but_unrepresentable_material_refuses(monkeypatch, v
     _refuse(
         _service(authentic),
         _request(authentic[1]),
+        b.PolygonCompletedDailyBridgeRefusalReason.REPRESENTATION_UNSUPPORTED,
+    )
+
+
+@pytest.mark.parametrize(
+    "volume", ["2.2250738585072013e-308", "1.7976931348623158e308"]
+)
+def test_authentic_exact_source_range_refusal_publishes_nothing(monkeypatch, volume):
+    canonical = b._canonical_numeric_text(Decimal(volume), "volume")
+    assert len(canonical) <= 1024
+    authentic = _custom_authentic(monkeypatch, date(2026, 8, 28), canonical)
+    qualified = authentic[1]
+    assert qualified.construction_result.material.rows[0].volume == canonical
+    assert qualified.canonical_state.is_consumable is True
+    _refuse(
+        _service(authentic),
+        _request(qualified),
         b.PolygonCompletedDailyBridgeRefusalReason.REPRESENTATION_UNSUPPORTED,
     )
 
