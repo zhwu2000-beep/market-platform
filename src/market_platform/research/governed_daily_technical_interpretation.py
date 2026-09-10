@@ -353,6 +353,126 @@ class GovernedDailyTechnicalInterpretation:
         }
 
 
+def _expected_projection(
+    snapshot: TechnicalAnalysisSnapshot,
+    reference: PolygonCompletedDailyInterpretationRequest,
+    instrument: CanonicalInstrument,
+    dataset_fingerprint: str,
+    policy: TechnicalPolicyIdentity,
+) -> dict[str, object]:
+    """One complete correspondence projection using only the released core."""
+    expected: dict[str, object] = {
+        "schema_version": GOVERNED_DAILY_TECHNICAL_INTERPRETATION_SCHEMA,
+        "source_technical_occurrence": reference.to_dict(),
+        "canonical_instrument_id": instrument.instrument_id.to_dict(),
+        "source_trading_identity": instrument.trading_identity.to_dict(),
+        "analysis_as_of": snapshot.evidence.analysis_as_of.isoformat(),
+        "source_technical_analysis_snapshot_fingerprint": snapshot.fingerprint,
+        "source_governed_dataset_fingerprint": dataset_fingerprint,
+        "source_research_dataset_content_fingerprint": (
+            snapshot.evidence.dataset_content_fingerprint
+        ),
+        "interpretation_policy_identity": policy.to_dict(),
+        "source_quality": snapshot.quality.value,
+        "source_warnings": [item.value for item in snapshot.warnings],
+    }
+    configuration = policy.configuration
+    assert type(configuration) is ClassicDailyTechnicalInterpretationConfiguration
+    states = classic.classic_states(snapshot, configuration)
+    comparisons = classic.build_classic_comparison_evidence(snapshot, configuration)
+    expected.update(
+        {
+            "trend_direction": states[0].value,
+            "momentum_direction": states[1].value,
+            "volatility_state": states[2].value,
+            "extension_state": states[3].value,
+            "comparison_evidence": [item.to_dict() for item in comparisons],
+        }
+    )
+    return deepcopy(expected)
+
+
+def _check_expected_content(
+    content: GovernedDailyTechnicalInterpretation, expected: dict[str, object]
+) -> None:
+    if type(content) is not GovernedDailyTechnicalInterpretation:
+        raise TypeError("exact governed Interpretation content required")
+    content._validate()
+    if content._projection(fingerprint_floats=False) != expected:
+        raise ValueError(
+            "governed Interpretation source/semantic correspondence mismatch"
+        )
+
+
+def validate_governed_daily_technical_interpretation(
+    *,
+    content: GovernedDailyTechnicalInterpretation,
+    snapshot: TechnicalAnalysisSnapshot,
+    source_technical_occurrence: PolygonCompletedDailyInterpretationRequest,
+    canonical_instrument: CanonicalInstrument,
+    source_governed_dataset_fingerprint: str,
+) -> None:
+    """Verify complete frozen semantics against source values, never history authority.
+
+    The application must separately authenticate the retained source. Expectations
+    use detached inputs and the same released core as the semantic entry point.
+    """
+    if type(content) is not GovernedDailyTechnicalInterpretation:
+        raise TypeError("exact governed Interpretation content required")
+    content_before = deepcopy(content.to_dict())
+    if type(snapshot) is not TechnicalAnalysisSnapshot:
+        raise TypeError("exact TechnicalAnalysisSnapshot required")
+    snapshot._validate()
+    source_before = deepcopy(snapshot.to_dict())
+    detached = deepcopy(snapshot)
+    detached._validate()
+    if detached.to_dict() != source_before:
+        raise ValueError("snapshot changed during verification detachment")
+    reference = _copy_reference(source_technical_occurrence)
+    reference_before = deepcopy(reference.to_dict())
+    if type(canonical_instrument) is not CanonicalInstrument:
+        raise TypeError("exact canonical instrument descriptor required")
+    canonical_instrument._validate()
+    instrument_before = deepcopy(canonical_instrument.to_dict())
+    instrument = deepcopy(canonical_instrument)
+    if instrument.trading_identity != detached.evidence.instrument:
+        raise ValueError("canonical instrument/source trading identity mismatch")
+    _fingerprint(source_governed_dataset_fingerprint)
+    policy = _fixed_policy()
+    _check_policy(policy)
+    policy_before = deepcopy(policy.to_dict())
+    working_policy = copy_technical_policy_identity(policy)
+    expected = _expected_projection(
+        detached,
+        reference,
+        instrument,
+        source_governed_dataset_fingerprint,
+        working_policy,
+    )
+    for source in (snapshot, detached):
+        source._validate()
+        if source.to_dict() != source_before:
+            raise ValueError("snapshot source drift during correspondence verification")
+    for occurrence in (source_technical_occurrence, reference):
+        if occurrence.to_dict() != reference_before:
+            raise ValueError(
+                "source occurrence drift during correspondence verification"
+            )
+    for subject in (canonical_instrument, instrument):
+        subject._validate()
+        if subject.to_dict() != instrument_before:
+            raise ValueError(
+                "canonical instrument drift during correspondence verification"
+            )
+    for identity in (policy, working_policy):
+        _check_policy(identity)
+        if identity.to_dict() != policy_before:
+            raise ValueError("policy drift during correspondence verification")
+    if content.to_dict() != content_before:
+        raise ValueError("content drift during correspondence verification")
+    _check_expected_content(content, expected)
+
+
 def interpret_governed_daily_technical_snapshot(
     *,
     snapshot: TechnicalAnalysisSnapshot,
@@ -403,32 +523,13 @@ def interpret_governed_daily_technical_snapshot(
     assert (
         type(expected_configuration) is ClassicDailyTechnicalInterpretationConfiguration
     )
-    expected_states = classic.classic_states(expected_source, expected_configuration)
-    expected_comparisons = deepcopy(
-        classic.build_classic_comparison_evidence(
-            expected_source, expected_configuration
-        )
+    expected = _expected_projection(
+        expected_source,
+        reference,
+        instrument,
+        source_governed_dataset_fingerprint,
+        expected_policy,
     )
-    expected = {
-        "schema_version": GOVERNED_DAILY_TECHNICAL_INTERPRETATION_SCHEMA,
-        "source_technical_occurrence": reference_before,
-        "canonical_instrument_id": instrument.instrument_id.to_dict(),
-        "source_trading_identity": instrument.trading_identity.to_dict(),
-        "analysis_as_of": detached.evidence.analysis_as_of.isoformat(),
-        "source_technical_analysis_snapshot_fingerprint": detached.fingerprint,
-        "source_governed_dataset_fingerprint": source_governed_dataset_fingerprint,
-        "source_research_dataset_content_fingerprint": (
-            detached.evidence.dataset_content_fingerprint
-        ),
-        "interpretation_policy_identity": policy_before,
-        "source_quality": detached.quality.value,
-        "source_warnings": [item.value for item in detached.warnings],
-        "trend_direction": expected_states[0].value,
-        "momentum_direction": expected_states[1].value,
-        "volatility_state": expected_states[2].value,
-        "extension_state": expected_states[3].value,
-        "comparison_evidence": [item.to_dict() for item in expected_comparisons],
-    }
 
     trend, momentum, volatility, extension = classic_states(detached, configuration)
     comparisons = build_classic_comparison_evidence(detached, configuration)
@@ -467,13 +568,7 @@ def interpret_governed_daily_technical_snapshot(
         subject._validate()
         if subject.to_dict() != instrument_before:
             raise ValueError("canonical instrument drift during Interpretation")
-    if type(result) is not GovernedDailyTechnicalInterpretation:
-        raise TypeError("exact governed Interpretation content required")
-    result._validate()
-    if result._projection(fingerprint_floats=False) != expected:
-        raise ValueError(
-            "governed Interpretation source/semantic correspondence mismatch"
-        )
+    _check_expected_content(result, expected)
     return result
 
 
@@ -482,4 +577,5 @@ __all__ = [
     "PolygonCompletedDailyInterpretationRequest",
     "GovernedDailyTechnicalInterpretation",
     "interpret_governed_daily_technical_snapshot",
+    "validate_governed_daily_technical_interpretation",
 ]

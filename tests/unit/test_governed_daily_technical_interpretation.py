@@ -37,6 +37,171 @@ from market_platform.trading.instrument import TradingInstrumentIdentity
 POLICY_FINGERPRINT = (
     "sha256:9d81e49a6d45d27071e804b46486ae247d71f650184e8032a792586807fc3d02"
 )
+
+
+SEMANTIC_MUTATIONS = (
+    "trend_direction",
+    "momentum_direction",
+    "volatility_state",
+    "extension_state",
+    "omitted_comparison",
+    "reordered_comparisons",
+    "operand",
+    "operator",
+)
+
+
+def coherently_wrong_semantics(content, mutation):
+    result = deepcopy(content)
+    if mutation.endswith("direction") or mutation.endswith("state"):
+        current = getattr(result, mutation)
+        object.__setattr__(
+            result, mutation, next(x for x in type(current) if x != current)
+        )
+    else:
+        comparisons = list(result.comparison_evidence)
+        if mutation == "omitted_comparison":
+            comparisons.pop(0)
+        elif mutation == "reordered_comparisons":
+            comparisons[0], comparisons[1] = comparisons[1], comparisons[0]
+        else:
+            comparison = comparisons[0]
+            if mutation == "operand":
+                comparison = replace(
+                    comparison,
+                    left_operand=replace(
+                        comparison.left_operand,
+                        value=comparison.right_operand.value + 1.0,
+                    ),
+                    satisfied=True,
+                )
+            else:
+                comparison = replace(
+                    comparison,
+                    operator=classic.TechnicalComparisonOperator.LESS_THAN,
+                    satisfied=comparison.left_operand.value
+                    < comparison.right_operand.value,
+                )
+            comparisons[0] = comparison
+        object.__setattr__(result, "comparison_evidence", tuple(comparisons))
+    refingerprint(result)
+    if mutation != "reordered_comparisons":
+        result._validate()
+    return result
+
+
+@pytest.mark.parametrize("mutation", SEMANTIC_MUTATIONS)
+def test_domain_validator_refuses_coherent_semantic_mutation(source, mutation):
+    content = coherently_wrong_semantics(interpret(source), mutation)
+    with pytest.raises(ValueError):
+        g.validate_governed_daily_technical_interpretation(
+            content=content, **arguments(source)
+        )
+
+
+@pytest.mark.parametrize("count", [1, 20, 250])
+def test_domain_validator_accepts_exact_available_comparisons(count):
+    source = make_snapshot(count)
+    content = interpret(source)
+    before = content.to_dict()
+    g.validate_governed_daily_technical_interpretation(
+        content=content, **arguments(source)
+    )
+    assert content.to_dict() == before
+    expected = classic.build_classic_comparison_evidence(
+        source, ClassicDailyTechnicalInterpretationConfiguration()
+    )
+    assert content.comparison_evidence == expected
+    if count == 250:
+        assert len(content.comparison_evidence) == 18
+    else:
+        assert len(content.comparison_evidence) < 18
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "source_technical_occurrence",
+        "canonical_instrument_id",
+        "source_trading_identity",
+        "analysis_as_of",
+        "source_technical_analysis_snapshot_fingerprint",
+        "source_governed_dataset_fingerprint",
+        "source_research_dataset_content_fingerprint",
+        "source_quality",
+        "source_warnings",
+    ],
+)
+def test_domain_validator_refuses_source_fact_mismatch(source, field):
+    content = interpret(source)
+    value = getattr(content, field)
+    if field == "source_technical_occurrence":
+        value = replace(value, technical_history_sequence=99)
+    elif field == "canonical_instrument_id":
+        value = replace(value, instrument_id="OTHER")
+    elif field == "source_trading_identity":
+        value = replace(value, symbol="OTHER")
+    elif field == "analysis_as_of":
+        value += timedelta(days=1)
+    elif field == "source_quality":
+        value = technical.TechnicalAnalysisQuality.DEGRADED
+    elif field == "source_warnings":
+        value = (technical.TechnicalAnalysisWarning.STALE_EVIDENCE,)
+    else:
+        value = "sha256:" + "0" * 64
+    changed = replace(content, **{field: value})
+    changed._validate()
+    with pytest.raises(ValueError):
+        g.validate_governed_daily_technical_interpretation(
+            content=changed, **arguments(source)
+        )
+
+
+@pytest.mark.parametrize("target", ["content", "fixed_policy"])
+def test_domain_validator_refuses_policy_drift(source, monkeypatch, target):
+    content = interpret(source)
+    policy = deepcopy(content.interpretation_policy_identity)
+    object.__setattr__(policy.configuration, "rsi_neutral", 55.0)
+    refingerprint(policy)
+    if target == "content":
+        object.__setattr__(content, "interpretation_policy_identity", policy)
+        refingerprint(content)
+    else:
+        monkeypatch.setattr(g, "_fixed_policy", lambda: policy)
+    with pytest.raises(ValueError):
+        g.validate_governed_daily_technical_interpretation(
+            content=content, **arguments(source)
+        )
+
+
+@pytest.mark.parametrize("target", ["snapshot", "policy", "content"])
+def test_domain_validator_refuses_drift_during_verification(
+    source, monkeypatch, target
+):
+    content = interpret(source)
+    original = classic.classic_states
+
+    def changed(snapshot, configuration):
+        result = original(snapshot, configuration)
+        if target == "snapshot":
+            object.__setattr__(snapshot, "latest_close", snapshot.latest_close + 1)
+            refingerprint(snapshot)
+        elif target == "policy":
+            object.__setattr__(configuration, "rsi_neutral", 55.0)
+        else:
+            object.__setattr__(
+                content, "analysis_as_of", content.analysis_as_of + timedelta(days=1)
+            )
+            refingerprint(content)
+        return result
+
+    monkeypatch.setattr(classic, "classic_states", changed)
+    with pytest.raises(ValueError):
+        g.validate_governed_daily_technical_interpretation(
+            content=content, **arguments(source)
+        )
+
+
 IDS = (
     "trend_ema8_above_ema20",
     "trend_ema8_below_ema20",
