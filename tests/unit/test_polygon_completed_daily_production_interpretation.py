@@ -4,6 +4,7 @@ import inspect
 import subprocess
 import tomllib
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from copy import deepcopy
 from dataclasses import fields, replace
 from datetime import timedelta
@@ -13,7 +14,13 @@ from uuid import UUID
 import pytest
 from test_governed_daily_technical_interpretation import (
     SEMANTIC_MUTATIONS,
+    assert_enum_free,
     coherently_wrong_semantics,
+    legacy_enum_inventory,
+    load_pre_b2,
+    pre_b2_domain,  # noqa: F401
+    public_graph,
+    serialized,
 )
 from test_polygon_completed_daily_production_technical import (
     _forbidden,
@@ -87,6 +94,341 @@ def _history(service, request, cutoff):
 
 def _refingerprint(item):
     object.__setattr__(item, "fingerprint", canonical_fingerprint(item._payload()))
+
+
+@pytest.mark.parametrize("surface", ["execute", "history"])
+def test_b2_public_graph_has_zero_enum(authentic, surface):
+    service = _service(authentic)
+    request = _request(authentic[1])
+    result = service.execute(request)
+    if surface == "history":
+        result = _history(service, request, result.available_at)[0]
+    assert_enum_free(result)
+
+
+def test_b2_committed_application_envelope_parity(
+    complete_authentic,
+    pre_b2_domain,  # noqa: F811
+    monkeypatch,
+):
+    baseline = load_pre_b2(
+        "src/market_platform/application/polygon_completed_daily_production_interpretation.py",
+        "_pre_b2_governed_application",
+    )
+    baseline.domain = pre_b2_domain
+    baseline.GovernedDailyTechnicalInterpretation = (
+        pre_b2_domain.GovernedDailyTechnicalInterpretation
+    )
+    baseline.PolygonCompletedDailyInterpretationRequest = (
+        pre_b2_domain.PolygonCompletedDailyInterpretationRequest
+    )
+
+    def uuid():
+        return UUID("12345678123456781234567812345678")
+
+    monkeypatch.setattr(baseline, "uuid4", uuid)
+    monkeypatch.setattr(app, "uuid4", uuid)
+    source, technical = complete_authentic
+
+    def clock():
+        return technical.available_at
+
+    old_service = (
+        baseline.PolygonCompletedDailyProductionInterpretationApplicationService(
+            source, execution_clock=clock
+        )
+    )
+    old = old_service.execute(baseline._reference(technical))
+    new_service = Service(source, execution_clock=clock)
+    new = new_service.execute(_request(technical))
+    assert serialized(new.to_dict()) == serialized(old.to_dict())
+    assert serialized(new._payload()) == serialized(old._payload())
+    assert new.fingerprint == old.fingerprint
+    assert new.interpretation.fingerprint == old.interpretation.fingerprint
+    fact = new_service._history._state[1][0]
+    assert type(fact) is bytes
+    assert fact == app._canonical_bytes(old.to_dict())
+    assert_enum_free(new)
+    old_read = old_service.get_result_history_as_of(
+        old.source_technical_occurrence.artifact_reference,
+        knowledge_as_of=old.available_at,
+    )[0]
+    from enum import Enum
+
+    assert any(isinstance(item, Enum) for _, item in public_graph(old))
+    assert any(isinstance(item, Enum) for _, item in public_graph(old_read))
+
+
+def test_b2_every_refusal_reason_is_an_exact_string():
+    from enum import Enum
+
+    assert not issubclass(R, Enum)
+    reasons = {value for name, value in vars(R).items() if name.isupper()}
+    assert reasons == {
+        "technical_occurrence_unavailable",
+        "history_incomplete_or_corrupt",
+        "source_lineage_mismatch",
+        "semantic_execution_or_correspondence_failed",
+        "temporal_failure",
+        "interpretation_publication_or_copy_failed",
+    }
+    for reason in reasons:
+        assert type(reason) is str
+        error = Refused(reason, "test")
+        assert type(error.reason) is str
+        assert_enum_free(error.reason)
+    with pytest.raises(ValueError):
+        Refused("invented", "test")
+    with pytest.raises(TypeError):
+        Refused(R.TEMPORAL_FAILURE, object())
+
+
+def test_b2_public_mutations_cannot_rewrite_authority_or_legacy(complete_authentic):
+    from market_platform.evidence import EvidenceArtifactReference
+    from market_platform.research.daily_technical_interpretation import (
+        TechnicalComparisonEvidence,
+        TechnicalComparisonOperand,
+    )
+    from market_platform.research.technical_policy import TechnicalPolicyIdentity
+
+    service = _service(complete_authentic)
+    request = _request(complete_authentic[1])
+    returned = service.execute(request)
+    state = service._history._state
+    fact = state[1][0]
+    expected = returned.to_dict()
+    inventory = legacy_enum_inventory()
+    assert type(fact) is bytes
+    assert fact == app._canonical_bytes(expected)
+    assert service._committed is state
+    assert not hasattr(service, "_published")
+    assert_enum_free(request)
+    forbidden = (
+        EvidenceArtifactReference,
+        TechnicalPolicyIdentity,
+        TechnicalComparisonEvidence,
+        TechnicalComparisonOperand,
+    )
+    assert not any(isinstance(item, forbidden) for _, item in public_graph(returned))
+
+    def mutate(victim, name, value):
+        object.__setattr__(victim, name, value)
+        assert service._history._state is state
+        assert state[1][0] == fact
+        assert inventory == legacy_enum_inventory()
+
+    mutations = [
+        ("interpretation.trend_direction", "unavailable"),
+        ("interpretation.momentum_direction", "unavailable"),
+        ("interpretation.volatility_state", "unavailable"),
+        ("interpretation.extension_state", "unavailable"),
+        ("interpretation.source_quality", "degraded"),
+        (
+            "interpretation.source_warnings",
+            ("insufficient_profile_history", "stale_evidence"),
+        ),
+        ("interpretation.interpretation_policy_identity.policy_kind", "corrupt"),
+        (
+            "interpretation.interpretation_policy_identity.configuration.rsi_neutral",
+            51.0,
+        ),
+        (
+            "source_technical_occurrence.artifact_reference.information_class",
+            "source_measurement",
+        ),
+        ("source_technical_occurrence.artifact_reference.authority", "platform_origin"),
+        ("source_technical_occurrence.artifact_reference.artifact_id", "other"),
+    ]
+    for path, value in mutations:
+        public = _history(service, request, returned.available_at)[0]
+        assert_enum_free(public)
+        victim = public
+        names = path.split(".")
+        for name in names[:-1]:
+            victim = getattr(victim, name)
+        mutate(victim, names[-1], value)
+        # Attempt coherent nested, content, and envelope refingerprinting.
+        for wrapper, payload in (
+            (
+                public.source_technical_occurrence.artifact_reference,
+                "_fingerprint_payload",
+            ),
+            (
+                public.interpretation.interpretation_policy_identity,
+                "_fingerprint_payload",
+            ),
+            (public.interpretation, "_fingerprint_payload"),
+            (public, "_payload"),
+        ):
+            # Closed validation can reject the coherent rewrite early.
+            with suppress(ValueError, TypeError):
+                mutate(
+                    wrapper,
+                    "fingerprint",
+                    canonical_fingerprint(getattr(wrapper, payload)()),
+                )
+        assert service._history._state is state
+        assert state[1][0] == fact
+        second = _history(service, request, returned.available_at)[0]
+        assert_enum_free(second)
+        assert second.to_dict() == expected
+        assert not app._graph_ids(public) & app._graph_ids(second)
+        assert inventory == legacy_enum_inventory()
+    # Exercise all 18 comparisons and both operand-source storage paths.
+    for index in range(18):
+        public = app._reconstruct_result(fact)
+        item = public.interpretation.comparison_evidence[index]
+        mutate(item, "operator", "less_than_or_equal")
+        mutate(item.left_operand, "source", "interpretation_policy_derived")
+        mutate(item.right_operand, "source", "technical_analysis_snapshot")
+        mutate(item.left_operand, "field", "corrupt")
+        mutate(item.right_operand, "value", 123.0)
+        mutate(item, "satisfied", not item.satisfied)
+        assert state[1][0] == fact
+        fresh = app._reconstruct_result(fact)
+        assert_enum_free(fresh)
+        assert fresh.to_dict() == expected
+    assert inventory == legacy_enum_inventory()
+    later = service.execute(request)
+    assert_enum_free(later)
+    assert later.interpretation.to_dict() == returned.interpretation.to_dict()
+    assert service._history._state[1][0] == fact
+    assert service._history._pending is None
+
+
+@pytest.mark.parametrize("seam", ["normalize", "encode", "decode", "reconstruct"])
+def test_b2_codec_failure_is_atomic_and_reuses_sequence(authentic, seam):
+    service = _service(authentic)
+    request = _request(authentic[1])
+    first = service.execute(request)
+    before = service._history._state
+    original = domain.interpret_governed_daily_technical_snapshot
+    failures = []
+
+    def arm(**kwargs):
+        if seam == "normalize":
+
+            def fail_normalization(value):
+                failures.append(seam)
+                return _forbidden(value)
+
+            armed.setattr(domain, "_scalar_policy", fail_normalization)
+        content = original(**kwargs)
+        if seam != "normalize":
+            name = {
+                "encode": "_canonical_bytes",
+                "decode": "_decode_result",
+                "reconstruct": "_reconstruct_result",
+            }[seam]
+            boundary = getattr(app, name)
+
+            def fail_new_occurrence(value):
+                is_new = (
+                    value.get("history_sequence") == 2
+                    if type(value) is dict
+                    else b'"history_sequence":2' in value
+                )
+                if is_new:
+                    failures.append(seam)
+                    return _forbidden(value)
+                return boundary(value)
+
+            armed.setattr(app, name, fail_new_occurrence)
+        return content
+
+    with pytest.MonkeyPatch.context() as armed:
+        armed.setattr(domain, "interpret_governed_daily_technical_snapshot", arm)
+        error = _refuse(service, request)
+        assert type(error.reason) is str
+        assert service._history._state is before
+        assert failures == [seam]
+    assert (
+        _history(service, request, first.available_at)[0].to_dict() == first.to_dict()
+    )
+    assert service.execute(request).history_sequence == 2
+
+
+@pytest.fixture(scope="module")
+def b2_projection(authentic):
+    source = authentic[1]
+    instrument, _ = _service(authentic)._authenticate(source)
+    content = domain.interpret_governed_daily_technical_snapshot(
+        snapshot=source.snapshot,
+        source_technical_occurrence=_request(source),
+        canonical_instrument=instrument,
+        source_governed_dataset_fingerprint=source.source.dataset_fingerprint,
+    )
+    value = object.__new__(app.PolygonCompletedDailyInterpretationResult)
+    for key, item in {
+        "interpretation": content,
+        "technical_available_at": source.available_at,
+        "execution_id": app._PREFIX + ":" + "1" * 32,
+        "history_namespace_id": app._PREFIX + "_history:" + "2" * 32,
+        "history_sequence": 1,
+        "execution_started_at": source.available_at,
+        "execution_completed_at": source.available_at,
+        "available_at": source.available_at,
+    }.items():
+        object.__setattr__(value, key, item)
+    _refingerprint(value)
+    return value.to_dict()
+
+
+@pytest.mark.parametrize(
+    "attack",
+    [
+        "mutable",
+        "duplicate_key",
+        "whitespace",
+        "extra",
+        "int_float",
+        "missing",
+        "schema",
+        "fingerprint",
+        "timestamp",
+        "nan",
+        "negative_zero",
+    ],
+)
+def test_b2_decoder_rejects_noncanonical_complete_projection(b2_projection, attack):
+    projection = deepcopy(b2_projection)
+    fact = app._canonical_bytes(projection)
+    if attack == "mutable":
+        supplied = bytearray(fact)
+    elif attack == "duplicate_key":
+        supplied = b'{"history_sequence":1,' + fact[1:]
+    elif attack == "whitespace":
+        supplied = b" " + fact
+    else:
+        if attack == "extra":
+            projection["extra"] = None
+        elif attack == "missing":
+            projection["interpretation"].pop("source_warnings")
+        elif attack == "schema":
+            projection["interpretation"]["source_technical_occurrence"][
+                "artifact_reference"
+            ]["schema_version"] = "other/v1"
+        elif attack == "fingerprint":
+            projection["interpretation"]["fingerprint"] = "sha256:" + "0" * 64
+        elif attack == "timestamp":
+            projection["available_at"] = projection["available_at"].replace(
+                "+00:00", "Z"
+            )
+        else:
+            projection["interpretation"]["interpretation_policy_identity"][
+                "configuration"
+            ]["rsi_neutral"] = {
+                "int_float": 50,
+                "nan": float("nan"),
+                "negative_zero": -0.0,
+            }[attack]
+        import json
+
+        supplied = json.dumps(
+            projection, sort_keys=True, separators=(",", ":")
+        ).encode()
+    with pytest.raises((TypeError, ValueError, KeyError)):
+        app._reconstruct_result(supplied)
 
 
 def test_exact_handoff_envelope_and_original_context(authentic, monkeypatch):
@@ -413,7 +755,7 @@ def test_semantic_source_correspondence(authentic, monkeypatch, field):
         elif field == "analysis_as_of":
             value += timedelta(days=1)
         elif field == "source_quality":
-            value = t.technical.TechnicalAnalysisQuality.COMPLETE
+            value = "complete"
         elif field == "source_warnings":
             value = ()
         else:
@@ -653,7 +995,7 @@ def test_own_history_corruption(authentic, monkeypatch, kind):
     first = service.execute(request)
     service._clock = lambda: first.available_at + timedelta(seconds=2)
     second = service.execute(request)
-    one, two = deepcopy(service._history._state[1])
+    one, two = (app._reconstruct_result(fact) for fact in service._history._state[1])
     if kind == "availability":
         object.__setattr__(
             one, "available_at", second.available_at + timedelta(seconds=1)
@@ -695,6 +1037,16 @@ def test_own_history_corruption(authentic, monkeypatch, kind):
             "entries_list": (3, [one, two]),
             "boolean": (True, ()),
         }[kind]
+    if type(state) is tuple and type(state[1]) is tuple:
+        state = (
+            state[0],
+            tuple(
+                app._canonical_bytes(
+                    {**item._payload(), "fingerprint": item.fingerprint}
+                )
+                for item in state[1]
+            ),
+        )
     monkeypatch.setattr(service._history, "_state", state)
     monkeypatch.setattr(
         domain, "interpret_governed_daily_technical_snapshot", _forbidden
@@ -736,7 +1088,7 @@ def test_defensive_graphs_and_coherent_mutation(authentic):
     service = _service(authentic)
     request = _request(authentic[1])
     returned = service.execute(request)
-    retained = service._history._state[1][0]
+    retained = app._reconstruct_result(service._history._state[1][0])
     one = _history(service, request, returned.available_at)[0]
     two = _history(service, request, returned.available_at)[0]
     copies = (returned, retained, one, two)
@@ -853,6 +1205,7 @@ def test_frozen_files_exports_version_and_output_scope():
         "src/market_platform/research/daily_technical_interpretation.py",
         "src/market_platform/research/daily_technical_assessment.py",
         "src/market_platform/application/polygon_completed_daily_production_bridge.py",
+        "src/market_platform/application/polygon_completed_daily_production_technical.py",
         "pyproject.toml",
     ]
     assert (
@@ -1049,7 +1402,7 @@ def test_complete_comparison_operand_isolation(complete_authentic):
     service = Service(source, execution_clock=lambda: instant)
     request = _request(technical)
     returned = service.execute(request)
-    retained = service._history._state[1][0]
+    retained = app._reconstruct_result(service._history._state[1][0])
     expected = retained.to_dict()
     assert len(returned.interpretation.comparison_evidence) == 18
     assert not app._graph_ids(returned) & app._graph_ids(retained)
@@ -1108,7 +1461,7 @@ def test_coherent_in_place_retained_content_rewrite_refused(authentic):
     service = _service(authentic)
     request = _request(authentic[1])
     result = service.execute(request)
-    retained = service._history._state[1][0]
+    retained = app._reconstruct_result(service._history._state[1][0])
     object.__setattr__(
         retained,
         "interpretation",
@@ -1119,6 +1472,7 @@ def test_coherent_in_place_retained_content_rewrite_refused(authentic):
     )
     _refingerprint(retained)
     retained.to_dict()
+    service._history._state = (2, (app._encode_result(retained),))
     _refuse(service, request, R.HISTORY_INVALID)
     with pytest.raises(Refused):
         _history(service, request, result.available_at)

@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import json
+import math
 from collections.abc import Callable
 from contextlib import ExitStack
 from copy import deepcopy
 from dataclasses import dataclass, fields, is_dataclass, replace
 from datetime import datetime
-from enum import StrEnum
 from threading import Lock
+from typing import Any
 from uuid import uuid4
 
 from market_platform._fingerprint import canonical_fingerprint
@@ -19,12 +21,19 @@ from market_platform.application import (
     polygon_completed_daily_production_technical as t,
 )
 from market_platform.evidence import EvidenceArtifactReference, EvidenceSubjectReference
-from market_platform.instruments.identity import CanonicalInstrument
+from market_platform.instruments.identity import (
+    CanonicalInstrument,
+    CanonicalInstrumentId,
+)
 from market_platform.research import governed_daily_technical_interpretation as domain
 from market_platform.research.governed_daily_technical_interpretation import (
     GovernedDailyTechnicalInterpretation,
     PolygonCompletedDailyInterpretationRequest,
 )
+from market_platform.research.technical_policy import (
+    ClassicDailyTechnicalInterpretationConfiguration,
+)
+from market_platform.trading.instrument import TradingInstrumentIdentity
 
 _OPERATION = (
     "production.polygon_completed_daily.daily_technical_interpretation.application"
@@ -36,7 +45,7 @@ _EXECUTOR = (
 _PREFIX = "polygon_completed_daily_interpretation"
 
 
-class PolygonCompletedDailyInterpretationRefusalReason(StrEnum):
+class PolygonCompletedDailyInterpretationRefusalReason:
     TECHNICAL_UNAVAILABLE = "technical_occurrence_unavailable"
     HISTORY_INVALID = "history_incomplete_or_corrupt"
     SOURCE_MISMATCH = "source_lineage_mismatch"
@@ -46,9 +55,20 @@ class PolygonCompletedDailyInterpretationRefusalReason(StrEnum):
 
 
 class PolygonCompletedDailyInterpretationRefused(RuntimeError):
-    def __init__(
-        self, reason: PolygonCompletedDailyInterpretationRefusalReason, message: str
-    ) -> None:
+    def __init__(self, reason: str, message: str) -> None:
+        if type(message) is not str:
+            raise TypeError("exact refusal message string required")
+        domain._choice(
+            reason,
+            (
+                "technical_occurrence_unavailable",
+                "history_incomplete_or_corrupt",
+                "source_lineage_mismatch",
+                "semantic_execution_or_correspondence_failed",
+                "temporal_failure",
+                "interpretation_publication_or_copy_failed",
+            ),
+        )
         self.reason = reason
         super().__init__(message)
 
@@ -124,6 +144,7 @@ class PolygonCompletedDailyInterpretationResult:
         ):
             raise ValueError("Interpretation occurrence chronology invalid")
         payload = self._payload()
+        domain._fingerprint(self.fingerprint)
         if canonical_fingerprint(payload) != self.fingerprint:
             raise ValueError("Interpretation envelope fingerprint mismatch")
         return deepcopy({**payload, "fingerprint": self.fingerprint})
@@ -133,10 +154,141 @@ def _public_result_copy(
     retained: PolygonCompletedDailyInterpretationResult,
 ) -> PolygonCompletedDailyInterpretationResult:
     expected = retained.to_dict()
-    public = deepcopy(retained)
+    public = _reconstruct_result(_encode_result(retained))
     if public is retained or public.to_dict() != expected:
         raise ValueError("public copy changed Interpretation content")
     return public
+
+
+def _check_scalars(value: object) -> None:
+    """Accept only exact JSON scalars/containers; never coerce user objects."""
+    if type(value) is dict:
+        for key, item in value.items():
+            if type(key) is not str:
+                raise TypeError("exact scalar projection keys required")
+            _check_scalars(item)
+    elif type(value) is list:
+        for item in value:
+            _check_scalars(item)
+    elif type(value) is float:
+        if not math.isfinite(value) or (
+            value == 0.0 and math.copysign(1.0, value) < 0.0
+        ):
+            raise ValueError("canonical finite scalar required")
+    elif type(value) not in (str, int, bool, type(None)):
+        raise TypeError("exact scalar projection required")
+
+
+def _canonical_bytes(projection: object) -> bytes:
+    _check_scalars(projection)
+    return json.dumps(
+        projection,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _encode_result(result: PolygonCompletedDailyInterpretationResult) -> bytes:
+    if type(result) is not PolygonCompletedDailyInterpretationResult:
+        raise TypeError("exact Interpretation result required")
+    return _canonical_bytes(result.to_dict())
+
+
+def _decode_result(fact: bytes) -> dict[str, Any]:
+    if type(fact) is not bytes:
+        raise TypeError("exact immutable Interpretation bytes required")
+    value = json.loads(fact)
+    if type(value) is not dict or _canonical_bytes(value) != fact:
+        raise ValueError("noncanonical Interpretation encoding")
+    return value
+
+
+def _reconstruct_result(fact: bytes) -> PolygonCompletedDailyInterpretationResult:
+    """Rebuild caller-owned values and check the entire original scalar encoding."""
+    projection = _decode_result(fact)
+    content = projection["interpretation"]
+    occurrence = content["source_technical_occurrence"]
+    artifact = occurrence["artifact_reference"]
+    artifact_value = domain.GovernedTechnicalArtifactReference(
+        **{
+            key: value
+            for key, value in artifact.items()
+            if key not in ("schema_version", "fingerprint")
+        }
+    )
+    request = PolygonCompletedDailyInterpretationRequest(
+        **{
+            **occurrence,
+            "artifact_reference": artifact_value,
+        }
+    )
+    policy = content["interpretation_policy_identity"]
+    configuration = policy["configuration"]
+    if type(configuration) is not dict or any(
+        type(value) is not float for value in configuration.values()
+    ):
+        raise TypeError("exact configuration float scalars required")
+    policy_value = domain.GovernedTechnicalPolicyIdentity(
+        **{
+            **{
+                key: value
+                for key, value in policy.items()
+                if key not in ("schema_version", "fingerprint", "configuration")
+            },
+            "configuration": ClassicDailyTechnicalInterpretationConfiguration(
+                **configuration
+            ),
+        }
+    )
+    comparisons = tuple(
+        domain.GovernedTechnicalComparisonEvidence(
+            **{
+                **item,
+                "left_operand": domain.GovernedTechnicalComparisonOperand(
+                    **item["left_operand"]
+                ),
+                "right_operand": domain.GovernedTechnicalComparisonOperand(
+                    **item["right_operand"]
+                ),
+            }
+        )
+        for item in content["comparison_evidence"]
+    )
+    trading = content["source_trading_identity"]
+    interpretation = GovernedDailyTechnicalInterpretation(
+        **{
+            **{
+                key: value
+                for key, value in content.items()
+                if key not in ("schema_version", "fingerprint")
+            },
+            "source_technical_occurrence": request,
+            "canonical_instrument_id": CanonicalInstrumentId(
+                **content["canonical_instrument_id"]
+            ),
+            "source_trading_identity": TradingInstrumentIdentity(
+                trading["symbol"], trading["venue"]
+            ),
+            "analysis_as_of": datetime.fromisoformat(content["analysis_as_of"]),
+            "interpretation_policy_identity": policy_value,
+            "source_warnings": tuple(content["source_warnings"]),
+            "comparison_evidence": comparisons,
+        }
+    )
+    result = object.__new__(PolygonCompletedDailyInterpretationResult)
+    for item in fields(result):
+        value = (
+            projection[item.name] if item.name != "interpretation" else interpretation
+        )
+        if item.name.endswith("_at"):
+            value = datetime.fromisoformat(projection[item.name])
+        object.__setattr__(result, item.name, value)
+    # Binds every key, numeric type, timestamp, nested identity and both hashes.
+    if _encode_result(result) != fact:
+        raise ValueError("Interpretation scalar reconstruction mismatch")
+    return result
 
 
 def _graph_ids(value: object) -> set[int]:
@@ -166,12 +318,12 @@ def _check_copy(
 
 
 class _InterpretationHistory:
+    """Canonical committed facts; transient pending staging grants no authority."""
+
     def __init__(self) -> None:
         self._lock = Lock()
         self._namespace_id = f"{_PREFIX}_history:{uuid4().hex}"
-        self._state: tuple[
-            int, tuple[PolygonCompletedDailyInterpretationResult, ...]
-        ] = (
+        self._state: tuple[int, tuple[bytes, ...]] = (
             1,
             (),
         )
@@ -193,10 +345,8 @@ class _InterpretationHistory:
             raise ValueError("Interpretation history incomplete")
         ids: set[str] = set()
         previous: datetime | None = None
-        for index, item in enumerate(entries, 1):
-            if type(item) is not PolygonCompletedDailyInterpretationResult:
-                raise ValueError("exact retained Interpretation result required")
-            item.to_dict()
+        for index, fact in enumerate(entries, 1):
+            item = _reconstruct_result(fact)
             if (
                 item.history_namespace_id != self._namespace_id
                 or item.history_sequence != index
@@ -212,7 +362,9 @@ def _reference(
     item: t.PolygonCompletedDailyTechnicalResult,
 ) -> PolygonCompletedDailyInterpretationRequest:
     return PolygonCompletedDailyInterpretationRequest(
-        artifact_reference=item.source.bridge_reference.artifact_reference,
+        artifact_reference=domain._copy_artifact(
+            item.source.bridge_reference.artifact_reference
+        ),
         technical_history_namespace_id=item.history_namespace_id,
         technical_history_sequence=item.history_sequence,
         technical_execution_id=item.execution_id,
@@ -252,6 +404,7 @@ class PolygonCompletedDailyProductionInterpretationApplicationService:
         self._history = _InterpretationHistory()
         self._history_owner = self._history
         self._namespace = self._history._namespace_id
+        # The service pins its current commitment independently of the history view.
         self._committed = self._history._state
         self._technical_history = technical_service._history
         self._technical_namespace = self._technical_history._namespace_id
@@ -259,7 +412,6 @@ class PolygonCompletedDailyProductionInterpretationApplicationService:
         # and complete detached projections, not mutable upstream result graphs.
         self._observed: tuple[tuple[int, dict[str, object]], ...] = ()
         self._retention: tuple[tuple[int, str, tuple[int, ...]], ...] = ()
-        self._published: tuple[dict[str, object], ...] = ()
         try:
             with ExitStack() as stack:
                 self._lock_inputs(stack)
@@ -277,7 +429,9 @@ class PolygonCompletedDailyProductionInterpretationApplicationService:
         self, item: t.PolygonCompletedDailyTechnicalResult
     ) -> tuple[CanonicalInstrument, dict[str, object]]:
         issued, bridge = self._technical_service._authenticate_occurrence(
-            artifact_reference=item.source.bridge_reference.artifact_reference,
+            artifact_reference=domain._legacy_artifact(
+                _reference(item).artifact_reference
+            ),
             technical_history_namespace_id=item.history_namespace_id,
             technical_history_sequence=item.history_sequence,
             technical_execution_id=item.execution_id,
@@ -397,7 +551,6 @@ class PolygonCompletedDailyProductionInterpretationApplicationService:
             self._history is not self._history_owner
             or self._history._namespace_id != self._namespace
             or self._history._state is not self._committed
-            or len(self._published) != len(self._committed[1])
         ):
             raise ValueError("Interpretation history replaced or truncated")
         self._observe_technical_history()
@@ -405,9 +558,8 @@ class PolygonCompletedDailyProductionInterpretationApplicationService:
             (source, *self._authenticate(source))
             for source in self._technical_history._state[1]
         )
-        for item, expected in zip(self._committed[1], self._published, strict=True):
-            if item.to_dict() != expected:
-                raise ValueError("retained Interpretation content changed")
+        for fact in self._committed[1]:
+            item = _reconstruct_result(fact)
             source, instrument, _ = self._select(
                 resolved, item.source_technical_occurrence, item.execution_started_at
             )
@@ -537,7 +689,7 @@ class PolygonCompletedDailyProductionInterpretationApplicationService:
                 raise ValueError("staging changed Interpretation")
             available = a._timestamp(self._clock())
             if available < completed or (
-                entries and available < entries[-1].available_at
+                entries and available < _reconstruct_result(entries[-1]).available_at
             ):
                 raise PolygonCompletedDailyInterpretationRefused(
                     _R.TEMPORAL_FAILURE,
@@ -552,18 +704,21 @@ class PolygonCompletedDailyProductionInterpretationApplicationService:
             expected.pop("fingerprint")
             expected["fingerprint"] = canonical_fingerprint(expected)
             if published.to_dict() != expected or any(
-                item.execution_id == published.execution_id for item in entries
+                _reconstruct_result(item).execution_id == published.execution_id
+                for item in entries
             ):
                 raise ValueError(
                     "publication changed content/occurrence or duplicated ID"
                 )
+            fact = _encode_result(published)
             public = _public_result_copy(published)
             _check_copy(public, published, expected)
             if _graph_ids(staged) & _graph_ids(published):
                 raise ValueError("staging aliases authoritative publication")
-            projections = (*self._published, deepcopy(expected))
-            next_state = sequence + 1, (*entries, published)
+            next_state = sequence + 1, (*entries, fact)
             _check_content(published.interpretation, source, instrument)
+            if _encode_result(public) != fact or _encode_result(published) != fact:
+                raise ValueError("prepared Interpretation bytes changed")
             # All fallible work remains before the single authoritative append.
             resolved, _, projection = self._select(
                 self._check_history(), request, started
@@ -573,7 +728,6 @@ class PolygonCompletedDailyProductionInterpretationApplicationService:
             if self._history._state is not state:
                 raise ValueError("history changed during publication")
             _check_copy(public, published, expected)
-            self._published = projections
             self._committed = next_state
             self._history._state = next_state
             return public
@@ -582,11 +736,12 @@ class PolygonCompletedDailyProductionInterpretationApplicationService:
 
     def get_result_history_as_of(
         self,
-        artifact_reference: EvidenceArtifactReference,
+        artifact_reference: EvidenceArtifactReference
+        | domain.GovernedTechnicalArtifactReference,
         *,
         knowledge_as_of: datetime,
     ) -> tuple[PolygonCompletedDailyInterpretationResult, ...]:
-        reference = a._copy_artifact_reference(artifact_reference)
+        reference = domain._copy_artifact(artifact_reference)
         cutoff = a._timestamp(knowledge_as_of)
         reason = _R.HISTORY_INVALID
         try:
@@ -595,7 +750,8 @@ class PolygonCompletedDailyProductionInterpretationApplicationService:
                 self._check_history()
                 reason = _R.PUBLICATION_FAILED
                 copies = []
-                for item in self._history._state[1]:
+                for fact in self._history._state[1]:
+                    item = _reconstruct_result(fact)
                     if (
                         item.source_technical_occurrence.artifact_reference == reference
                         and item.available_at <= cutoff

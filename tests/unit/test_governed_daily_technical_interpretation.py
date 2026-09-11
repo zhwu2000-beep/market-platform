@@ -3,11 +3,15 @@ from __future__ import annotations
 import ast
 import inspect
 import json
+import subprocess
+import sys
 import tomllib
 from copy import deepcopy
 from dataclasses import FrozenInstanceError, fields, replace
 from datetime import timedelta
+from enum import Enum
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 from test_daily_technical_analysis import snapshot as make_snapshot
@@ -39,6 +43,380 @@ POLICY_FINGERPRINT = (
 )
 
 
+def public_graph(root):
+    """Independent oracle: inspect storage and properties, not serialization."""
+    seen = set()
+    pending = [("root", root)]
+    while pending:
+        path, value = pending.pop()
+        if id(value) in seen:
+            continue
+        seen.add(id(value))
+        yield path, value
+        if isinstance(value, Enum):
+            continue
+        if isinstance(value, dict):
+            pending.extend((path + ".key", key) for key in value)
+            pending.extend((path + f"[{key!r}]", item) for key, item in value.items())
+        elif isinstance(value, (tuple, list)):
+            pending.extend((path + f"[{i}]", item) for i, item in enumerate(value))
+        elif not isinstance(value, (str, bytes, int, float, bool, type(None), type)):
+            names = set(getattr(value, "__dataclass_fields__", ()))
+            names.update(getattr(value, "__dict__", ()))
+            for cls in type(value).__mro__:
+                slots = cls.__dict__.get("__slots__", ())
+                names.update((slots,) if isinstance(slots, str) else slots)
+                names.update(
+                    k for k, v in cls.__dict__.items() if isinstance(v, property)
+                )
+            for name in names - {"__dict__", "__weakref__"}:
+                pending.append((path + "." + name, getattr(value, name)))
+
+
+def assert_enum_free(value):
+    assert [
+        (path, type(item).__name__)
+        for path, item in public_graph(value)
+        if isinstance(item, Enum)
+    ] == []
+
+
+def test_b2_domain_graph_has_zero_enum(source):
+    assert_enum_free(interpret(source))
+
+
+PRE_B2_COMMIT = "2e07e5588169195b9bf32e9a789f05ea19af8c7c"
+
+
+def load_pre_b2(path, name):
+    """Execute committed source, independently of the edited working tree."""
+    source = subprocess.check_output(["git", "show", f"{PRE_B2_COMMIT}:{path}"])
+    module = ModuleType(name)
+    sys.modules[name] = module
+    exec(compile(source, f"{PRE_B2_COMMIT}:{path}", "exec"), module.__dict__)
+    return module
+
+
+@pytest.fixture(scope="module")
+def pre_b2_domain():
+    return load_pre_b2(
+        "src/market_platform/research/governed_daily_technical_interpretation.py",
+        "_pre_b2_governed_domain",
+    )
+
+
+def serialized(value):
+    # Insertion order as well as numeric JSON representation must remain compatible.
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
+
+
+@pytest.mark.parametrize("count,lag", [(1, 1), (10, 12), (20, 1), (250, 1), (250, 12)])
+def test_b2_committed_domain_projection_and_fingerprint_parity(
+    pre_b2_domain, count, lag
+):
+    source = make_snapshot(count, lag_days=lag)
+    args = arguments(source)
+    request = args["source_technical_occurrence"]
+    legacy = g._legacy_artifact(request.artifact_reference)
+    old_request = pre_b2_domain.PolygonCompletedDailyInterpretationRequest(
+        **{
+            **{item.name: getattr(request, item.name) for item in fields(request)},
+            "artifact_reference": legacy,
+        }
+    )
+    old = pre_b2_domain.interpret_governed_daily_technical_snapshot(
+        **{
+            **args,
+            "source_technical_occurrence": old_request,
+        }
+    )
+    new = g.interpret_governed_daily_technical_snapshot(**args)
+    assert serialized(new.to_dict()) == serialized(old.to_dict())
+    assert serialized(new._fingerprint_payload()) == serialized(
+        old._fingerprint_payload()
+    )
+    assert new.fingerprint == old.fingerprint
+    assert serialized(request.to_dict()) == serialized(old_request.to_dict())
+    assert serialized(request.artifact_reference.to_dict()) == serialized(
+        legacy.to_dict()
+    )
+    assert request.artifact_reference.fingerprint == legacy.fingerprint
+    assert serialized(new.interpretation_policy_identity.to_dict()) == serialized(
+        old.interpretation_policy_identity.to_dict()
+    )
+    assert (
+        new.interpretation_policy_identity.fingerprint
+        == old.interpretation_policy_identity.fingerprint
+    )
+    assert [serialized(item.to_dict()) for item in new.comparison_evidence] == [
+        serialized(item.to_dict()) for item in old.comparison_evidence
+    ]
+    assert any(isinstance(item, Enum) for _, item in public_graph(old))
+    assert_enum_free(new)
+
+
+def legacy_enum_inventory():
+    from market_platform.research.interpretation import VolatilityState
+    from market_platform.research.technical_policy import TechnicalPolicyKind
+
+    classes = (
+        EvidenceInformationClass,
+        EvidenceAuthority,
+        TechnicalPolicyKind,
+        technical.TechnicalAnalysisQuality,
+        technical.TechnicalAnalysisWarning,
+        classic.DailyTechnicalDirectionalState,
+        VolatilityState,
+        classic.DailyTechnicalExtensionState,
+        classic.TechnicalComparisonOperator,
+        classic.TechnicalComparisonOperandSource,
+    )
+    return {
+        cls: tuple((member.name, member.value, id(member)) for member in cls)
+        for cls in classes
+    }
+
+
+def test_b2_all_ten_legacy_paths_are_removed(pre_b2_domain):
+    found = set()
+    for count in (10, 250):
+        args = arguments(make_snapshot(count, lag_days=12))
+        request = args["source_technical_occurrence"]
+        args["source_technical_occurrence"] = (
+            pre_b2_domain.PolygonCompletedDailyInterpretationRequest(
+                **{
+                    **{
+                        item.name: getattr(request, item.name)
+                        for item in fields(request)
+                    },
+                    "artifact_reference": g._legacy_artifact(
+                        request.artifact_reference
+                    ),
+                }
+            )
+        )
+        old = pre_b2_domain.interpret_governed_daily_technical_snapshot(**args)
+        found.update(
+            type(item) for _, item in public_graph(old) if isinstance(item, Enum)
+        )
+        assert_enum_free(interpret(make_snapshot(count, lag_days=12)))
+    assert found == set(legacy_enum_inventory())
+
+
+def test_b2_legacy_input_is_detached_and_private_adapter_does_not_leak():
+    scalar = reference().artifact_reference
+    legacy = g._legacy_artifact(scalar)
+    assert type(legacy) is EvidenceArtifactReference
+    request = reference(artifact_reference=legacy)
+    assert type(request.artifact_reference) is g.GovernedTechnicalArtifactReference
+    assert request.artifact_reference is not scalar
+    assert request.artifact_reference.to_dict() == legacy.to_dict()
+    assert_enum_free(request)
+    object.__setattr__(legacy, "artifact_id", "corrupted")
+    request.to_dict()
+    assert (
+        g._legacy_artifact(request.artifact_reference).artifact_id == "polygon_fixture"
+    )
+    # Replacing backing storage after normalization must not pass validation.
+    object.__setattr__(request, "artifact_reference", g._legacy_artifact(scalar))
+    with pytest.raises(TypeError):
+        request.to_dict()
+
+
+@pytest.mark.parametrize("kind", ["legacy", "governed"])
+def test_b2_artifact_subclasses_refused(kind):
+    original = reference().artifact_reference
+    cls = type(g._legacy_artifact(original)) if kind == "legacy" else type(original)
+    subclass = type("ArtifactSubclass", (cls,), {})
+    value = g._legacy_artifact(original) if kind == "legacy" else original
+    supplied = subclass(
+        **{item.name: getattr(value, item.name) for item in fields(value) if item.init}
+    )
+    with pytest.raises(TypeError):
+        reference(artifact_reference=supplied)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("artifact_id", " spaced "),
+        ("artifact_version", ""),
+        ("artifact_fingerprint", "bad"),
+        ("information_class", "other"),
+        ("authority", "other"),
+        ("information_class", EvidenceInformationClass.SOURCE_OBSERVATION),
+        ("authority", EvidenceAuthority.EXTERNAL_ORIGIN),
+    ],
+)
+def test_b2_artifact_exact_scalar_validation(field, value):
+    with pytest.raises((TypeError, ValueError)):
+        replace(reference().artifact_reference, **{field: value})
+
+
+@pytest.mark.parametrize("value", [0, True, -0.0, float("nan"), float("inf"), "1.0"])
+def test_b2_operand_requires_canonical_exact_float(value):
+    with pytest.raises((TypeError, ValueError)):
+        g.GovernedTechnicalComparisonOperand(
+            "technical_analysis_snapshot", "ema_8", value
+        )
+
+
+@pytest.mark.parametrize("target", ["source", "field", "operator", "satisfied"])
+def test_b2_comparison_rejects_noncanonical_leaves(source, target):
+    comparison = interpret(source).comparison_evidence[0]
+
+    class Text(str):
+        pass
+
+    if target in ("source", "field"):
+        with pytest.raises(ValueError):
+            replace(
+                comparison.left_operand,
+                **{target: Text(getattr(comparison.left_operand, target))},
+            )
+    else:
+        value = Text(comparison.operator) if target == "operator" else 1
+        with pytest.raises((TypeError, ValueError)):
+            replace(comparison, **{target: value})
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "source_quality",
+        "trend_direction",
+        "momentum_direction",
+        "volatility_state",
+        "extension_state",
+    ],
+)
+def test_b2_content_rejects_string_subclasses_and_enums(source, field):
+    content = interpret(source)
+
+    class Text(str):
+        pass
+
+    enum = next(
+        cls(getattr(content, field))
+        for cls in legacy_enum_inventory()
+        if getattr(content, field) in [item.value for item in cls]
+    )
+    for value in (Text(getattr(content, field)), enum):
+        with pytest.raises(ValueError):
+            replace(content, **{field: value})
+
+
+def test_b2_no_hidden_legacy_wrappers_and_no_shared_configuration(source):
+    from market_platform.research.technical_policy import TechnicalPolicyIdentity
+
+    forbidden = (
+        EvidenceArtifactReference,
+        TechnicalPolicyIdentity,
+        classic.TechnicalComparisonEvidence,
+        classic.TechnicalComparisonOperand,
+    )
+    one, two = interpret(source), interpret(source)
+    for content in (one, two):
+        assert_enum_free(content)
+        assert not any(isinstance(item, forbidden) for _, item in public_graph(content))
+    assert (
+        one.interpretation_policy_identity.configuration
+        is not two.interpretation_policy_identity.configuration
+    )
+    before = legacy_enum_inventory()
+    expected = classic.classic_states(
+        source, ClassicDailyTechnicalInterpretationConfiguration()
+    )
+    object.__setattr__(
+        one.interpretation_policy_identity.configuration, "rsi_neutral", 51.0
+    )
+    assert before == legacy_enum_inventory()
+    assert (
+        classic.classic_states(
+            source, ClassicDailyTechnicalInterpretationConfiguration()
+        )
+        == expected
+    )
+    assert interpret(source).to_dict() == two.to_dict()
+
+
+def test_b2_former_enum_scalar_mutation_cannot_touch_singletons():
+    inventory = legacy_enum_inventory()
+    paths = set()
+    for count in (10, 250):
+        content = interpret(make_snapshot(count, lag_days=12))
+        for path, value in public_graph(content):
+            if type(value) is str and (
+                path.endswith(
+                    (
+                        "direction",
+                        "state",
+                        "source_quality",
+                        "policy_kind",
+                        "information_class",
+                        "authority",
+                        "operator",
+                        ".source",
+                    )
+                )
+                or "source_warnings[" in path
+            ):
+                paths.add(path)
+                for attribute in ("_value_", "_name_"):
+                    with pytest.raises((AttributeError, TypeError)):
+                        object.__setattr__(value, attribute, "corrupted")
+        content._validate()
+    assert any("source_warnings[0]" in path for path in paths)
+    assert any("source_warnings[1]" in path for path in paths)
+    assert inventory == legacy_enum_inventory()
+
+
+@pytest.mark.parametrize(
+    "field",
+    [item.name for item in fields(ClassicDailyTechnicalInterpretationConfiguration)],
+)
+def test_b2_each_frozen_policy_threshold_is_detached_and_enforced(source, field):
+    content = interpret(source)
+    policy = content.interpretation_policy_identity
+    config = policy.configuration
+    object.__setattr__(config, field, getattr(config, field) + 0.01)
+    refingerprint(policy)
+    with pytest.raises(ValueError):
+        policy._validate()
+    assert (
+        interpret(source).interpretation_policy_identity.fingerprint
+        == POLICY_FINGERPRINT
+    )
+
+
+@pytest.mark.parametrize(
+    "side,field,value",
+    [
+        ("left_operand", "source", "interpretation_policy_configuration"),
+        ("right_operand", "source", "interpretation_policy_configuration"),
+        ("left_operand", "field", "ema_20"),
+        ("right_operand", "field", "ema_8"),
+    ],
+)
+def test_b2_validator_checks_both_complete_operands(source, side, field, value):
+    content = interpret(source)
+    comparison = content.comparison_evidence[0]
+    operand = getattr(comparison, side)
+    if field == "source":
+        changed = replace(operand, source=value, field="rsi_neutral")
+    else:
+        changed = replace(operand, field=value)
+    comparison = replace(comparison, **{side: changed})
+    content = replace(
+        content, comparison_evidence=(comparison, *content.comparison_evidence[1:])
+    )
+    content._validate()  # Coherent content fingerprint is insufficient.
+    with pytest.raises(ValueError, match="correspondence"):
+        g.validate_governed_daily_technical_interpretation(
+            content=content, **arguments(source)
+        )
+
+
 SEMANTIC_MUTATIONS = (
     "trend_direction",
     "momentum_direction",
@@ -56,7 +434,11 @@ def coherently_wrong_semantics(content, mutation):
     if mutation.endswith("direction") or mutation.endswith("state"):
         current = getattr(result, mutation)
         object.__setattr__(
-            result, mutation, next(x for x in type(current) if x != current)
+            result,
+            mutation,
+            "unavailable"
+            if current != "unavailable"
+            else ("low" if mutation == "volatility_state" else "mixed"),
         )
     else:
         comparisons = list(result.comparison_evidence)
@@ -78,7 +460,7 @@ def coherently_wrong_semantics(content, mutation):
             else:
                 comparison = replace(
                     comparison,
-                    operator=classic.TechnicalComparisonOperator.LESS_THAN,
+                    operator="less_than",
                     satisfied=comparison.left_operand.value
                     < comparison.right_operand.value,
                 )
@@ -111,7 +493,9 @@ def test_domain_validator_accepts_exact_available_comparisons(count):
     expected = classic.build_classic_comparison_evidence(
         source, ClassicDailyTechnicalInterpretationConfiguration()
     )
-    assert content.comparison_evidence == expected
+    assert [item.to_dict() for item in content.comparison_evidence] == [
+        item.to_dict() for item in expected
+    ]
     if count == 250:
         assert len(content.comparison_evidence) == 18
     else:
@@ -144,9 +528,9 @@ def test_domain_validator_refuses_source_fact_mismatch(source, field):
     elif field == "analysis_as_of":
         value += timedelta(days=1)
     elif field == "source_quality":
-        value = technical.TechnicalAnalysisQuality.DEGRADED
+        value = "degraded"
     elif field == "source_warnings":
-        value = (technical.TechnicalAnalysisWarning.STALE_EVIDENCE,)
+        value = ("stale_evidence",)
     else:
         value = "sha256:" + "0" * 64
     changed = replace(content, **{field: value})
@@ -160,12 +544,17 @@ def test_domain_validator_refuses_source_fact_mismatch(source, field):
 @pytest.mark.parametrize("target", ["content", "fixed_policy"])
 def test_domain_validator_refuses_policy_drift(source, monkeypatch, target):
     content = interpret(source)
-    policy = deepcopy(content.interpretation_policy_identity)
+    policy = (
+        deepcopy(content.interpretation_policy_identity)
+        if target == "content"
+        else ClassicDailyTechnicalInterpretationPolicy().identity
+    )
     object.__setattr__(policy.configuration, "rsi_neutral", 55.0)
     refingerprint(policy)
     if target == "content":
         object.__setattr__(content, "interpretation_policy_identity", policy)
-        refingerprint(content)
+        with pytest.raises(ValueError):
+            refingerprint(content)
     else:
         monkeypatch.setattr(g, "_fixed_policy", lambda: policy)
     with pytest.raises(ValueError):
@@ -490,29 +879,26 @@ def test_semantic_equivalence_omissions_quality_and_warning_order(count, lag):
         result.volatility_state,
         result.extension_state,
     ) == classic.classic_states(source, config)
-    assert result.comparison_evidence == classic.build_classic_comparison_evidence(
-        source, config
-    )
-    assert result.source_quality is source.quality
-    assert result.source_warnings == source.warnings
+    assert [item.to_dict() for item in result.comparison_evidence] == [
+        item.to_dict()
+        for item in classic.build_classic_comparison_evidence(source, config)
+    ]
+    assert result.source_quality == source.quality.value
+    assert result.source_warnings == tuple(item.value for item in source.warnings)
     ids = tuple(item.evidence_id for item in result.comparison_evidence)
     assert ids == tuple(item for item in IDS if item in ids)
     if count == 250:
         assert ids == IDS
         assert {item.satisfied for item in result.comparison_evidence} == {True, False}
     if count == 10 and lag == 12:
-        assert result.source_quality is technical.TechnicalAnalysisQuality.DEGRADED
-        assert tuple(item.value for item in result.source_warnings) == (
+        assert result.source_quality == "degraded"
+        assert result.source_warnings == (
             "insufficient_profile_history",
             "stale_evidence",
         )
     if count == 1:
         assert result.comparison_evidence == ()
-        assert (
-            result.trend_direction.value
-            == result.momentum_direction.value
-            == "unavailable"
-        )
+        assert result.trend_direction == result.momentum_direction == "unavailable"
 
 
 def adjusted(source, **changes):
@@ -554,7 +940,7 @@ def adjusted(source, **changes):
 )
 def test_volatility_thresholds(source, realized, state):
     assert (
-        interpret(adjusted(source, realized_volatility=realized)).volatility_state.value
+        interpret(adjusted(source, realized_volatility=realized)).volatility_state
         == state
     )
 
@@ -570,7 +956,7 @@ def test_volatility_thresholds(source, realized, state):
 )
 def test_momentum_equality_and_mixed(source, rsi, line, signal, state):
     result = interpret(adjusted(source, rsi_14=rsi, macd_line=line, macd_signal=signal))
-    assert result.momentum_direction.value == state
+    assert result.momentum_direction == state
     assert type(result.momentum_direction) is not type(source.momentum_state)
 
 
@@ -592,7 +978,7 @@ def test_extension_equality(source, close, ema, state):
         ema_20=ema,
         atr_percent_14=100.0 * source.wilder_atr_14 / close,
     )
-    assert interpret(source).extension_state.value == state
+    assert interpret(source).extension_state == state
 
 
 @pytest.mark.parametrize(
@@ -611,18 +997,18 @@ def test_trend_direction_is_not_snapshot_description(
     result = interpret(
         adjusted(source, ema_8=ema8, ema_20=ema20, ema_144=ema144, ema_169=ema169)
     )
-    assert result.trend_direction.value == state
+    assert result.trend_direction == state
     assert type(result.trend_direction) is not type(source.trend_state)
     if ema144 == 120.0:
         assert source.trend_state.value == "mixed"
-        assert result.trend_direction.value == "positive"
+        assert result.trend_direction == "positive"
 
 
 @pytest.mark.parametrize(
     "name,value",
     [
         ("schema_version", "daily_technical_interpretation/v1"),
-        ("source_quality", "complete"),
+        ("source_quality", technical.TechnicalAnalysisQuality.COMPLETE),
         ("source_warnings", []),
         ("source_trading_identity", object()),
         ("canonical_instrument_id", "us-aapl"),
@@ -631,7 +1017,7 @@ def test_trend_direction_is_not_snapshot_description(
         ("source_governed_dataset_fingerprint", "bad"),
         ("source_research_dataset_content_fingerprint", "bad"),
         ("comparison_evidence", []),
-        ("trend_direction", "positive"),
+        ("trend_direction", classic.DailyTechnicalDirectionalState.POSITIVE),
     ],
 )
 def test_content_mutation_detected(source, name, value):
@@ -650,8 +1036,8 @@ def test_constructor_rejects_bad_types_and_missing_retained_fields(source):
         {"comparison_evidence": []},
         {"source_trading_identity": object()},
         {
-            "interpretation_policy_identity": replace(
-                result.interpretation_policy_identity, policy_id="other"
+            "interpretation_policy_identity": (
+                ClassicDailyTechnicalInterpretationPolicy().identity
             )
         },
     ):
@@ -818,8 +1204,8 @@ def test_coherently_changed_result_facts_refused(source, monkeypatch, name):
             "source_technical_analysis_snapshot_fingerprint": "sha256:" + "d" * 64,
             "source_governed_dataset_fingerprint": "sha256:" + "d" * 64,
             "source_research_dataset_content_fingerprint": "sha256:" + "d" * 64,
-            "source_quality": technical.TechnicalAnalysisQuality.DEGRADED,
-            "source_warnings": (technical.TechnicalAnalysisWarning.STALE_EVIDENCE,),
+            "source_quality": "degraded",
+            "source_warnings": ("stale_evidence",),
         }
         object.__setattr__(result, name, changes[name])
         refingerprint(result)
@@ -1091,5 +1477,7 @@ def test_released_slice8_source_shape_without_upstream_execution(monkeypatch):
         result.source_research_dataset_content_fingerprint
         == retained.source.evidence.dataset_content_fingerprint
     )
-    assert result.source_quality is retained.snapshot.quality
-    assert result.source_warnings == retained.snapshot.warnings
+    assert result.source_quality == retained.snapshot.quality.value
+    assert result.source_warnings == tuple(
+        item.value for item in retained.snapshot.warnings
+    )

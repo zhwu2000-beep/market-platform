@@ -6,13 +6,18 @@ the semantic entry point. This module neither resolves history nor issues result
 
 from __future__ import annotations
 
+import math
 import re
 from copy import deepcopy
 from dataclasses import dataclass, field, fields, replace
 from datetime import UTC, datetime
 
-from market_platform._fingerprint import canonical_fingerprint
-from market_platform.evidence import EvidenceArtifactReference
+from market_platform._fingerprint import canonical_fingerprint, canonical_float
+from market_platform.evidence import (
+    EvidenceArtifactReference,
+    EvidenceAuthority,
+    EvidenceInformationClass,
+)
 from market_platform.instruments.identity import (
     CanonicalInstrument,
     CanonicalInstrumentId,
@@ -22,17 +27,12 @@ from market_platform.research.classic_daily_technical import (
     ClassicDailyTechnicalInterpretationPolicy,
 )
 from market_platform.research.daily_technical_interpretation import (
-    DailyTechnicalDirectionalState,
-    DailyTechnicalExtensionState,
     TechnicalComparisonEvidence,
     build_classic_comparison_evidence,
     classic_states,
 )
-from market_platform.research.interpretation import VolatilityState
 from market_platform.research.technical_analysis import (
-    TechnicalAnalysisQuality,
     TechnicalAnalysisSnapshot,
-    TechnicalAnalysisWarning,
 )
 from market_platform.research.technical_policy import (
     ClassicDailyTechnicalInterpretationConfiguration,
@@ -76,21 +76,333 @@ def _fingerprint(value: object) -> None:
         raise ValueError("exact SHA-256 fingerprint required")
 
 
-def _copy_artifact(value: EvidenceArtifactReference) -> EvidenceArtifactReference:
+def _choice(value: object, choices: tuple[str, ...]) -> None:
+    if type(value) is not str or value not in choices:
+        raise ValueError("exact closed scalar category required")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class GovernedTechnicalArtifactReference:
+    """Scalar artifact value; possession conveys no publication authority."""
+
+    artifact_id: str
+    artifact_version: str
+    artifact_fingerprint: str
+    information_class: str
+    authority: str
+    schema_version: str = field(init=False, default="evidence_artifact_reference/v2")
+    fingerprint: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        self._validate_structure()
+        object.__setattr__(
+            self, "fingerprint", canonical_fingerprint(self._fingerprint_payload())
+        )
+
+    def _validate_structure(self) -> None:
+        for value, limit in ((self.artifact_id, 256), (self.artifact_version, 128)):
+            if (
+                type(value) is not str
+                or not 1 <= len(value) <= limit
+                or any(not "!" <= char <= "~" for char in value)
+            ):
+                raise ValueError("canonical visible ASCII artifact identity required")
+        _fingerprint(self.artifact_fingerprint)
+        _choice(self.schema_version, ("evidence_artifact_reference/v2",))
+        _choice(
+            self.information_class,
+            ("source_observation", "source_measurement", "source_assertion"),
+        )
+        _choice(self.authority, ("platform_origin", "external_origin"))
+
+    def _fingerprint_payload(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "artifact_id": self.artifact_id,
+            "artifact_version": self.artifact_version,
+            "artifact_fingerprint": self.artifact_fingerprint,
+            "information_class": self.information_class,
+            "authority": self.authority,
+        }
+
+    def _validate(self) -> None:
+        self._validate_structure()
+        _fingerprint(self.fingerprint)
+        if self.fingerprint != canonical_fingerprint(self._fingerprint_payload()):
+            raise ValueError("artifact reference fingerprint mismatch")
+
+    def to_dict(self) -> dict[str, object]:
+        self._validate()
+        return {**self._fingerprint_payload(), "fingerprint": self.fingerprint}
+
+
+def _copy_artifact(value: object) -> GovernedTechnicalArtifactReference:
+    if type(value) is GovernedTechnicalArtifactReference:
+        value._validate()
+        return replace(value)
     if type(value) is not EvidenceArtifactReference:
-        raise TypeError("exact EvidenceArtifactReference required")
+        raise TypeError("exact legacy or governed artifact reference required")
     value._validate()
-    copied = replace(value)
-    if copied != value:
+    copied = GovernedTechnicalArtifactReference(
+        artifact_id=value.artifact_id,
+        artifact_version=value.artifact_version,
+        artifact_fingerprint=value.artifact_fingerprint,
+        information_class=value.information_class.value,
+        authority=value.authority.value,
+    )
+    if copied.to_dict() != value.to_dict():
         raise ValueError("artifact reference is noncanonical")
     return copied
+
+
+def _legacy_artifact(
+    value: GovernedTechnicalArtifactReference,
+) -> EvidenceArtifactReference:
+    """Ephemeral adapter for private Slice 8 resolution, never retained authority."""
+    scalar = _copy_artifact(value)
+    legacy = EvidenceArtifactReference(
+        artifact_id=scalar.artifact_id,
+        artifact_version=scalar.artifact_version,
+        artifact_fingerprint=scalar.artifact_fingerprint,
+        information_class=EvidenceInformationClass(scalar.information_class),
+        authority=EvidenceAuthority(scalar.authority),
+    )
+    if legacy.to_dict() != scalar.to_dict():
+        raise ValueError("private artifact reconstruction mismatch")
+    return legacy
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class GovernedTechnicalPolicyIdentity:
+    policy_kind: str
+    policy_id: str
+    behavioral_revision: str
+    configuration_schema: str
+    configuration: ClassicDailyTechnicalInterpretationConfiguration
+    schema_version: str = field(init=False, default="technical_policy_identity/v1")
+    fingerprint: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        self._validate_structure()
+        object.__setattr__(self, "configuration", replace(self.configuration))
+        object.__setattr__(
+            self, "fingerprint", canonical_fingerprint(self._fingerprint_payload())
+        )
+        self._validate()
+
+    def _validate_structure(self) -> None:
+        for value, expected in (
+            (self.schema_version, "technical_policy_identity/v1"),
+            (self.policy_kind, "daily_technical_interpretation"),
+            (self.policy_id, "classic_daily_technical"),
+            (self.behavioral_revision, "1.0.0"),
+            (
+                self.configuration_schema,
+                "classic_daily_technical_interpretation_configuration/v1",
+            ),
+        ):
+            _choice(value, (expected,))
+        if (
+            type(self.configuration)
+            is not ClassicDailyTechnicalInterpretationConfiguration
+        ):
+            raise TypeError("exact fixed configuration required")
+        self.configuration._validate()
+        if self.configuration.to_dict() != {
+            "rsi_neutral": 50.0,
+            "rsi_elevated": 70.0,
+            "rsi_depressed": 30.0,
+            "realized_volatility_low": 0.15,
+            "realized_volatility_high": 0.30,
+            "ema20_extension_band_percent": 5.0,
+        }:
+            raise ValueError("fixed classic default policy mismatch")
+
+    def _projection(self, *, fingerprint_floats: bool) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "policy_kind": self.policy_kind,
+            "policy_id": self.policy_id,
+            "behavioral_revision": self.behavioral_revision,
+            "configuration_schema": self.configuration_schema,
+            "configuration": self.configuration.to_dict(
+                fingerprint_floats=fingerprint_floats
+            ),
+        }
+
+    def _fingerprint_payload(self) -> dict[str, object]:
+        return self._projection(fingerprint_floats=True)
+
+    def _validate(self) -> None:
+        self._validate_structure()
+        _fingerprint(self.fingerprint)
+        if (
+            self.fingerprint != _POLICY_FINGERPRINT
+            or self.fingerprint != canonical_fingerprint(self._fingerprint_payload())
+        ):
+            raise ValueError("fixed classic default policy mismatch")
+
+    def to_dict(self) -> dict[str, object]:
+        self._validate()
+        return {
+            **self._projection(fingerprint_floats=False),
+            "fingerprint": self.fingerprint,
+        }
+
+
+def _scalar_policy(value: TechnicalPolicyIdentity) -> GovernedTechnicalPolicyIdentity:
+    _check_policy(value)
+    assert type(value.configuration) is ClassicDailyTechnicalInterpretationConfiguration
+    return GovernedTechnicalPolicyIdentity(
+        policy_kind=value.policy_kind.value,
+        policy_id=value.policy_id,
+        behavioral_revision=value.behavioral_revision,
+        configuration_schema=value.configuration_schema,
+        configuration=value.configuration,
+    )
+
+
+_OPERAND_FIELDS = {
+    "technical_analysis_snapshot": (
+        "ema_8",
+        "ema_20",
+        "ema_144",
+        "ema_169",
+        "latest_close",
+        "macd_line",
+        "macd_signal",
+        "rsi_14",
+        "realized_volatility",
+        "volatility_references.distance_from_ema20_percent",
+    ),
+    "interpretation_policy_configuration": (
+        "rsi_neutral",
+        "rsi_elevated",
+        "rsi_depressed",
+        "realized_volatility_low",
+        "realized_volatility_high",
+        "ema20_extension_band_percent",
+    ),
+    "interpretation_policy_derived": ("negative_ema20_extension_band_percent",),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class GovernedTechnicalComparisonOperand:
+    source: str
+    field: str
+    value: float
+
+    def __post_init__(self) -> None:
+        self._validate()
+
+    def _validate(self) -> None:
+        _choice(self.source, tuple(_OPERAND_FIELDS))
+        _choice(self.field, _OPERAND_FIELDS[self.source])
+        if type(self.value) is not float or not math.isfinite(self.value):
+            raise TypeError("operand value must be an exact finite float")
+        if self.value == 0.0 and math.copysign(1.0, self.value) < 0.0:
+            raise ValueError("operand value must not retain negative zero")
+
+    def to_dict(self, *, fingerprint_floats: bool = False) -> dict[str, object]:
+        self._validate()
+        return {
+            "source": self.source,
+            "field": self.field,
+            "value": canonical_float(self.value) if fingerprint_floats else self.value,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class GovernedTechnicalComparisonEvidence:
+    evidence_id: str
+    left_operand: GovernedTechnicalComparisonOperand
+    operator: str
+    right_operand: GovernedTechnicalComparisonOperand
+    satisfied: bool
+
+    def __post_init__(self) -> None:
+        self._validate()
+        object.__setattr__(self, "left_operand", replace(self.left_operand))
+        object.__setattr__(self, "right_operand", replace(self.right_operand))
+
+    def _validate(self) -> None:
+        _choice(self.evidence_id, _COMPARISON_IDS)
+        for operand in (self.left_operand, self.right_operand):
+            if type(operand) is not GovernedTechnicalComparisonOperand:
+                raise TypeError("exact governed operand required")
+            operand._validate()
+        _choice(
+            self.operator,
+            (
+                "greater_than",
+                "greater_than_or_equal",
+                "less_than",
+                "less_than_or_equal",
+            ),
+        )
+        if type(self.satisfied) is not bool:
+            raise TypeError("exact comparison satisfied bool required")
+        # Use the released comparison validator, including its relational check.
+        classic.TechnicalComparisonEvidence(
+            self.evidence_id,
+            classic.TechnicalComparisonOperand(
+                classic.TechnicalComparisonOperandSource(self.left_operand.source),
+                self.left_operand.field,
+                self.left_operand.value,
+            ),
+            classic.TechnicalComparisonOperator(self.operator),
+            classic.TechnicalComparisonOperand(
+                classic.TechnicalComparisonOperandSource(self.right_operand.source),
+                self.right_operand.field,
+                self.right_operand.value,
+            ),
+            self.satisfied,
+        )._validate()
+
+    def to_dict(self, *, fingerprint_floats: bool = False) -> dict[str, object]:
+        self._validate()
+        return {
+            "evidence_id": self.evidence_id,
+            "left_operand": self.left_operand.to_dict(
+                fingerprint_floats=fingerprint_floats
+            ),
+            "operator": self.operator,
+            "right_operand": self.right_operand.to_dict(
+                fingerprint_floats=fingerprint_floats
+            ),
+            "satisfied": self.satisfied,
+        }
+
+
+def _scalar_comparison(
+    value: TechnicalComparisonEvidence,
+) -> GovernedTechnicalComparisonEvidence:
+    if type(value) is not TechnicalComparisonEvidence:
+        raise TypeError("exact released comparison required")
+    value._validate()
+    return GovernedTechnicalComparisonEvidence(
+        value.evidence_id,
+        GovernedTechnicalComparisonOperand(
+            value.left_operand.source.value,
+            value.left_operand.field,
+            value.left_operand.value,
+        ),
+        value.operator.value,
+        GovernedTechnicalComparisonOperand(
+            value.right_operand.source.value,
+            value.right_operand.field,
+            value.right_operand.value,
+        ),
+        value.satisfied,
+    )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PolygonCompletedDailyInterpretationRequest:
     """Five exact source selectors, never bearer authority or a history lookup."""
 
-    artifact_reference: EvidenceArtifactReference
+    artifact_reference: GovernedTechnicalArtifactReference
     technical_history_namespace_id: str
     technical_history_sequence: int
     technical_execution_id: str
@@ -103,7 +415,9 @@ class PolygonCompletedDailyInterpretationRequest:
         self._validate()
 
     def _validate(self) -> None:
-        _copy_artifact(self.artifact_reference)
+        if type(self.artifact_reference) is not GovernedTechnicalArtifactReference:
+            raise TypeError("exact governed artifact reference required")
+        self.artifact_reference._validate()
         for value, prefix in (
             (
                 self.technical_history_namespace_id,
@@ -180,6 +494,8 @@ def _fixed_policy() -> TechnicalPolicyIdentity:
 def _copy_canonical(value: CanonicalInstrumentId) -> CanonicalInstrumentId:
     if type(value) is not CanonicalInstrumentId:
         raise TypeError("exact canonical instrument ID required")
+    if type(value.instrument_id) is not str:
+        raise TypeError("exact canonical instrument scalar required")
     copied = CanonicalInstrumentId(value.instrument_id)
     if copied != value:
         raise ValueError("canonical instrument ID is noncanonical")
@@ -189,6 +505,8 @@ def _copy_canonical(value: CanonicalInstrumentId) -> CanonicalInstrumentId:
 def _copy_trading(value: TradingInstrumentIdentity) -> TradingInstrumentIdentity:
     if type(value) is not TradingInstrumentIdentity:
         raise TypeError("exact source trading identity required")
+    if any(type(getattr(value, item.name)) is not str for item in fields(value)):
+        raise TypeError("exact trading identity scalars required")
     copied = TradingInstrumentIdentity(value.symbol, value.venue)
     if copied != value:
         raise ValueError("source trading identity is noncanonical")
@@ -210,14 +528,14 @@ class GovernedDailyTechnicalInterpretation:
     source_technical_analysis_snapshot_fingerprint: str
     source_governed_dataset_fingerprint: str
     source_research_dataset_content_fingerprint: str
-    interpretation_policy_identity: TechnicalPolicyIdentity
-    source_quality: TechnicalAnalysisQuality
-    source_warnings: tuple[TechnicalAnalysisWarning, ...]
-    trend_direction: DailyTechnicalDirectionalState
-    momentum_direction: DailyTechnicalDirectionalState
-    volatility_state: VolatilityState
-    extension_state: DailyTechnicalExtensionState
-    comparison_evidence: tuple[TechnicalComparisonEvidence, ...]
+    interpretation_policy_identity: GovernedTechnicalPolicyIdentity
+    source_quality: str
+    source_warnings: tuple[str, ...]
+    trend_direction: str
+    momentum_direction: str
+    volatility_state: str
+    extension_state: str
+    comparison_evidence: tuple[GovernedTechnicalComparisonEvidence, ...]
     schema_version: str = field(
         init=False, default=GOVERNED_DAILY_TECHNICAL_INTERPRETATION_SCHEMA
     )
@@ -234,9 +552,12 @@ class GovernedDailyTechnicalInterpretation:
             ("source_trading_identity", _copy_trading(self.source_trading_identity)),
             (
                 "interpretation_policy_identity",
-                copy_technical_policy_identity(self.interpretation_policy_identity),
+                replace(self.interpretation_policy_identity),
             ),
-            ("comparison_evidence", deepcopy(self.comparison_evidence)),
+            (
+                "comparison_evidence",
+                tuple(replace(item) for item in self.comparison_evidence),
+            ),
         ):
             object.__setattr__(self, name, copied)
         object.__setattr__(
@@ -259,22 +580,35 @@ class GovernedDailyTechnicalInterpretation:
             self.source_research_dataset_content_fingerprint,
         ):
             _fingerprint(value)
-        _check_policy(self.interpretation_policy_identity)
-        for value, kind in (
-            (self.source_quality, TechnicalAnalysisQuality),
-            (self.trend_direction, DailyTechnicalDirectionalState),
-            (self.momentum_direction, DailyTechnicalDirectionalState),
-            (self.volatility_state, VolatilityState),
-            (self.extension_state, DailyTechnicalExtensionState),
+        if (
+            type(self.interpretation_policy_identity)
+            is not GovernedTechnicalPolicyIdentity
         ):
-            if type(value) is not kind:
-                raise TypeError("exact Interpretation state required")
-        if type(self.source_warnings) is not tuple or any(
-            type(item) is not TechnicalAnalysisWarning for item in self.source_warnings
+            raise TypeError("exact governed policy identity required")
+        self.interpretation_policy_identity._validate()
+        for value, choices in (
+            (self.source_quality, ("complete", "degraded")),
+            (self.trend_direction, ("positive", "negative", "mixed", "unavailable")),
+            (self.momentum_direction, ("positive", "negative", "mixed", "unavailable")),
+            (self.volatility_state, ("low", "normal", "high", "unavailable")),
+            (
+                self.extension_state,
+                (
+                    "above_reference_band",
+                    "within_reference_band",
+                    "below_reference_band",
+                    "unavailable",
+                ),
+            ),
         ):
+            _choice(value, choices)
+        if type(self.source_warnings) is not tuple:
             raise TypeError("exact source warning tuple required")
+        warnings = ("insufficient_profile_history", "stale_evidence")
+        for warning in self.source_warnings:
+            _choice(warning, warnings)
         if self.source_warnings != tuple(
-            item for item in TechnicalAnalysisWarning if item in self.source_warnings
+            item for item in warnings if item in self.source_warnings
         ):
             raise ValueError(
                 "source warnings must retain canonical order without duplicates"
@@ -282,7 +616,7 @@ class GovernedDailyTechnicalInterpretation:
         if type(self.comparison_evidence) is not tuple:
             raise TypeError("exact comparison tuple required")
         for item in self.comparison_evidence:
-            if type(item) is not TechnicalComparisonEvidence:
+            if type(item) is not GovernedTechnicalComparisonEvidence:
                 raise TypeError("exact comparison evidence required")
             item._validate()
         ids = tuple(item.evidence_id for item in self.comparison_evidence)
@@ -317,12 +651,12 @@ class GovernedDailyTechnicalInterpretation:
                     fingerprint_floats=fingerprint_floats
                 ),
             },
-            "source_quality": self.source_quality.value,
-            "source_warnings": [item.value for item in self.source_warnings],
-            "trend_direction": self.trend_direction.value,
-            "momentum_direction": self.momentum_direction.value,
-            "volatility_state": self.volatility_state.value,
-            "extension_state": self.extension_state.value,
+            "source_quality": self.source_quality,
+            "source_warnings": list(self.source_warnings),
+            "trend_direction": self.trend_direction,
+            "momentum_direction": self.momentum_direction,
+            "volatility_state": self.volatility_state,
+            "extension_state": self.extension_state,
             "comparison_evidence": [
                 item.to_dict(fingerprint_floats=fingerprint_floats)
                 for item in self.comparison_evidence
@@ -372,7 +706,7 @@ def _expected_projection(
         "source_research_dataset_content_fingerprint": (
             snapshot.evidence.dataset_content_fingerprint
         ),
-        "interpretation_policy_identity": policy.to_dict(),
+        "interpretation_policy_identity": _scalar_policy(policy).to_dict(),
         "source_quality": snapshot.quality.value,
         "source_warnings": [item.value for item in snapshot.warnings],
     }
@@ -386,7 +720,9 @@ def _expected_projection(
             "momentum_direction": states[1].value,
             "volatility_state": states[2].value,
             "extension_state": states[3].value,
-            "comparison_evidence": [item.to_dict() for item in comparisons],
+            "comparison_evidence": [
+                _scalar_comparison(item).to_dict() for item in comparisons
+            ],
         }
     )
     return deepcopy(expected)
@@ -541,14 +877,14 @@ def interpret_governed_daily_technical_snapshot(
         source_technical_analysis_snapshot_fingerprint=detached.fingerprint,
         source_governed_dataset_fingerprint=source_governed_dataset_fingerprint,
         source_research_dataset_content_fingerprint=detached.evidence.dataset_content_fingerprint,
-        interpretation_policy_identity=working_policy,
-        source_quality=detached.quality,
-        source_warnings=detached.warnings,
-        trend_direction=trend,
-        momentum_direction=momentum,
-        volatility_state=volatility,
-        extension_state=extension,
-        comparison_evidence=comparisons,
+        interpretation_policy_identity=_scalar_policy(working_policy),
+        source_quality=detached.quality.value,
+        source_warnings=tuple(item.value for item in detached.warnings),
+        trend_direction=trend.value,
+        momentum_direction=momentum.value,
+        volatility_state=volatility.value,
+        extension_state=extension.value,
+        comparison_evidence=tuple(_scalar_comparison(item) for item in comparisons),
     )
     for source in (snapshot, detached, expected_source):
         source._validate()
@@ -576,6 +912,10 @@ __all__ = [
     "GOVERNED_DAILY_TECHNICAL_INTERPRETATION_SCHEMA",
     "PolygonCompletedDailyInterpretationRequest",
     "GovernedDailyTechnicalInterpretation",
+    "GovernedTechnicalArtifactReference",
+    "GovernedTechnicalPolicyIdentity",
+    "GovernedTechnicalComparisonOperand",
+    "GovernedTechnicalComparisonEvidence",
     "interpret_governed_daily_technical_snapshot",
     "validate_governed_daily_technical_interpretation",
 ]
