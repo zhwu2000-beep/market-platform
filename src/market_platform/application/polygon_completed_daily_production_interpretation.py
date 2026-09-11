@@ -276,12 +276,15 @@ class PolygonCompletedDailyProductionInterpretationApplicationService:
     def _authenticate(
         self, item: t.PolygonCompletedDailyTechnicalResult
     ) -> tuple[CanonicalInstrument, dict[str, object]]:
-        item.to_dict()
-        bridge = self._technical_service._resolve(
-            item.source.bridge_reference, item.execution_started_at
+        issued, bridge = self._technical_service._authenticate_occurrence(
+            artifact_reference=item.source.bridge_reference.artifact_reference,
+            technical_history_namespace_id=item.history_namespace_id,
+            technical_history_sequence=item.history_sequence,
+            technical_execution_id=item.execution_id,
+            technical_fingerprint=item.fingerprint,
         )
-        if t._source_lineage(bridge) != item.source:
-            raise ValueError("retained technical lineage differs from original bridge")
+        if issued is not item:
+            raise ValueError("technical occurrence is not the original issuance")
         material = bridge.qualification.construction_result.material
         instrument = material.mapping_resolution_provenance.mapping.canonical_instrument
         instrument._validate()
@@ -305,6 +308,8 @@ class PolygonCompletedDailyProductionInterpretationApplicationService:
         )
 
     def _observe_technical_history(self) -> None:
+        # Observation can add retention checks only after publisher authentication.
+        self._technical_service._validate_authority()
         bridge = self._technical_service._bridge_service
         qualification = bridge._qualification_service
         validity = qualification._validity_service

@@ -849,9 +849,9 @@ def test_frozen_files_exports_version_and_output_scope():
     )
     frozen = [
         "docs/adr/0040_governed_daily_technical_interpretation.md",
+        "docs/adr/0041_publication_time_technical_issuance_authority_and_governed_interpretation_value_isolation.md",
         "src/market_platform/research/daily_technical_interpretation.py",
         "src/market_platform/research/daily_technical_assessment.py",
-        "src/market_platform/application/polygon_completed_daily_production_technical.py",
         "src/market_platform/application/polygon_completed_daily_production_bridge.py",
         "pyproject.toml",
     ]
@@ -873,6 +873,49 @@ def test_frozen_files_exports_version_and_output_scope():
         "fingerprint",
     }
     assert "integrity" not in inspect.getsource(app)
+
+
+@pytest.mark.parametrize("timing", ["before_construction", "before_observation"])
+@pytest.mark.parametrize("rewrite", [False, True])
+def test_b1_first_seen_replacement_refused(bridge_fixture, timing, rewrite):  # noqa: F811
+    source = technical_service(bridge_fixture, lambda: bridge_fixture[1].available_at)
+    if timing == "before_observation":
+        service = Service(
+            source, execution_clock=lambda: bridge_fixture[1].available_at
+        )
+    public = source.execute(technical_request(bridge_fixture[1]))
+    if rewrite:
+        object.__setattr__(
+            public.snapshot, "latest_close", public.snapshot.latest_close + 1
+        )
+        from test_polygon_completed_daily_production_technical import (
+            _refingerprint_snapshot,
+        )
+
+        _refingerprint_snapshot(public.snapshot)
+        _refingerprint(public)
+    public.to_dict()  # Coherent complete projection, never an issuance credential.
+    source._history._state = (2, (public,))
+    if timing == "before_construction":
+        with pytest.raises(app.PolygonCompletedDailyInterpretationRefused):
+            Service(source)
+    else:
+        _refuse(service, _request(public))
+
+
+def test_b1_authentic_appends_and_consumed_replacement(bridge_fixture):  # noqa: F811
+    instant = bridge_fixture[1].available_at
+    source = technical_service(bridge_fixture, lambda: instant)
+    service = Service(source, execution_clock=lambda: instant)
+    one = source.execute(technical_request(bridge_fixture[1]))
+    assert service.execute(_request(one)).source_technical_occurrence == _request(one)
+    two = source.execute(technical_request(bridge_fixture[1]))
+    assert service.execute(_request(two)).source_technical_occurrence == _request(two)
+    source._history._state = (3, (one, source._history._state[1][1]))
+    # Even discarding downstream observation anchors cannot adopt a replacement.
+    service._observed = ()
+    service._retention = ()
+    _refuse(service, _request(two))
 
 
 def test_zero_retained_matches(bridge_fixture):  # noqa: F811

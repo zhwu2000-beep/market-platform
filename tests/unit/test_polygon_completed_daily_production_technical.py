@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 import inspect
+import json
+import subprocess
+import sys
 import tomllib
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from copy import deepcopy
 from dataclasses import FrozenInstanceError, fields, replace
 from datetime import date, timedelta
+from enum import IntEnum, StrEnum
 from pathlib import Path
+from types import ModuleType
+from uuid import UUID
 
 import pytest
 from test_polygon_completed_daily_production_bridge import _request as bridge_request
@@ -827,3 +835,511 @@ def test_frozen_boundaries_and_no_downstream_output():
         "available_at",
         "fingerprint",
     ]
+
+
+def _authority(service):
+    return (
+        service._PolygonCompletedDailyProductionTechnicalApplicationService__committed
+    )
+
+
+def _authenticate(service, item):
+    with ExitStack() as stack:
+        service._lock_inputs(stack)
+        return service._authenticate_occurrence(
+            artifact_reference=item.source.bridge_reference.artifact_reference,
+            technical_history_namespace_id=item.history_namespace_id,
+            technical_history_sequence=item.history_sequence,
+            technical_execution_id=item.execution_id,
+            technical_fingerprint=item.fingerprint,
+        )[0]
+
+
+def test_b1_empty_root_and_exact_publication_fact(authentic):
+    service = _service(authentic)
+    empty = _authority(service)
+    with ExitStack() as stack:
+        service._lock_inputs(stack)
+        service._validate_authority()
+    assert empty.owner is service._history
+    assert empty.namespace == service._history._namespace_id
+    assert empty.state == (1, ())
+    assert empty.issuance == ()
+    with pytest.raises(AttributeError):
+        object.__setattr__(empty, "issuance", (b"invented",))
+    public = service.execute(_request(authentic[1]))
+    root = _authority(service)
+    assert root is not empty
+    assert empty.state == (1, ()) and empty.issuance == ()
+    assert root.state is service._history._state
+    assert root.state[0] == 2
+    assert root.state[1][0] is not public
+    assert len(root.issuance) == 1
+    fact = root.issuance[0]
+    assert type(fact) is bytes
+    assert json.loads(fact) == public.to_dict()
+    assert json.loads(fact)["fingerprint"] == public.fingerprint
+    assert fact == json.dumps(
+        public.to_dict(),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    assert t._issuance_bytes(json.loads(fact)) == fact
+    assert _authenticate(service, public) is root.state[1][0]
+    # Equal immutable byte values denote the same fact, independent of byte identity.
+    service._history._issuance = (bytes(bytearray(fact)),)
+    assert _authenticate(service, public) is root.state[1][0]
+
+
+@pytest.mark.parametrize(
+    "attack",
+    [
+        "equal_copy",
+        "public_copy",
+        "coherent_copy",
+        "in_place",
+        "store",
+        "namespace",
+        "truncate",
+        "rollback",
+        "counter",
+        "bool_counter",
+        "sequence",
+        "remove_fact",
+        "duplicate_fact",
+        "reorder_facts",
+        "replace_fact",
+        "mutable_fact",
+        "list_facts",
+        "simultaneous",
+        "reorder_entries",
+    ],
+)
+def test_b1_root_refuses_corrupt_views_before_selection(authentic, monkeypatch, attack):
+    service = _service(authentic, lambda: authentic[1].available_at)
+    first = service.execute(_request(authentic[1]))
+    earlier = _authority(service)
+    second = service.execute(_request(authentic[1]))
+    root = _authority(service)
+    history = service._history
+    entries = history._state[1]
+    if attack in ("equal_copy", "public_copy", "coherent_copy", "simultaneous"):
+        copy = first if attack == "public_copy" else deepcopy(entries[0])
+        if attack in ("coherent_copy", "simultaneous"):
+            object.__setattr__(
+                copy.snapshot, "latest_close", copy.snapshot.latest_close + 1
+            )
+            _refingerprint_snapshot(copy.snapshot)
+            object.__setattr__(
+                copy, "fingerprint", canonical_fingerprint(copy._payload())
+            )
+        copy.to_dict()
+        history._state = (3, (copy, entries[1]))
+        if attack == "simultaneous":
+            history._issuance = tuple(
+                t._issuance_bytes(x.to_dict()) for x in history._state[1]
+            )
+    elif attack == "in_place":
+        item = entries[0]
+        object.__setattr__(
+            item.snapshot, "latest_close", item.snapshot.latest_close + 1
+        )
+        _refingerprint_snapshot(item.snapshot)
+        object.__setattr__(item, "fingerprint", canonical_fingerprint(item._payload()))
+        item.to_dict()
+    elif attack == "store":
+        replacement = t._TechnicalHistory()
+        replacement._namespace_id = history._namespace_id
+        replacement._state = history._state
+        replacement._issuance = history._issuance
+        service._history = replacement
+    elif attack == "namespace":
+        history._namespace_id = "polygon_completed_daily_technical_history:" + "f" * 32
+    elif attack == "truncate":
+        history._state = (1, ())
+        history._issuance = ()
+    elif attack == "rollback":
+        history._state = earlier.state
+        history._issuance = earlier.issuance
+    elif attack in ("counter", "bool_counter"):
+        history._state = (True if attack == "bool_counter" else 4, entries)
+    elif attack == "sequence":
+        object.__setattr__(entries[0], "history_sequence", 2)
+        object.__setattr__(
+            entries[0], "fingerprint", canonical_fingerprint(entries[0]._payload())
+        )
+    elif attack == "remove_fact":
+        history._issuance = root.issuance[1:]
+    elif attack == "duplicate_fact":
+        history._issuance = (root.issuance[0], root.issuance[0])
+    elif attack == "reorder_facts":
+        history._issuance = root.issuance[::-1]
+    elif attack == "replace_fact":
+        history._issuance = (b"{}", root.issuance[1])
+    elif attack == "mutable_fact":
+        history._issuance = (bytearray(root.issuance[0]), root.issuance[1])
+    elif attack == "list_facts":
+        history._issuance = list(root.issuance)
+    else:
+        history._state = (3, entries[::-1])
+    # Select the untouched SECOND occurrence: whole-root validation is mandatory.
+    monkeypatch.setattr(service, "_resolve", _forbidden)
+    monkeypatch.setattr(technical, "analyze_daily_technical_snapshot", _forbidden)
+    with pytest.raises(ValueError):
+        _authenticate(service, second)
+    with pytest.raises(t.PolygonCompletedDailyTechnicalRefused):
+        service.get_result_history_as_of(
+            second.source.bridge_reference.artifact_reference,
+            knowledge_as_of=second.available_at,
+        )
+    with pytest.raises(t.PolygonCompletedDailyTechnicalRefused):
+        service.execute(_request(authentic[1]))
+    assert _authority(service) is root
+    assert root.owner._pending is None
+
+
+@pytest.mark.parametrize("empty", [False, True])
+@pytest.mark.parametrize(
+    "phase",
+    [
+        "analysis",
+        "stage",
+        "clock",
+        "retained_copy",
+        "public_copy",
+        "alias_retained",
+        "alias_staged",
+        "rewrite_copy",
+        "custom_public",
+        "codec",
+        "prepare_root",
+        "final_authority",
+        "provenance",
+        "final_retained",
+        "final_public",
+    ],
+)
+def test_b1_failure_preserves_committed_root(authentic, monkeypatch, empty, phase):
+    service = _service(authentic, lambda: authentic[1].available_at)
+    request = _request(authentic[1])
+    if not empty:
+        service.execute(request)
+    root = _authority(service)
+    state = service._history._state
+    facts = service._history._issuance
+    public_copies = []
+    with monkeypatch.context() as patch:
+
+        def fail(*args, **kwargs):
+            raise RuntimeError("B1 failure seam")
+
+        if phase == "analysis":
+            patch.setattr(technical, "analyze_daily_technical_snapshot", fail)
+        elif phase in ("stage", "clock", "retained_copy"):
+            original = service._history._stage_publication
+
+            def stage(item):
+                original(item)
+                assert _authority(service) is root
+                assert service._history._issuance is facts
+                if phase == "stage":
+                    fail()
+                elif phase == "clock":
+                    patch.setattr(service, "_clock", fail)
+                else:
+                    patch.setattr(t, "deepcopy", fail)
+
+            patch.setattr(service._history, "_stage_publication", stage)
+        elif phase == "public_copy":
+            patch.setattr(t, "_public_result_copy", fail)
+        elif phase in (
+            "alias_retained",
+            "alias_staged",
+            "rewrite_copy",
+            "custom_public",
+        ):
+            original_copy = t._public_result_copy
+
+            def copy(item):
+                if phase == "alias_retained":
+                    return item
+                if phase == "alias_staged":
+                    return service._history._pending
+                if phase == "custom_public":
+
+                    class Lookalike:
+                        def to_dict(self):
+                            return item.to_dict()
+
+                    return Lookalike()
+                object.__setattr__(
+                    item.snapshot, "latest_close", item.snapshot.latest_close + 1
+                )
+                _refingerprint_snapshot(item.snapshot)
+                object.__setattr__(
+                    item, "fingerprint", canonical_fingerprint(item._payload())
+                )
+                return original_copy(item)
+
+            patch.setattr(t, "_public_result_copy", copy)
+        elif phase == "codec":
+            original_codec = t._issuance_bytes
+
+            def encode(projection):
+                if service._history._pending is not None:
+                    fail()
+                return original_codec(projection)
+
+            patch.setattr(t, "_issuance_bytes", encode)
+        elif phase == "prepare_root":
+            patch.setattr(t, "_TechnicalCommitment", fail)
+        elif phase == "final_authority":
+            original_validate = service._validate_authority
+
+            def validate():
+                if service._history._pending is not None:
+                    fail()
+                original_validate()
+
+            patch.setattr(service, "_validate_authority", validate)
+        elif phase == "provenance":
+            original_resolve = service._resolve
+
+            def resolve(*args):
+                if service._history._pending is not None:
+                    fail()
+                return original_resolve(*args)
+
+            patch.setattr(service, "_resolve", resolve)
+        else:
+            original_copy = t._public_result_copy
+            original_resolve = service._resolve
+
+            def public_copy(item):
+                public = original_copy(item)
+                public_copies.append((item, public))
+                return public
+
+            def resolve(*args):
+                bridge = original_resolve(*args)
+                if public_copies:
+                    retained, public = public_copies[-1]
+                    target = retained if phase == "final_retained" else public
+                    object.__setattr__(
+                        target.snapshot,
+                        "latest_close",
+                        target.snapshot.latest_close + 1,
+                    )
+                    _refingerprint_snapshot(target.snapshot)
+                    object.__setattr__(
+                        target, "fingerprint", canonical_fingerprint(target._payload())
+                    )
+                    target.to_dict()
+                return bridge
+
+            patch.setattr(t, "_public_result_copy", public_copy)
+            patch.setattr(service, "_resolve", resolve)
+        with pytest.raises(t.PolygonCompletedDailyTechnicalRefused):
+            service.execute(request)
+    assert _authority(service) is root
+    assert service._history._state is state
+    assert service._history._issuance is facts
+    assert service._history._pending is None
+    result = service.execute(request)
+    assert result.history_sequence == root.state[0]
+    assert _authority(service).issuance[:-1] == facts
+
+
+def test_b1_canonical_codec_closed_and_exact():
+    class Text(StrEnum):
+        VALUE = "value"
+
+    class Number(IntEnum):
+        VALUE = 1
+
+    class CustomString(str):
+        pass
+
+    class CustomInt(int):
+        pass
+
+    class CustomList(list):
+        pass
+
+    class CustomDict(dict):
+        pass
+
+    for invalid in (
+        Text.VALUE,
+        Number.VALUE,
+        CustomString("x"),
+        CustomInt(1),
+        CustomList(),
+        CustomDict(),
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        object(),
+        bytearray(b"x"),
+        b"x",
+        (1,),
+        {1: "x"},
+        {Text.VALUE: "x"},
+    ):
+        with pytest.raises(ValueError):
+            t._issuance_bytes({"nested": [invalid]})
+    value = {"中文": [None, False, True, 1, 1.0, -0.0, "é"], "empty": {}}
+    fact = t._issuance_bytes(value)
+    assert fact == t._issuance_bytes(dict(reversed(list(value.items()))))
+    assert b"\\u" not in fact
+    assert json.loads(fact) == value
+    assert [type(x) for x in json.loads(fact)["中文"]] == [
+        type(None),
+        bool,
+        bool,
+        int,
+        float,
+        float,
+        str,
+    ]
+    assert t._issuance_bytes(json.loads(fact)) == fact
+    assert t._issuance_bytes([1]) != t._issuance_bytes([1.0])
+    assert t._issuance_bytes([True]) != t._issuance_bytes([1])
+    assert t._issuance_bytes([1, 2]) != t._issuance_bytes([2, 1])
+    assert t._issuance_bytes({}) != t._issuance_bytes({"key": None})
+
+
+@pytest.mark.parametrize("attack", ["namespace", "store", "import", "missing_facts"])
+def test_b1_empty_publisher_never_backfills(authentic, attack):
+    service = _service(authentic)
+    root = _authority(service)
+    donor = _service(authentic)
+    public = donor.execute(_request(authentic[1]))
+    if attack == "namespace":
+        service._history._namespace_id = donor._history._namespace_id
+    elif attack == "store":
+        replacement = t._TechnicalHistory()
+        replacement._namespace_id = service._history._namespace_id
+        replacement._state = service._history._state
+        service._history = replacement
+    else:
+        service._history._namespace_id = donor._history._namespace_id
+        service._history._state = donor._history._state
+        if attack == "import":
+            service._history._issuance = donor._history._issuance
+    with pytest.raises(ValueError):
+        _authenticate(service, public)
+    assert _authority(service) is root
+    assert root.issuance == ()
+    assert root.state == (1, ())
+
+
+def test_b1_released_projection_and_public_api_identical(authentic, monkeypatch):
+    # Execute the immutable pre-hardening source with identical occurrence facts.
+    root = Path(__file__).resolve().parents[2]
+    source = subprocess.check_output(
+        [
+            "git",
+            "show",
+            "22e103dd72c6aad145354ea8039659087459cbc0:"
+            "src/market_platform/application/polygon_completed_daily_production_technical.py",
+        ],
+        cwd=root,
+    )
+    released = ModuleType("market_platform.application._released_technical_b1")
+    monkeypatch.setitem(sys.modules, released.__name__, released)
+    exec(compile(source, "<released_slice_8>", "exec"), released.__dict__)
+
+    def fixed_uuid():
+        return UUID("12345678123456781234567812345678")
+
+    monkeypatch.setattr(t, "uuid4", fixed_uuid)
+    monkeypatch.setattr(released, "uuid4", fixed_uuid)
+    current_service = _service(authentic, lambda: authentic[1].available_at)
+    old_service = released.PolygonCompletedDailyProductionTechnicalApplicationService(
+        authentic[0],
+        execution_clock=lambda: authentic[1].available_at,
+    )
+    request = _request(authentic[1])
+    old_request = released.PolygonCompletedDailyTechnicalRequest(
+        **{field.name: getattr(request, field.name) for field in fields(request)}
+    )
+    current = current_service.execute(request)
+    old = old_service.execute(old_request)
+    assert t._issuance_bytes(current.to_dict()) == t._issuance_bytes(old.to_dict())
+    assert current.fingerprint == old.fingerprint
+    assert current.snapshot.fingerprint == old.snapshot.fingerprint
+    assert t.__all__ == released.__all__
+    for name in t.__all__:
+        current_type, old_type = getattr(t, name), getattr(released, name)
+        assert str(inspect.signature(current_type)) == str(inspect.signature(old_type))
+        assert {x for x in vars(current_type) if not x.startswith("_")} == {
+            x for x in vars(old_type) if not x.startswith("_")
+        }
+
+
+def test_b1_concurrent_publication_authentication_and_history(authentic):
+    service = _service(authentic, lambda: authentic[1].available_at)
+    request = _request(authentic[1])
+
+    def publish():
+        return service.execute(request)
+
+    def read():
+        with ExitStack() as stack:
+            service._lock_inputs(stack)
+            service._validate_authority()
+            root = _authority(service)
+            assert root.state is service._history._state
+            assert root.issuance == service._history._issuance
+            assert root.state[0] == len(root.issuance) + 1
+            assert [x.history_sequence for x in root.state[1]] == list(
+                range(1, root.state[0])
+            )
+        return service.get_result_history_as_of(
+            request.artifact_reference,
+            knowledge_as_of=authentic[1].available_at,
+        )
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        jobs = [
+            pool.submit(task) for task in (publish, read, publish, read, publish, read)
+        ]
+        results = [job.result(timeout=60) for job in jobs]
+    assert sorted(results[i].history_sequence for i in (0, 2, 4)) == [1, 2, 3]
+    assert len(read()) == 3
+
+
+def test_b1_authentication_is_read_only_original_context(authentic, monkeypatch):
+    service = _service(authentic)
+    public = service.execute(_request(authentic[1]))
+    root = _authority(service)
+    original = service._resolve
+    calls = []
+
+    def resolve(request, started):
+        calls.append((request, started))
+        return original(request, started)
+
+    monkeypatch.setattr(service, "_resolve", resolve)
+    monkeypatch.setattr(service, "execute", _forbidden)
+    monkeypatch.setattr(service, "_publish", _forbidden)
+    monkeypatch.setattr(service._history, "_stage_publication", _forbidden)
+    monkeypatch.setattr(technical, "analyze_daily_technical_snapshot", _forbidden)
+    monkeypatch.setattr(authentic[0], "bridge", _forbidden)
+    monkeypatch.setattr(authentic[0]._qualification_service, "qualify", _forbidden)
+    monkeypatch.setattr(service, "get_result_history_as_of", _forbidden)
+    assert _authenticate(service, public) is root.state[1][0]
+    assert calls == [(public.source.bridge_reference, public.execution_started_at)]
+    assert _authority(service) is root
+    assert not any(
+        hasattr(service._authenticate_occurrence, name)
+        for name in (
+            "append",
+            "import",
+            "register",
+            "mint",
+        )
+    )
