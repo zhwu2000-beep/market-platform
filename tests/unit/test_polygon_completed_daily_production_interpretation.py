@@ -5,7 +5,7 @@ import subprocess
 import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
-from copy import deepcopy
+from copy import copy, deepcopy
 from dataclasses import fields, replace
 from datetime import timedelta
 from pathlib import Path
@@ -77,12 +77,18 @@ def _service(authentic, clock=None):
 
 def _refuse(service, request, reason=None):
     before = service._history._state
+    owner = service._history_owner
+    owner_state = owner._state
+    committed = service._committed
     with pytest.raises(Refused) as caught:
         service.execute(request)
     if reason is not None:
         assert caught.value.reason is reason
     assert service._history._state is before
-    assert service._history._pending is None
+    assert service._history_owner is owner
+    assert owner._state is owner_state
+    assert service._committed is committed
+    assert owner._pending is None
     return caught.value
 
 
@@ -820,7 +826,9 @@ def test_temporal_refusals(authentic, phase):
     )
 
 
-@pytest.mark.parametrize("phase", ["semantic", "stage", "copy", "stage_validation"])
+@pytest.mark.parametrize(
+    "phase", ["semantic", "stage", "clock", "copy", "stage_validation"]
+)
 def test_failure_atomicity_and_sequence_reuse(authentic, monkeypatch, phase):
     service = _service(authentic)
     request = _request(authentic[1])
@@ -832,7 +840,20 @@ def test_failure_atomicity_and_sequence_reuse(authentic, monkeypatch, phase):
         elif phase == "copy":
             patch.setattr(app, "_public_result_copy", _forbidden)
         elif phase == "stage":
-            patch.setattr(service._history, "_stage_publication", _forbidden)
+
+            def stage_failure(result):
+                service._history_owner._pending = result
+                _forbidden(result)
+
+            patch.setattr(service._history_owner, "_stage_publication", stage_failure)
+        elif phase == "clock":
+
+            def clock():
+                if service._history_owner._pending is not None:
+                    raise ValueError("publication clock failed")
+                return authentic[1].available_at
+
+            patch.setattr(service, "_clock", clock)
         else:
 
             def stage(result):
@@ -846,6 +867,92 @@ def test_failure_atomicity_and_sequence_reuse(authentic, monkeypatch, phase):
             R.SEMANTIC_FAILED if phase == "semantic" else R.PUBLICATION_FAILED,
         )
     assert service.execute(request).history_sequence == 1
+
+
+def test_b01_public_copy_replacement_clears_original_pending(authentic, monkeypatch):
+    service = _service(authentic)
+    request = _request(authentic[1])
+    service.execute(request)
+    owner = service._history_owner
+    original_copy = app._public_result_copy
+    replacements = []
+    source_state = authentic[0]._history._state
+    issuance = authentic[0]._history._issuance
+    _, provenance = service._authenticate(authentic[1])
+
+    def replace_history(result):
+        assert owner._pending is not None
+        assert owner._pending.history_sequence == 2
+        service._history = copy(owner)
+        replacements.append(service._history)
+        return original_copy(result)
+
+    monkeypatch.setattr(app, "_public_result_copy", replace_history)
+    _refuse(service, request, R.PUBLICATION_FAILED)
+    assert replacements == [service._history]
+    assert service._history is not owner
+    assert owner._state[0] == 2 and len(owner._state[1]) == 1
+    assert authentic[0]._history._state is source_state
+    assert authentic[0]._history._issuance is issuance
+    assert service._authenticate(authentic[1])[1] == provenance
+    _refuse(service, request, R.HISTORY_INVALID)
+
+
+def test_b01_clock_callback_replacement_clears_original_pending(authentic):
+    ticks = []
+    replacements = []
+
+    def clock():
+        ticks.append(1)
+        if len(ticks) == 6:
+            assert owner._pending is not None
+            assert owner._pending.history_sequence == 2
+            service._history = copy(owner)
+            replacements.append(service._history)
+        return authentic[1].available_at
+
+    service = _service(authentic, clock)
+    request = _request(authentic[1])
+    service.execute(request)
+    owner = service._history_owner
+    source_state = authentic[0]._history._state
+    issuance = authentic[0]._history._issuance
+    _, provenance = service._authenticate(authentic[1])
+    _refuse(service, request, R.PUBLICATION_FAILED)
+    assert len(ticks) == 6
+    assert replacements == [service._history]
+    assert service._history is not owner
+    assert owner._state[0] == 2 and len(owner._state[1]) == 1
+    assert authentic[0]._history._state is source_state
+    assert authentic[0]._history._issuance is issuance
+    assert service._authenticate(authentic[1])[1] == provenance
+    _refuse(service, request, R.HISTORY_INVALID)
+
+
+def test_b01_success_preserves_canonical_authority(authentic):
+    service = _service(authentic)
+    request = _request(authentic[1])
+    owner = service._history_owner
+    for sequence in (1, 2):
+        before = service._committed
+        result = service.execute(request)
+        assert service._history is service._history_owner is owner
+        assert owner._pending is None
+        assert owner._state is service._committed
+        assert owner._state[0] == before[0] + 1 == sequence + 1
+        assert len(owner._state[1]) == len(before[1]) + 1 == sequence
+        assert owner._state[1][:-1] == before[1]
+        fact = owner._state[1][-1]
+        assert type(fact) is bytes
+        assert result.history_sequence == sequence
+        expected = result.to_dict()
+        assert app._canonical_bytes(expected) == fact
+        public = _history(service, request, result.available_at)[-1]
+        assert public.to_dict() == expected
+        assert not app._graph_ids(public) & app._graph_ids(result)
+        object.__setattr__(result, "history_sequence", 999)
+        assert app._reconstruct_result(fact).to_dict() == expected
+        assert service._committed is owner._state
 
 
 @pytest.mark.parametrize(

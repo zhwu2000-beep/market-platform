@@ -662,7 +662,8 @@ class PolygonCompletedDailyProductionInterpretationApplicationService:
         started: datetime,
         completed: datetime,
     ) -> PolygonCompletedDailyInterpretationResult:
-        state = self._history._state
+        owner = self._history_owner
+        state = owner._state
         sequence, entries = state
         staged = object.__new__(PolygonCompletedDailyInterpretationResult)
         values: dict[str, object] = {
@@ -684,8 +685,8 @@ class PolygonCompletedDailyProductionInterpretationApplicationService:
         if staged.interpretation.to_dict() != content_before:
             raise ValueError("content changed during staging copy")
         try:
-            self._history._stage_publication(staged)
-            if self._history._pending is not staged or staged.to_dict() != expected:
+            owner._stage_publication(staged)
+            if owner._pending is not staged or staged.to_dict() != expected:
                 raise ValueError("staging changed Interpretation")
             available = a._timestamp(self._clock())
             if available < completed or (
@@ -725,14 +726,14 @@ class PolygonCompletedDailyProductionInterpretationApplicationService:
             )
             if resolved is not source or projection != source_before:
                 raise ValueError("source changed during publication")
-            if self._history._state is not state:
+            if self._history is not owner or owner._state is not state:
                 raise ValueError("history changed during publication")
             _check_copy(public, published, expected)
             self._committed = next_state
-            self._history._state = next_state
+            owner._state = next_state
             return public
         finally:
-            self._history._pending = None
+            owner._pending = None
 
     def get_result_history_as_of(
         self,
