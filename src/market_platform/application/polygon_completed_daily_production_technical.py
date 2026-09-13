@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import math
 import re
 from collections.abc import Callable
 from contextlib import ExitStack
@@ -10,6 +12,7 @@ from dataclasses import dataclass, fields, replace
 from datetime import datetime
 from enum import StrEnum
 from threading import Lock
+from typing import NamedTuple
 from uuid import uuid4
 
 from market_platform._fingerprint import canonical_fingerprint
@@ -317,6 +320,46 @@ def _public_result_copy(
     return public
 
 
+def _issuance_bytes(projection: object) -> bytes:
+    """Encode only the complete validated public scalar projection, privately."""
+
+    def validate(value: object) -> None:
+        if value is None or type(value) in (str, bool, int):
+            return
+        if type(value) is float:
+            if not math.isfinite(value):
+                raise ValueError("nonfinite issuance scalar")
+            return
+        if type(value) is list:
+            for item in value:
+                validate(item)
+            return
+        if type(value) is dict:
+            for key, item in value.items():
+                if type(key) is not str:
+                    raise ValueError("exact string issuance key required")
+                validate(item)
+            return
+        raise ValueError("exact built-in issuance projection required")
+
+    validate(projection)
+    return json.dumps(
+        projection,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+class _TechnicalCommitment(NamedTuple):
+    # Strong references pin original occurrence lifetimes independently of the view.
+    owner: _TechnicalHistory
+    namespace: str
+    state: tuple[int, tuple[PolygonCompletedDailyTechnicalResult, ...]]
+    issuance: tuple[bytes, ...]
+
+
 class _TechnicalHistory:
     def __init__(self) -> None:
         self._lock = Lock()
@@ -326,6 +369,7 @@ class _TechnicalHistory:
             (),
         )
         self._pending: PolygonCompletedDailyTechnicalResult | None = None
+        self._issuance: tuple[bytes, ...] = ()
 
     def _stage_publication(self, result: PolygonCompletedDailyTechnicalResult) -> None:
         result.to_dict()
@@ -370,13 +414,75 @@ class PolygonCompletedDailyProductionTechnicalApplicationService:
         self._bridge_service = bridge_service
         self._clock = a._utc_now if execution_clock is None else execution_clock
         self._history = _TechnicalHistory()
+        self.__committed = _TechnicalCommitment(
+            self._history, self._history._namespace_id, self._history._state, ()
+        )
+
+    def _validate_authority(self) -> None:
+        """Validate the whole publication root under the already held input locks."""
+        root = self.__committed
+        history = self._history
+        if (
+            history is not root.owner
+            or type(history._namespace_id) is not str
+            or history._namespace_id != root.namespace
+            or history._state is not root.state
+            or type(history._issuance) is not tuple
+            or any(type(fact) is not bytes for fact in history._issuance)
+            or history._issuance != root.issuance
+            or len(root.issuance) != len(root.state[1])
+        ):
+            raise ValueError("technical publication commitment replaced or incomplete")
+        _identity(root.namespace, "polygon_completed_daily_technical_history")
+        history._validate()
+        for item, fact in zip(root.state[1], root.issuance, strict=True):
+            if type(fact) is not bytes or _issuance_bytes(item.to_dict()) != fact:
+                raise ValueError("technical occurrence differs from original issuance")
+
+    def _authenticate_occurrence(
+        self,
+        *,
+        artifact_reference: EvidenceArtifactReference,
+        technical_history_namespace_id: str,
+        technical_history_sequence: int,
+        technical_execution_id: str,
+        technical_fingerprint: str,
+    ) -> tuple[
+        PolygonCompletedDailyTechnicalResult, b.PolygonCompletedDailyBridgeResult
+    ]:
+        """Resolve original issuance/provenance under the caller's input locks."""
+        self._validate_authority()
+        reference = a._copy_artifact_reference(artifact_reference).to_dict()
+        _identity(
+            technical_history_namespace_id, "polygon_completed_daily_technical_history"
+        )
+        _sequence(technical_history_sequence)
+        _identity(technical_execution_id, "polygon_completed_daily_technical")
+        g._fingerprint(technical_fingerprint, "technical fingerprint")
+        matches = tuple(
+            item
+            for item in self.__committed.state[1]
+            if item.source.bridge_reference.artifact_reference.to_dict() == reference
+            and item.history_namespace_id == technical_history_namespace_id
+            and item.history_sequence == technical_history_sequence
+            and item.execution_id == technical_execution_id
+            and item.fingerprint == technical_fingerprint
+        )
+        if len(matches) != 1:
+            raise ValueError("exact issued technical occurrence unavailable")
+        item = matches[0]
+        bridge = self._resolve(item.source.bridge_reference, item.execution_started_at)
+        if _source_lineage(bridge) != item.source:
+            raise ValueError("retained technical lineage differs from original bridge")
+        self._validate_authority()
+        return item, bridge
 
     def _lock_inputs(self, stack: ExitStack) -> None:
         source = self._bridge_service
         source._qualification_service._lock_inputs(stack)
         stack.enter_context(source._qualification_service._history._lock)
         stack.enter_context(source._history._lock)
-        stack.enter_context(self._history._lock)
+        stack.enter_context(self.__committed.owner._lock)
 
     def _resolve(
         self, request: PolygonCompletedDailyTechnicalRequest, started: datetime
@@ -432,10 +538,11 @@ class PolygonCompletedDailyProductionTechnicalApplicationService:
             started = a._timestamp(self._clock())
             with ExitStack() as stack:
                 self._lock_inputs(stack)
+                reason = PolygonCompletedDailyTechnicalRefusalReason.HISTORY_INVALID
+                self._validate_authority()
                 reason = PolygonCompletedDailyTechnicalRefusalReason.PROFILE_MISMATCH
                 profile = _fixed_profile()
                 reason = PolygonCompletedDailyTechnicalRefusalReason.HISTORY_INVALID
-                self._history._validate()
                 bridge = self._resolve(request, started)
                 lineage = _source_lineage(bridge)
                 reason = PolygonCompletedDailyTechnicalRefusalReason.ANALYSIS_FAILED
@@ -467,7 +574,9 @@ class PolygonCompletedDailyProductionTechnicalApplicationService:
         started: datetime,
         completed: datetime,
     ) -> PolygonCompletedDailyTechnicalResult:
-        sequence, entries = self._history._state
+        root = self.__committed
+        self._validate_authority()
+        sequence, entries = root.state
         staged = object.__new__(PolygonCompletedDailyTechnicalResult)
         values: dict[str, object] = {
             "source": deepcopy(lineage),
@@ -511,18 +620,39 @@ class PolygonCompletedDailyProductionTechnicalApplicationService:
                 or any(item.execution_id == published.execution_id for item in entries)
             ):
                 raise ValueError("staging changed authenticated analysis content")
+            final_projection = published.to_dict()
             public = _public_result_copy(published)
+            issuance = _issuance_bytes(final_projection)
+            next_state = sequence + 1, (*entries, published)
+            next_issuance = (*root.issuance, issuance)
+            next_root = _TechnicalCommitment(
+                root.owner, root.namespace, next_state, next_issuance
+            )
             # Recheck retained provenance after every fallible publication seam.
             bridge = self._resolve(lineage.bridge_reference, started)
             if _source_lineage(bridge) != lineage:
                 raise ValueError("source lineage changed during publication")
-            self._history._validate()
-            if self._history._state != (sequence, entries):
+            self._validate_authority()
+            if self.__committed is not root:
                 raise ValueError("technical history changed during publication")
-            self._history._state = sequence + 1, (*entries, published)
+            if (
+                self._history._pending is not staged
+                or type(published) is not PolygonCompletedDailyTechnicalResult
+                or type(public) is not PolygonCompletedDailyTechnicalResult
+                or public is published
+                or public is staged
+                or published is staged
+                or _issuance_bytes(published.to_dict()) != issuance
+                or _issuance_bytes(public.to_dict()) != issuance
+            ):
+                raise ValueError("final technical publication correspondence changed")
+            # Everything fallible is complete. Readers hold this same technical lock.
+            self.__committed = next_root
+            root.owner._state = next_state
+            root.owner._issuance = next_issuance
             return public
         finally:
-            self._history._pending = None
+            root.owner._pending = None
 
     def get_result_history_as_of(
         self,
@@ -535,7 +665,7 @@ class PolygonCompletedDailyProductionTechnicalApplicationService:
         try:
             with ExitStack() as stack:
                 self._lock_inputs(stack)
-                self._history._validate()
+                self._validate_authority()
                 results = []
                 for item in self._history._state[1]:
                     if (
@@ -550,7 +680,9 @@ class PolygonCompletedDailyProductionTechnicalApplicationService:
                                 "retained result source correspondence changed"
                             )
                         results.append(_public_result_copy(item))
-                return tuple(results)
+                public = tuple(results)
+                self._validate_authority()
+                return public
         except Exception as error:
             raise PolygonCompletedDailyTechnicalRefused(
                 PolygonCompletedDailyTechnicalRefusalReason.HISTORY_INVALID, str(error)
