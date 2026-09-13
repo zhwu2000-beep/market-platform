@@ -401,11 +401,11 @@ class PolygonCompletedDailyProductionInterpretationApplicationService:
             raise TypeError("execution_clock must be callable")
         self._technical_service = technical_service
         self._clock = a._utc_now if execution_clock is None else execution_clock
-        self._history = _InterpretationHistory()
-        self._history_owner = self._history
-        self._namespace = self._history._namespace_id
+        self._history_owner = _InterpretationHistory()
+        self._history = self._history_owner
+        self._namespace = self._history_owner._namespace_id
         # The service pins its current commitment independently of the history view.
-        self._committed = self._history._state
+        self._committed = self._history_owner._state
         self._technical_history = technical_service._history
         self._technical_namespace = self._technical_history._namespace_id
         # Observational anchors never confer import authority. Preserve identities
@@ -423,7 +423,7 @@ class PolygonCompletedDailyProductionInterpretationApplicationService:
 
     def _lock_inputs(self, stack: ExitStack) -> None:
         self._technical_service._lock_inputs(stack)
-        stack.enter_context(self._history._lock)
+        stack.enter_context(self._history_owner._lock)
 
     def _authenticate(
         self, item: t.PolygonCompletedDailyTechnicalResult
@@ -546,13 +546,14 @@ class PolygonCompletedDailyProductionInterpretationApplicationService:
         return item, instrument, projection
 
     def _check_history(self) -> tuple[_Resolved, ...]:
-        self._history._validate()
+        owner = self._history_owner
         if (
-            self._history is not self._history_owner
-            or self._history._namespace_id != self._namespace
-            or self._history._state is not self._committed
+            self._history is not owner
+            or owner._namespace_id != self._namespace
+            or owner._state is not self._committed
         ):
             raise ValueError("Interpretation history replaced or truncated")
+        owner._validate()
         self._observe_technical_history()
         resolved = tuple(
             (source, *self._authenticate(source))
@@ -751,7 +752,7 @@ class PolygonCompletedDailyProductionInterpretationApplicationService:
                 self._check_history()
                 reason = _R.PUBLICATION_FAILED
                 copies = []
-                for fact in self._history._state[1]:
+                for fact in self._history_owner._state[1]:
                     item = _reconstruct_result(fact)
                     if (
                         item.source_technical_occurrence.artifact_reference == reference

@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import inspect
 import subprocess
+import sys
 import tomllib
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from copy import copy, deepcopy
 from dataclasses import fields, replace
 from datetime import timedelta
 from pathlib import Path
+from threading import Event, Thread
 from uuid import UUID
 
 import pytest
@@ -955,6 +957,167 @@ def test_b01_success_preserves_canonical_authority(authentic):
         assert service._committed is owner._state
 
 
+@contextmanager
+def _record_lock_entries(locks, attempted, acquired, before_enter=None):
+    """Observe native lock calls in this thread without replacing any lock."""
+    previous = sys.getprofile()
+    lock_inputs_code = Service._lock_inputs.__code__
+
+    def observe(frame, event, call):
+        if event == "return" and frame.f_code is lock_inputs_code:
+            # Only profile acquisition of the full application lock chain.
+            sys.setprofile(previous)
+            return
+        if event not in ("c_call", "c_return"):
+            return
+        lock = getattr(call, "__self__", None)
+        if getattr(call, "__name__", None) != "__enter__" or not any(
+            lock is candidate for candidate in locks
+        ):
+            return
+        if event == "c_call":
+            attempted.append(lock)
+            if before_enter is not None:
+                before_enter(lock)
+        elif event == "c_return":
+            acquired.append(lock)
+
+    sys.setprofile(observe)
+    try:
+        yield
+    finally:
+        sys.setprofile(previous)
+
+
+@pytest.mark.parametrize("operation", ["execute", "read"])
+@pytest.mark.parametrize("race", ["persistent", "swap_back", "owner_held"])
+def test_b02_replacement_lock_toctou(authentic, operation, race):
+    service = _service(authentic)
+    request = _request(authentic[1])
+    first = service.execute(request)
+    owner = service._history_owner
+    before = service._committed
+    replacement = app._InterpretationHistory()
+    replacement._namespace_id = owner._namespace_id
+    replacement._state = owner._state
+    technical_lock = authentic[0]._history._lock
+    selected, done = Event(), Event()
+    attempted, acquired, results, errors, staging = [], [], [], [], []
+
+    def before_enter(lock):
+        if lock is owner._lock or lock is replacement._lock:
+            selected.set()
+
+    def clock():
+        if owner._pending is not None:
+            staging.append(
+                (
+                    owner._lock.locked(),
+                    technical_lock.locked(),
+                    owner._lock in acquired,
+                    owner._pending.history_sequence,
+                )
+            )
+        return first.available_at
+
+    def run():
+        try:
+            with _record_lock_entries(
+                (technical_lock, owner._lock, replacement._lock),
+                attempted,
+                acquired,
+                before_enter,
+            ):
+                results.append(
+                    service.execute(request)
+                    if operation == "execute"
+                    else _history(service, request, first.available_at)
+                )
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            done.set()
+
+    service._clock = clock
+    replacement._lock.acquire()
+    replacement_held = True
+    owner_held = race == "owner_held"
+    if owner_held:
+        owner._lock.acquire()
+    service._history = replacement
+    worker = Thread(target=run, daemon=True)
+    worker.start()
+    try:
+        assert selected.wait(30), "worker did not select an Interpretation lock"
+        if race != "owner_held":
+            # The old implementation blocks on the actual replacement lock here.
+            # Leave it held until the repaired implementation has refused.
+            completed_with_replacement_held = done.wait(2)
+        if race != "persistent":
+            service._history = owner
+            replacement._lock.release()
+            replacement_held = False
+            if owner_held:
+                assert technical_lock.locked() and owner._lock.locked()
+                completed_with_owner_held = done.wait(0.2)
+                state_with_owner_held = owner._state
+                pending_with_owner_held = owner._pending
+                owner._lock.release()
+                owner_held = False
+            assert done.wait(60), "worker did not finish after lock release"
+    finally:
+        if replacement_held:
+            replacement._lock.release()
+        if owner_held:
+            owner._lock.release()
+        worker.join(60)
+    assert not worker.is_alive(), "worker left running"
+
+    # On the vulnerable code swap_back commits sequence 2 with staging showing
+    # (False, True, False, 2): the owner lock was neither held nor acquired.
+    if race != "owner_held":
+        assert completed_with_replacement_held, {
+            "waited_on_replacement": True,
+            "staging": staging,
+            "returned_sequence": (
+                results[0].history_sequence
+                if results and operation == "execute"
+                else None
+            ),
+            "committed_advanced": service._committed is not before,
+            "owner_acquired": owner._lock in acquired,
+        }
+        assert len(errors) == 1 and isinstance(errors[0], Refused)
+        assert errors[0].reason == R.HISTORY_INVALID
+        assert not results and not staging
+        assert service._history is (replacement if race == "persistent" else owner)
+        assert owner._state is service._committed is before
+        assert len(owner._state[1]) == 1
+    else:
+        assert not errors
+        assert len(results) == 1
+        assert not completed_with_owner_held, "operation bypassed owner lock"
+        assert state_with_owner_held is before and pending_with_owner_held is None
+        if operation == "execute":
+            assert results[0].history_sequence == 2
+            assert owner._state is service._committed is not before
+            assert len(owner._state[1]) == 2
+            assert owner._state[1][:-1] == before[1]
+            assert type(owner._state[1][-1]) is bytes
+            assert staging == [(True, True, True, 2)], staging
+        else:
+            assert results[0] == (first,)
+            assert not app._graph_ids(results[0][0]) & app._graph_ids(first)
+            assert owner._state is service._committed is before
+    assert attempted == acquired == [technical_lock, owner._lock]
+    assert owner._pending is None
+    assert replacement._state is before and replacement._pending is None
+    assert not owner._lock.locked() and not technical_lock.locked()
+    # Even a coherent replacement remains untrusted after the race.
+    service._history = replacement
+    _refuse(service, request, R.HISTORY_INVALID)
+
+
 @pytest.mark.parametrize(
     "field",
     [
@@ -1054,7 +1217,7 @@ def test_final_clock_under_complete_ordered_locks(authentic, monkeypatch):
         qualification._history._lock,
         bridge._history._lock,
         source._history._lock,
-        service._history._lock,
+        service._history_owner._lock,
     ]
     ticks = []
     original = source._lock_inputs
@@ -1065,18 +1228,30 @@ def test_final_clock_under_complete_ordered_locks(authentic, monkeypatch):
         original(stack)
 
     monkeypatch.setattr(source, "_lock_inputs", lock_inputs)
+    attempted, acquired = [], []
 
     def clock():
         ticks.append(1)
         if len(ticks) == 3:
             assert all(lock.locked() for lock in locks)
-            assert service._history._pending is not None
-            assert service._history._state == (1, ())
+            assert attempted == acquired == locks
+            assert service._history_owner._pending is not None
+            assert service._history_owner._state == (1, ())
         return technical.available_at
 
     service._clock = clock
-    service.execute(_request(technical))
-    assert len(ticks) == 3 and len(acquisitions) == 1
+    request = _request(technical)
+    with _record_lock_entries(locks, attempted, acquired):
+        result = service.execute(request)
+    assert len(ticks) == 3 and attempted == acquired == locks
+    assert len(acquisitions) == 1
+    assert not any(lock.locked() for lock in locks)
+    attempted.clear()
+    acquired.clear()
+    with _record_lock_entries(locks, attempted, acquired):
+        assert _history(service, request, result.available_at) == (result,)
+    assert attempted == acquired == locks
+    assert len(acquisitions) == 2
     assert not any(lock.locked() for lock in locks)
 
 
