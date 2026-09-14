@@ -425,6 +425,202 @@ class PolygonCompletedDailyProductionInterpretationApplicationService:
         self._technical_service._lock_inputs(stack)
         stack.enter_context(self._history_owner._lock)
 
+    def _authentication_retention(
+        self,
+    ) -> tuple[tuple[int, str, int, tuple[tuple[int, bytes], ...]], ...]:
+        """Check existing upstream anchors without adopting observations."""
+        self._technical_service._validate_authority()
+        bridge = self._technical_service._bridge_service
+        qualification = bridge._qualification_service
+        validity = qualification._validity_service
+        admission = validity._admission_service
+        stores = (
+            admission._construction_service._history,
+            admission._validation_service._history,
+            admission._freshness_service._history,
+            admission._history,
+            validity._history,
+            qualification._history,
+            bridge._history,
+            self._technical_service._history,
+        )
+        if len(self._retention) != len(stores):
+            raise ValueError("original upstream retention anchors incomplete")
+        retention = []
+        for index, (store, (identity, namespace, entries)) in enumerate(
+            zip(stores, self._retention, strict=True)
+        ):
+            state = getattr(store, "_state")  # noqa: B009
+            current_namespace = getattr(store, "_namespace_id")  # noqa: B009
+            if (
+                id(store) != identity
+                or type(current_namespace) is not str
+                or current_namespace != namespace
+                or type(state) is not tuple
+                or len(state) != 2
+                or type(state[0]) is not int
+                or type(state[1]) is not tuple
+                or state[0] != len(state[1]) + 1
+            ):
+                raise ValueError("original upstream history changed or incomplete")
+            current_entries = tuple(id(item) for item in state[1])
+            if current_entries[: len(entries)] != entries:
+                raise ValueError("original upstream occurrences replaced or lost")
+            projections = []
+            for item in state[1]:
+                # Earlier lifecycle results expose receipts/companions rather
+                # than a result projection. Their validators bind all backing
+                # material and records to those complete occurrence projections.
+                if index < 5:
+                    item._validate()
+                    carrier = item.receipt if index == 0 else item.companion
+                    projection = carrier.to_dict()
+                else:
+                    projection = item.to_dict()
+                projections.append((id(item), t._issuance_bytes(projection)))
+            retention.append(
+                (
+                    identity,
+                    namespace,
+                    id(state),
+                    tuple(projections),
+                )
+            )
+        history = self._technical_service._history
+        if (
+            history is not self._technical_history
+            or history._namespace_id != self._technical_namespace
+            or len(history._state[1]) < len(self._observed)
+        ):
+            raise ValueError("original technical history replaced or lost")
+        for item, (identity, projection) in zip(
+            history._state[1], self._observed, strict=False
+        ):
+            if id(item) != identity or item.to_dict() != projection:
+                raise ValueError("original technical occurrence changed")
+        return tuple(retention)
+
+    def _authenticate_interpretation_support(
+        self, item: PolygonCompletedDailyInterpretationResult
+    ) -> _Resolved:
+        """Authenticate original support without deriving Interpretation semantics."""
+        matches = tuple(
+            source
+            for source in self._technical_history._state[1]
+            if _reference(source) == item.source_technical_occurrence
+        )
+        if len(matches) != 1:
+            raise ValueError("original technical occurrence unavailable")
+        source = matches[0]
+        instrument, projection = self._authenticate(source)
+        content = item.interpretation
+        if (
+            item.technical_available_at != source.available_at
+            or source.available_at > item.execution_started_at
+            or content.canonical_instrument_id.to_dict()
+            != instrument.instrument_id.to_dict()
+            or content.source_trading_identity.to_dict()
+            != source.snapshot.evidence.instrument.to_dict()
+            or content.analysis_as_of != source.snapshot.evidence.analysis_as_of
+            or content.source_technical_analysis_snapshot_fingerprint
+            != source.snapshot.fingerprint
+            or content.source_governed_dataset_fingerprint
+            != source.source.dataset_fingerprint
+            or content.source_research_dataset_content_fingerprint
+            != source.snapshot.evidence.dataset_content_fingerprint
+            or content.source_quality != source.snapshot.quality.value
+            or content.source_warnings
+            != tuple(warning.value for warning in source.snapshot.warnings)
+        ):
+            raise ValueError("retained Interpretation source lineage mismatch")
+        return source, instrument, projection
+
+    def _authenticate_interpretation_occurrence(
+        self,
+        *,
+        artifact_reference: domain.GovernedTechnicalArtifactReference,
+        interpretation_history_namespace_id: str,
+        interpretation_history_sequence: int,
+        interpretation_execution_id: str,
+        interpretation_fingerprint: str,
+    ) -> PolygonCompletedDailyInterpretationResult:
+        """Authenticate committed membership under the caller's complete input locks.
+
+        The caller must already hold the upstream-through-pinned-Interpretation
+        lock chain. This method acquires no locks, updates no observations, and
+        uses the source envelope fingerprint, never content equivalence.
+        """
+        if type(artifact_reference) is not domain.GovernedTechnicalArtifactReference:
+            raise TypeError("exact governed artifact reference required")
+        reference = artifact_reference.to_dict()
+        t._identity(interpretation_history_namespace_id, _PREFIX + "_history")
+        t._sequence(interpretation_history_sequence)
+        t._identity(interpretation_execution_id, _PREFIX)
+        domain._fingerprint(interpretation_fingerprint)
+        owner = self._history_owner
+        namespace = self._namespace
+        state = self._committed
+        observed, retention = self._observed, self._retention
+
+        def check_authority() -> None:
+            if (
+                type(owner) is not _InterpretationHistory
+                or self._history_owner is not owner
+                or self._history is not owner
+                or type(self._namespace) is not str
+                or self._namespace != namespace
+                or type(owner._namespace_id) is not str
+                or owner._namespace_id != namespace
+                or self._committed is not state
+                or owner._state is not state
+                or self._observed is not observed
+                or self._retention is not retention
+            ):
+                raise ValueError("Interpretation authority changed or incomplete")
+
+        check_authority()
+        owner._validate()
+        upstream_before = self._authentication_retention()
+        items = tuple(_reconstruct_result(fact) for fact in state[1])
+        support_before = tuple(
+            self._authenticate_interpretation_support(item) for item in items
+        )
+        matches = tuple(
+            index
+            for index, item in enumerate(items)
+            if (
+                item.source_technical_occurrence.artifact_reference.to_dict()
+                == reference
+            )
+            and item.history_namespace_id == interpretation_history_namespace_id
+            and item.history_sequence == interpretation_history_sequence
+            and item.execution_id == interpretation_execution_id
+            and item.fingerprint == interpretation_fingerprint
+        )
+        if len(matches) != 1:
+            raise ValueError("exact committed Interpretation occurrence unavailable")
+        fact = state[1][matches[0]]
+        public = _reconstruct_result(fact)
+        _check_copy(public, items[matches[0]], _decode_result(fact))
+        # Revalidate the entire inventory and its original support after the
+        # return reconstruction. No observation may adopt changed source facts.
+        check_authority()
+        owner._validate()
+        for original, retained_fact in zip(support_before, state[1], strict=True):
+            source, _, before = original
+            resolved, _, after = self._authenticate_interpretation_support(
+                _reconstruct_result(retained_fact)
+            )
+            if resolved is not source or after != before:
+                raise ValueError("original Interpretation support changed")
+        _check_copy(public, items[matches[0]], _decode_result(fact))
+        if _encode_result(public) != fact or artifact_reference.to_dict() != reference:
+            raise ValueError("selected Interpretation correspondence changed")
+        if self._authentication_retention() != upstream_before:
+            raise ValueError("upstream inventory changed during authentication")
+        check_authority()
+        return public
+
     def _authenticate(
         self, item: t.PolygonCompletedDailyTechnicalResult
     ) -> tuple[CanonicalInstrument, dict[str, object]]:
