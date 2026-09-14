@@ -2,11 +2,11 @@
 
 ## Status
 
-Proposed
+Accepted
 
-This ADR describes v0.81.0 only. Its contracts are proposed release decisions;
-drafting this document does not authorize implementation. Released v0.80 and all
-prior public/serialized contracts remain frozen. ADR0040, ADR0041 and the v0.80
+ADR0042 is the accepted architecture contract for v0.81.0. Implementation
+remains separately authorized and review-gated. Released v0.80 and all prior
+public/serialized contracts remain frozen. ADR0040, ADR0041 and the v0.80
 handoff remain unchanged.
 
 ## Context and inspected baseline
