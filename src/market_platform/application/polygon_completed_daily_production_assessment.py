@@ -651,6 +651,215 @@ class PolygonCompletedDailyProductionAssessmentApplicationService:
         except Exception as error:
             raise PolygonCompletedDailyAssessmentRefused(reason, str(error)) from error
 
+    def get_result_history_as_of(
+        self,
+        artifact_reference: GovernedTechnicalArtifactReference,
+        *,
+        knowledge_as_of: datetime,
+    ) -> tuple[PolygonCompletedDailyAssessmentResult, ...]:
+        """Read authentic publications in sequence order, without changing authority."""
+        if type(artifact_reference) is not GovernedTechnicalArtifactReference:
+            raise TypeError("exact governed artifact reference required")
+        # Preserve and validate the supplied fingerprint rather than regenerating it.
+        reference = deepcopy(artifact_reference)
+        reference_before = reference.to_dict()
+        owner, namespace = self._history_owner, self._namespace
+        original_publisher = self.__interpretation_service
+        reasons = PolygonCompletedDailyAssessmentRefusalReason
+        reason = reasons.TEMPORAL_FAILURE
+        try:
+            cutoff = a._timestamp(knowledge_as_of)
+            reason = reasons.HISTORY_INVALID
+            with ExitStack() as stack:
+                publisher = self._lock_inputs(stack)
+                state = self._committed
+                if (
+                    publisher is not original_publisher
+                    or self.__history_owner is not owner
+                    or self.__namespace is not namespace
+                    or owner._namespace_id is not namespace
+                ):
+                    raise ValueError("acquired Assessment history authority changed")
+                self._check_authority(owner, namespace, state, publisher, None)
+                retained = self._authenticate_history_locked(state, publisher)
+                self._check_authority(owner, namespace, state, publisher, None)
+
+                reason = reasons.PUBLICATION_FAILED
+                copies = []
+                for (item, _), fact in zip(retained, state[1], strict=True):
+                    if (
+                        item.assessment.source_interpretation_occurrence.artifact_reference.to_dict()
+                        == reference_before
+                        and item.available_at <= cutoff
+                    ):
+                        public = _public_result_copy(item)
+                        _check_copy(public, item, _decode_result(fact))
+                        if _encode_result(public) != fact:
+                            raise ValueError("public Assessment bytes changed")
+                        copies.append(public)
+                public_results = tuple(copies)
+                retained_graph = set().union(
+                    *(_graph_ids(item) for item, _ in retained)
+                )
+                public_graph: set[int] = set()
+                for public in public_results:
+                    graph = _graph_ids(public)
+                    if graph & (retained_graph | public_graph):
+                        raise ValueError("Assessment history result graphs alias")
+                    public_graph.update(graph)
+                if reference.to_dict() != reference_before:
+                    raise ValueError("history artifact reference changed")
+
+                # Recheck every retained fact/source, including invisible occurrences,
+                # after all public reconstruction and isolation work.
+                reason = reasons.HISTORY_INVALID
+                self._check_authority(owner, namespace, state, publisher, None)
+                reauthenticated = self._authenticate_history_locked(state, publisher)
+                for (before, source_before), (after, source_after), fact in zip(
+                    retained, reauthenticated, state[1], strict=True
+                ):
+                    if _encode_result(before) != fact or _encode_result(after) != fact:
+                        raise ValueError("retained Assessment fact changed")
+                    if source_before != source_after:
+                        raise PolygonCompletedDailyAssessmentRefused(
+                            reasons.SOURCE_MISMATCH,
+                            "retained Interpretation projection changed",
+                        )
+                requests = tuple(
+                    replace(item.assessment.source_interpretation_occurrence)
+                    for item, _ in retained
+                )
+                selectors = tuple(
+                    (
+                        request.interpretation_history_namespace_id,
+                        request.interpretation_history_sequence,
+                        request.interpretation_execution_id,
+                        request.interpretation_fingerprint,
+                    )
+                    for request in requests
+                )
+                self._check_authority(owner, namespace, state, publisher, None)
+                # Final complete source/support seal. All local projections, codecs,
+                # graphs, history/domain validation and preparation precede this loop.
+                for request, selected in zip(requests, selectors, strict=True):
+                    sealed = self._authenticate_retained_source(request, publisher)
+                    if (
+                        type(sealed) is not i.PolygonCompletedDailyInterpretationResult
+                        or type(sealed.history_namespace_id) is not str
+                        or type(sealed.history_sequence) is not int
+                        or type(sealed.execution_id) is not str
+                        or type(sealed.fingerprint) is not str
+                        or sealed.history_namespace_id != selected[0]
+                        or sealed.history_sequence != selected[1]
+                        or sealed.execution_id != selected[2]
+                        or sealed.fingerprint != selected[3]
+                    ):
+                        raise PolygonCompletedDailyAssessmentRefused(
+                            reasons.SOURCE_MISMATCH, "sealed source occurrence changed"
+                        )
+                # Only direct identity reads remain after the complete seal.
+                if (
+                    object.__getattribute__(self, "_committed") is not state
+                    or object.__getattribute__(
+                        self,
+                        "_PolygonCompletedDailyProductionAssessmentApplicationService"
+                        "__interpretation_service",
+                    )
+                    is not publisher
+                    or object.__getattribute__(
+                        self,
+                        "_PolygonCompletedDailyProductionAssessmentApplicationService"
+                        "__history_owner",
+                    )
+                    is not owner
+                    or object.__getattribute__(
+                        self,
+                        "_PolygonCompletedDailyProductionAssessmentApplicationService"
+                        "__namespace",
+                    )
+                    is not namespace
+                    or object.__getattribute__(owner, "_namespace_id") is not namespace
+                    or object.__getattribute__(owner, "_state") is not state
+                    or object.__getattribute__(owner, "_pending") is not None
+                ):
+                    raise ValueError("Assessment authority changed during read seal")
+                return public_results
+        except PolygonCompletedDailyAssessmentRefused:
+            raise
+        except Exception as error:
+            raise PolygonCompletedDailyAssessmentRefused(reason, str(error)) from error
+
+    def _authenticate_retained_source(
+        self,
+        request: domain.PolygonCompletedDailyAssessmentRequest,
+        publisher: i.PolygonCompletedDailyProductionInterpretationApplicationService,
+    ) -> i.PolygonCompletedDailyInterpretationResult:
+        """A committed Assessment losing its exact source is invalid history."""
+        try:
+            return self._authenticate_source(request, publisher)
+        except PolygonCompletedDailyAssessmentRefused as error:
+            if error.reason == (
+                PolygonCompletedDailyAssessmentRefusalReason.INTERPRETATION_UNAVAILABLE
+            ):
+                raise PolygonCompletedDailyAssessmentRefused(
+                    PolygonCompletedDailyAssessmentRefusalReason.HISTORY_INVALID,
+                    "retained Assessment source occurrence unavailable",
+                ) from error
+            raise
+
+    def _authenticate_history_locked(
+        self,
+        state: tuple[int, tuple[bytes, ...]],
+        publisher: i.PolygonCompletedDailyProductionInterpretationApplicationService,
+    ) -> tuple[tuple[PolygonCompletedDailyAssessmentResult, bytes], ...]:
+        """Authenticate the complete inventory under held locks; retain no authority."""
+        self._check_history()
+        authenticated = []
+        reasons = PolygonCompletedDailyAssessmentRefusalReason
+        for fact in state[1]:
+            item = _reconstruct_result(fact)
+            request = item.assessment.source_interpretation_occurrence
+            request_before = request.to_dict()
+            source = self._authenticate_retained_source(request, publisher)
+            try:
+                if type(source) is not i.PolygonCompletedDailyInterpretationResult:
+                    raise ValueError("exact authenticated Interpretation required")
+                source_fact = i._encode_result(source)
+                if (
+                    request_before
+                    != {
+                        "artifact_reference": (
+                            source.source_technical_occurrence.artifact_reference.to_dict()
+                        ),
+                        "interpretation_history_namespace_id": (
+                            source.history_namespace_id
+                        ),
+                        "interpretation_history_sequence": source.history_sequence,
+                        "interpretation_execution_id": source.execution_id,
+                        "interpretation_fingerprint": source.fingerprint,
+                    }
+                    or item.interpretation_available_at != source.available_at
+                ):
+                    raise ValueError("retained Interpretation correspondence mismatch")
+            except Exception as error:
+                raise PolygonCompletedDailyAssessmentRefused(
+                    reasons.SOURCE_MISMATCH, str(error)
+                ) from error
+            domain.validate_governed_daily_technical_assessment(
+                content=item.assessment,
+                interpretation=source.interpretation,
+                source_interpretation_occurrence=request,
+            )
+            if _encode_result(item) != fact or request.to_dict() != request_before:
+                raise ValueError("retained Assessment changed during validation")
+            if i._encode_result(source) != source_fact:
+                raise PolygonCompletedDailyAssessmentRefused(
+                    reasons.SOURCE_MISMATCH,
+                    "retained Interpretation changed during validation",
+                )
+            authenticated.append((item, source_fact))
+        return tuple(authenticated)
+
     def _prepare_assessment(
         self,
         request: domain.PolygonCompletedDailyAssessmentRequest,

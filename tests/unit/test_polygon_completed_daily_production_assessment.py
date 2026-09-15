@@ -4,6 +4,7 @@ import ast
 import inspect
 import json
 import subprocess
+import sys
 import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
@@ -13,7 +14,7 @@ from datetime import UTC, datetime, timedelta, timezone
 from enum import Enum, IntEnum, StrEnum
 from itertools import product
 from pathlib import Path
-from threading import Lock
+from threading import Event, Lock
 from types import SimpleNamespace
 
 import pytest
@@ -862,7 +863,7 @@ def test_exact_ten_lock_chain_composed_once_without_work(monkeypatch):
     assert owner._state is service._committed and owner._state == (1, ())
 
 
-def test_exact_exports_and_only_public_execute_workflow():
+def test_exact_exports_and_public_workflows():
     assert app.__all__ == [
         "PolygonCompletedDailyAssessmentRefusalReason",
         "PolygonCompletedDailyAssessmentRefused",
@@ -873,8 +874,7 @@ def test_exact_exports_and_only_public_execute_workflow():
         name
         for name, member in inspect.getmembers(Service, callable)
         if not name.startswith("_")
-    ] == ["execute"]
-    assert not hasattr(Service, "get_result_history_as_of")
+    ] == ["execute", "get_result_history_as_of"]
     assert list(inspect.signature(Service.execute).parameters) == ["self", "request"]
     tree = ast.parse(inspect.getsource(app))
     called = {
@@ -1566,7 +1566,7 @@ def test_preparation_checks_returned_source_selectors(
     )
 
 
-@pytest.mark.parametrize("workflow", ["prepare", "execute"])
+@pytest.mark.parametrize("workflow", ["prepare", "execute", "history"])
 def test_preparation_no_upstream_execution_or_legacy_assessment(
     preparation_publisher, monkeypatch, workflow
 ):
@@ -1585,6 +1585,8 @@ def test_preparation_no_upstream_execution_or_legacy_assessment(
 
     publisher, first, _ = preparation_publisher
     service = Service(publisher, execution_clock=lambda: first.available_at)
+    if workflow == "history":
+        service.execute(assessment_request(first))
     technical = publisher._technical_service
     bridge = technical._bridge_service
     qualified = bridge._qualification_service
@@ -1634,6 +1636,26 @@ def test_preparation_no_upstream_execution_or_legacy_assessment(
     state, namespace = service._committed, service._namespace
     if workflow == "execute":
         assert service.execute(assessment_request(first)).history_sequence == 1
+        return
+    if workflow == "history":
+        monkeypatch.setattr(
+            domain, "assess_governed_daily_technical_interpretation", forbidden
+        )
+        monkeypatch.setattr(app, "uuid4", forbidden)
+        monkeypatch.setattr(service, "_clock", forbidden)
+        assert (
+            len(
+                service.get_result_history_as_of(
+                    assessment_request(first).artifact_reference,
+                    knowledge_as_of=first.available_at,
+                )
+            )
+            == 1
+        )
+        assert service._history_owner is owner
+        assert service._namespace is owner._namespace_id is namespace
+        assert service._committed is owner._state is state
+        assert owner._pending is None
         return
     for name in (
         "uuid4",
@@ -3169,3 +3191,988 @@ def test_execute_final_source_seal_detects_removed_assessment_root(
     assert service._committed is state
     assert service.execute(request).history_sequence == 2
     assert service._committed[1][:-1] == state[1]
+
+
+def read_history(service, request, cutoff):
+    return service.get_result_history_as_of(
+        request.artifact_reference, knowledge_as_of=cutoff
+    )
+
+
+def history_refusal(service, request, cutoff, reason):
+    owner, state = service._history_owner, service._committed
+    pending, namespace = owner._pending, service._namespace
+    publisher = service._interpretation_service
+    with pytest.raises(Refused) as caught:
+        read_history(service, request, cutoff)
+    assert caught.value.reason == reason
+    assert service._committed is state
+    assert service._history_owner is owner
+    assert owner._pending is pending
+    assert service._namespace is namespace
+    assert service._interpretation_service is publisher
+
+
+def test_history_signature_and_slice_5_execute_ast_checkpoint():
+    signature = inspect.signature(Service.get_result_history_as_of)
+    assert list(signature.parameters) == [
+        "self",
+        "artifact_reference",
+        "knowledge_as_of",
+    ]
+    assert signature.parameters["artifact_reference"].annotation == (
+        "GovernedTechnicalArtifactReference"
+    )
+    assert (
+        signature.parameters["knowledge_as_of"].kind is inspect.Parameter.KEYWORD_ONLY
+    )
+    assert signature.parameters["knowledge_as_of"].annotation == "datetime"
+    assert (
+        signature.return_annotation
+        == "tuple[PolygonCompletedDailyAssessmentResult, ...]"
+    )
+    root = Path(__file__).resolve().parents[2]
+    before = ast.parse(
+        subprocess.check_output(
+            [
+                "git",
+                "show",
+                "1e844440c95fbff8d910c24a50374393b7fec1b9:"
+                "src/market_platform/application/polygon_completed_daily_production_assessment.py",
+            ],
+            cwd=root,
+            text=True,
+        )
+    )
+    after = ast.parse(inspect.getsource(app))
+    # Every existing definition, including execute and all its publication helpers,
+    # stays identical; only three new methods are authorized in the service.
+    for old, new in zip(before.body, after.body, strict=True):
+        if isinstance(old, ast.ClassDef) and old.name == Service.__name__:
+            old_members = {
+                node.name: node for node in old.body if hasattr(node, "name")
+            }
+            new_members = {
+                node.name: node for node in new.body if hasattr(node, "name")
+            }
+            assert new_members.keys() - old_members.keys() == {
+                "get_result_history_as_of",
+                "_authenticate_retained_source",
+                "_authenticate_history_locked",
+            }
+            for name in old_members:
+                assert ast.dump(old_members[name]) == ast.dump(new_members[name])
+        else:
+            assert ast.dump(old) == ast.dump(new)
+
+
+def test_history_empty_no_clock_id_stage_or_observation(
+    preparation_publisher, monkeypatch
+):
+    service = execution_service(preparation_publisher)
+    owner, state, namespace = (
+        service._history_owner,
+        service._committed,
+        service._namespace,
+    )
+    publisher = service._interpretation_service
+    observed, retention = publisher._observed, publisher._retention
+    for target, name in (
+        (service, "_clock"),
+        (app, "uuid4"),
+        (owner, "_stage_publication"),
+        (publisher, "_observe_technical_history"),
+        (publisher, "_authenticate_interpretation_occurrence"),
+    ):
+        monkeypatch.setattr(target, name, forbidden)
+    assert (
+        read_history(service, assessment_request(preparation_publisher[1]), TIME) == ()
+    )
+    assert_unprepared_authority(service, owner, state, namespace)
+    assert publisher._observed is observed and publisher._retention is retention
+    assert state[1] == ()
+
+
+def test_history_inclusive_availability_and_all_occurrences(publication_case):
+    service, request, source = publication_case
+    start = source.available_at
+    times = iter(start + timedelta(seconds=n) for n in (1, 2, 3, 4, 5, 6, 7, 8, 9))
+    service._clock = lambda: next(times)
+    published = [service.execute(request) for _ in range(3)]
+    for index, item in enumerate(published):
+        assert [
+            v.history_sequence
+            for v in read_history(
+                service, request, item.available_at - timedelta(microseconds=1)
+            )
+        ] == list(range(1, index + 1))
+        values = read_history(service, request, item.available_at)
+        assert type(values) is tuple
+        assert [v.history_sequence for v in values] == list(range(1, index + 2))
+        assert [app._encode_result(v) for v in values] == list(
+            service._committed[1][: index + 1]
+        )
+    assert len(read_history(service, request, start + timedelta(days=1))) == 3
+
+
+def test_history_filters_complete_artifact_projection(publication_case, monkeypatch):
+    service, request, source = publication_case
+    # Mock the private boundary with two distinct, complete source projections.
+    other = i._reconstruct_result(i._encode_result(source))
+    reference = replace(request.artifact_reference, artifact_version="other")
+    object.__setattr__(
+        other,
+        "interpretation",
+        replace(
+            other.interpretation,
+            source_technical_occurrence=replace(
+                other.source_technical_occurrence, artifact_reference=reference
+            ),
+        ),
+    )
+    object.__setattr__(other, "fingerprint", canonical_fingerprint(other._payload()))
+    source_facts = {
+        value.fingerprint: i._encode_result(value) for value in (source, other)
+    }
+
+    def authenticate(**selectors):
+        value = i._reconstruct_result(
+            source_facts[selectors["interpretation_fingerprint"]]
+        )
+        assert selectors == _interpretation_selectors(value)
+        return value
+
+    monkeypatch.setattr(
+        service._interpretation_service,
+        "_authenticate_interpretation_occurrence",
+        authenticate,
+    )
+    other_request = assessment_request(other)
+    for selected in (request, other_request, request):
+        service.execute(selected)
+    assert [
+        v.history_sequence for v in read_history(service, request, source.available_at)
+    ] == [1, 3]
+    assert [
+        v.history_sequence
+        for v in read_history(service, other_request, source.available_at)
+    ] == [2]
+    missing = replace(
+        request, artifact_reference=replace(reference, artifact_version="missing")
+    )
+    assert read_history(service, missing, source.available_at) == ()
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["object", "mapping", "fingerprint", "request", "source", "result", "subclass"],
+)
+def test_history_requires_exact_artifact_type(publication_case, monkeypatch, kind):
+    service, request, source = publication_case
+    value = service.execute(request)
+    supplied = {
+        "object": object(),
+        "mapping": request.artifact_reference.to_dict(),
+        "fingerprint": request.artifact_reference.fingerprint,
+        "request": request,
+        "source": source,
+        "result": value,
+        "subclass": object.__new__(
+            type("ReferenceSubclass", (app.GovernedTechnicalArtifactReference,), {})
+        ),
+    }[kind]
+    monkeypatch.setattr(service, "_lock_inputs", forbidden)
+    with pytest.raises(TypeError):
+        service.get_result_history_as_of(supplied, knowledge_as_of=source.available_at)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("fingerprint", FP),
+        ("schema_version", "invalid"),
+        ("authority", String("external_origin")),
+    ],
+)
+def test_history_validates_original_artifact_projection(publication_case, field, value):
+    service, request, source = publication_case
+    reference = replace(request.artifact_reference)
+    object.__setattr__(reference, field, value)
+    with pytest.raises((TypeError, ValueError)):
+        service.get_result_history_as_of(reference, knowledge_as_of=source.available_at)
+
+
+def test_history_detaches_before_projection_timestamp_and_lock(
+    publication_case, monkeypatch
+):
+    service, request, source = publication_case
+    service.execute(request)
+    reference = replace(request.artifact_reference)
+    project = app.GovernedTechnicalArtifactReference.to_dict
+    timestamp = app.a._timestamp
+    calls = []
+
+    def projection(value):
+        if not calls:
+            assert value is not reference
+            object.__setattr__(reference, "artifact_version", "mutated")
+            calls.append("detached")
+        return project(value)
+
+    def normalize(value):
+        assert calls == ["detached"]
+        cutoff = timestamp(value)
+        assert cutoff.tzinfo is UTC
+        calls.append(cutoff)
+        return cutoff
+
+    monkeypatch.setattr(app.GovernedTechnicalArtifactReference, "to_dict", projection)
+    monkeypatch.setattr(app.a, "_timestamp", normalize)
+    offset_cutoff = source.available_at.astimezone(timezone(timedelta(hours=8)))
+    assert (
+        len(service.get_result_history_as_of(reference, knowledge_as_of=offset_cutoff))
+        == 1
+    )
+    assert calls == ["detached", source.available_at]
+
+
+@pytest.mark.parametrize(
+    "cutoff", [None, "2026-01-02", 1, datetime(2026, 1, 2), object()]
+)
+def test_history_invalid_cutoff_is_temporal_failure(
+    publication_case, monkeypatch, cutoff
+):
+    service, request, _ = publication_case
+    monkeypatch.setattr(service, "_lock_inputs", forbidden)
+    history_refusal(service, request, cutoff, R.TEMPORAL_FAILURE)
+
+
+@pytest.mark.parametrize("attack", ["pending", "state", "namespace", "owner"])
+def test_history_requires_idle_original_authority(
+    publication_case, monkeypatch, attack
+):
+    service, request, source = publication_case
+    value = service.execute(request)
+    owner, state = service._history_owner, service._committed
+    if attack == "pending":
+        monkeypatch.setattr(owner, "_pending", value)
+    elif attack == "state":
+        replacement = (state[0], state[1])
+        assert replacement == state and replacement is not state
+        monkeypatch.setattr(owner, "_state", replacement)
+    elif attack == "namespace":
+        monkeypatch.setattr(owner, "_namespace_id", PREFIX + "_history:" + "0" * 32)
+    else:
+        replacement = app._AssessmentHistory()
+        monkeypatch.setattr(
+            service,
+            "_PolygonCompletedDailyProductionAssessmentApplicationService__history_owner",
+            replacement,
+        )
+    history_refusal(service, request, source.available_at, R.HISTORY_INVALID)
+    assert service._committed is state
+
+
+@pytest.mark.parametrize(
+    "error,reason",
+    [
+        (i._InterpretationOccurrenceUnavailable, R.HISTORY_INVALID),
+        (i._InterpretationHistoryInvalid, R.HISTORY_INVALID),
+        (i._InterpretationSourceMismatch, R.SOURCE_MISMATCH),
+    ],
+)
+@pytest.mark.parametrize("phase", [1, 2, 3])
+def test_history_retained_private_failures_never_become_selection_unavailable(
+    publication_case, monkeypatch, error, reason, phase
+):
+    service, request, source = publication_case
+    service.execute(request)
+    authenticate = (
+        service._interpretation_service._authenticate_interpretation_occurrence
+    )
+    calls = []
+
+    def failed(**selectors):
+        calls.append(selectors)
+        if len(calls) == phase:
+            raise error("identical message for every structured category")
+        return authenticate(**selectors)
+
+    monkeypatch.setattr(
+        service._interpretation_service,
+        "_authenticate_interpretation_occurrence",
+        failed,
+    )
+    history_refusal(service, request, source.available_at, reason)
+    assert len(calls) == phase
+
+
+@pytest.mark.parametrize("attack", ["bytes", "semantic", "unsupported"])
+@pytest.mark.parametrize("invisible", ["future", "artifact"])
+def test_history_authenticates_complete_inventory_before_filtering(
+    publication_case, monkeypatch, attack, invisible
+):
+    service, request, source = publication_case
+    service.execute(request)
+    service._clock = lambda: source.available_at + timedelta(days=1)
+    service.execute(request)
+    state = service._committed
+    if attack in ("bytes", "semantic"):
+        projection = app._decode_result(state[1][1])
+        if attack == "bytes":
+            projection["fingerprint"] = FP
+        else:
+            projection["assessment"]["outcome"] = (
+                "aligned"
+                if projection["assessment"]["outcome"] != "aligned"
+                else "mixed"
+            )
+            refingerprint(projection["assessment"])
+            refingerprint(projection)
+        changed = (3, (state[1][0], app._canonical_bytes(projection)))
+        monkeypatch.setattr(service, "_committed", changed)
+        monkeypatch.setattr(service._history_owner, "_state", changed)
+    else:
+        authenticate = (
+            service._interpretation_service._authenticate_interpretation_occurrence
+        )
+        calls = []
+
+        def unsupported(**selectors):
+            calls.append(1)
+            if len(calls) == 2:
+                raise i._InterpretationOccurrenceUnavailable("lost exact source")
+            return authenticate(**selectors)
+
+        monkeypatch.setattr(
+            service._interpretation_service,
+            "_authenticate_interpretation_occurrence",
+            unsupported,
+        )
+    monkeypatch.setattr(app, "_public_result_copy", forbidden)
+    selected = (
+        request
+        if invisible == "future"
+        else replace(
+            request,
+            artifact_reference=replace(
+                request.artifact_reference, artifact_version="absent"
+            ),
+        )
+    )
+    history_refusal(service, selected, source.available_at, R.HISTORY_INVALID)
+
+
+def test_history_public_graph_mutation_isolation(publication_case, monkeypatch):
+    service, request, source = publication_case
+    service.execute(request)
+    service.execute(request)
+    owner, state, namespace = (
+        service._history_owner,
+        service._committed,
+        service._namespace,
+    )
+    observed, retention = (
+        service._interpretation_service._observed,
+        service._interpretation_service._retention,
+    )
+    reconstructions, validations = [], []
+    reconstruct = app._reconstruct_result
+    validate = domain.validate_governed_daily_technical_assessment
+
+    def reconstructed(fact):
+        value = reconstruct(fact)
+        reconstructions.append(value)
+        return value
+
+    def validated(**kwargs):
+        validations.append(kwargs["content"].to_dict())
+        return validate(**kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(app, "_reconstruct_result", reconstructed)
+        patch.setattr(domain, "validate_governed_daily_technical_assessment", validated)
+        patch.setattr(
+            domain, "assess_governed_daily_technical_interpretation", forbidden
+        )
+        patch.setattr(service, "_clock", forbidden)
+        patch.setattr(app, "uuid4", forbidden)
+        first = read_history(service, request, source.available_at)
+        second = read_history(service, request, source.available_at)
+    assert len(validations) == 8  # Two occurrences, two complete passes, two reads.
+    graphs = [mutable_ids(value) for value in reconstructions]
+    for index, graph_ids in enumerate(graphs):
+        assert all(not graph_ids & other for other in graphs[:index])
+    assert not mutable_ids(first) & mutable_ids(second)
+    assert tuple(app._encode_result(value) for value in first) == state[1]
+    expected = second[0].assessment.to_dict()
+    first[0].assessment.assessment_policy_identity.configuration["changed"] = True
+    object.__setattr__(first[1].assessment, "outcome", "mutated")
+    third = read_history(service, request, source.available_at)
+    assert tuple(app._encode_result(value) for value in third) == state[1]
+    assert service._history_owner is owner
+    assert service._namespace is owner._namespace_id is namespace
+    assert service._committed is owner._state is state
+    assert owner._pending is None
+    assert service._interpretation_service._observed is observed
+    assert service._interpretation_service._retention is retention
+    later = service.execute(request)
+    assert later.history_sequence == 3 and later.assessment.to_dict() == expected
+    assert service._committed[1][:-1] == state[1]
+
+
+@pytest.mark.parametrize(
+    "seam", ["copy", "reconstruct", "encode", "projection", "graph", "alias", "changed"]
+)
+def test_history_public_copy_failures_preserve_authority(
+    publication_case, monkeypatch, seam
+):
+    service, request, source = publication_case
+    service.execute(request)
+    original = app._public_result_copy
+
+    def failed(*args, **kwargs):
+        raise ValueError("public reconstruction seam failed")
+
+    def copied(item):
+        if seam == "copy":
+            raise RuntimeError("copy failed")
+        if seam == "alias":
+            return item
+        if seam == "changed":
+            value = original(item)
+            object.__setattr__(value, "history_sequence", 99)
+            return value
+        target, name = {
+            "reconstruct": (app, "_reconstruct_result"),
+            "encode": (app, "_encode_result"),
+            "projection": (Result, "to_dict"),
+            "graph": (app, "_graph_ids"),
+        }[seam]
+        monkeypatch.setattr(target, name, failed)
+        return original(item)
+
+    monkeypatch.setattr(app, "_public_result_copy", copied)
+    history_refusal(service, request, source.available_at, R.PUBLICATION_FAILED)
+    assert service._history_owner._state is service._committed
+
+
+def assessment_locks(service):
+    publisher = service._interpretation_service
+    technical = publisher._technical_service
+    bridge = technical._bridge_service
+    qualified = bridge._qualification_service
+    validity = qualified._validity_service
+    admission = validity._admission_service
+    return [
+        admission._construction_service._history._lock,
+        admission._validation_service._history._lock,
+        admission._freshness_service._history._lock,
+        admission._history._lock,
+        validity._history._lock,
+        qualified._history._lock,
+        bridge._history._lock,
+        technical._history._lock,
+        publisher._history_owner._lock,
+        service._history_owner._lock,
+    ]
+
+
+def test_history_ten_locks_once_pinned_publisher_and_final_seal(
+    publication_case, monkeypatch
+):
+    service, request, source = publication_case
+    service.execute(request)
+    service.execute(request)
+    publisher = service._interpretation_service
+    locks = assessment_locks(service)
+    entries, events, compositions, authenticated = [], [], [], []
+    state = service._committed
+
+    class NonrecursiveStack(ExitStack):
+        def enter_context(self, lock):
+            assert lock.acquire(blocking=False), "recursive lock acquisition"
+            entries.append(lock)
+            self.callback(lock.release)
+
+    compose = publisher._lock_inputs
+    authenticate = publisher._authenticate_interpretation_occurrence
+
+    def composed(stack):
+        compositions.append(publisher)
+        compose(stack)
+
+    def authentication(**selectors):
+        assert entries == locks and all(lock.locked() for lock in locks)
+        assert service._committed is service._history_owner._state is state
+        assert service._history_owner._pending is None
+        assert selectors == _interpretation_selectors(source)
+        authenticated.append(selectors)
+        value = authenticate(**selectors)
+        events.append("authentication_return")
+        return value
+
+    def wrap(target, name):
+        original = getattr(target, name)
+
+        def call(*args, **kwargs):
+            events.append(name)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(target, name, call)
+
+    monkeypatch.setattr(app, "ExitStack", NonrecursiveStack)
+    monkeypatch.setattr(publisher, "_lock_inputs", composed)
+    monkeypatch.setattr(
+        publisher, "_authenticate_interpretation_occurrence", authentication
+    )
+    # The compatibility read surface cannot choose a different publisher.
+    monkeypatch.setattr(
+        Service, "_interpretation_service", property(lambda self: object())
+    )
+    for target, name in (
+        (app, "_encode_result"),
+        (app, "_decode_result"),
+        (app, "_reconstruct_result"),
+        (app, "_public_result_copy"),
+        (app, "_check_copy"),
+        (app, "_graph_ids"),
+        (Result, "to_dict"),
+        (service, "_check_history"),
+        (service, "_check_authority"),
+        (domain, "validate_governed_daily_technical_assessment"),
+        (i, "_encode_result"),
+    ):
+        wrap(target, name)
+    assert len(read_history(service, request, source.available_at)) == 2
+    assert entries == locks and len(set(entries)) == 10
+    assert entries[-1] is service._history_owner._lock
+    assert compositions == [publisher]
+    assert len(authenticated) == 6  # Complete initial, post-copy, final seal passes.
+    assert events[-1] == "authentication_return"
+    assert not any(lock.locked() for lock in locks)
+    # There is no dispatch to a local validation seam after the final seal loop.
+    tree = ast.parse(inspect.getsource(app))
+    method = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "get_result_history_as_of"
+    )
+    body = next(node for node in ast.walk(method) if isinstance(node, ast.With)).body
+    assert isinstance(body[-3], ast.For)
+    assert isinstance(body[-2], ast.If) and isinstance(body[-1], ast.Return)
+    assert all(
+        isinstance(node.func, ast.Attribute) and node.func.attr == "__getattribute__"
+        for node in ast.walk(body[-2].test)
+        if isinstance(node, ast.Call)
+    )
+    assert isinstance(body[-1].value, ast.Name)
+
+
+@pytest.mark.parametrize(
+    "root", ["owner", "publisher", "namespace", "owner_namespace", "state", "pending"]
+)
+@pytest.mark.parametrize("phase", ["locking", "seal"])
+def test_history_rejects_authority_replacement_without_repair(
+    publication_case, monkeypatch, root, phase
+):
+    service, request, source = publication_case
+    service.execute(request)
+    owner, state = service._history_owner, service._committed
+    publisher = service._interpretation_service
+    prefix = "_PolygonCompletedDailyProductionAssessmentApplicationService__"
+    target, name, replacement = {
+        "owner": (service, prefix + "history_owner", app._AssessmentHistory()),
+        "publisher": (service, prefix + "interpretation_service", object()),
+        "namespace": (service, prefix + "namespace", PREFIX + "_history:" + "f" * 32),
+        "owner_namespace": (owner, "_namespace_id", PREFIX + "_history:" + "f" * 32),
+        "state": (owner, "_state", (state[0], state[1])),
+        "pending": (owner, "_pending", app._reconstruct_result(state[1][0])),
+    }[root]
+    lock_inputs = service._lock_inputs
+    authenticate = publisher._authenticate_interpretation_occurrence
+    calls = []
+
+    def locking(stack):
+        value = lock_inputs(stack)
+        monkeypatch.setattr(target, name, replacement)
+        return value
+
+    def authenticated(**selectors):
+        value = authenticate(**selectors)
+        calls.append(1)
+        if len(calls) == 3:
+            monkeypatch.setattr(target, name, replacement)
+        return value
+
+    if phase == "locking":
+        monkeypatch.setattr(service, "_lock_inputs", locking)
+    else:
+        monkeypatch.setattr(
+            publisher, "_authenticate_interpretation_occurrence", authenticated
+        )
+    with pytest.raises(Refused) as caught:
+        read_history(service, request, source.available_at)
+    assert caught.value.reason == R.HISTORY_INVALID
+    assert getattr(target, name) is replacement
+    assert service._committed is state
+    assert not owner._lock.locked()
+    if root != "state":
+        assert owner._state is state
+    if root != "pending":
+        assert owner._pending is None
+
+
+@pytest.mark.parametrize(
+    "seam", ["copy", "graph", "projection", "codec", "domain", "history"]
+)
+def test_history_final_seal_catches_real_support_loss_after_fallible_work(
+    publication_case, monkeypatch, seam
+):
+    service, request, source = publication_case
+    service.execute(request)
+    publisher = service._interpretation_service
+    technical_history = publisher._technical_service._history
+    owner, state = service._history_owner, service._committed
+    authenticate = Publisher._authenticate_interpretation_occurrence.__get__(publisher)
+    calls, invalidations = [], []
+    target, name = {
+        "copy": (app, "_public_result_copy"),
+        "graph": (app, "_graph_ids"),
+        "projection": (Result, "to_dict"),
+        "codec": (app, "_encode_result"),
+        "domain": (domain, "validate_governed_daily_technical_assessment"),
+        "history": (service, "_check_history"),
+    }[seam]
+    original = getattr(target, name)
+
+    def authenticated(**selectors):
+        calls.append(1)
+        return authenticate(**selectors)
+
+    def changed(*args, **kwargs):
+        value = original(*args, **kwargs)
+        # Late projection/codec/domain seams occur after the second authentication.
+        threshold = 2 if seam in ("projection", "codec", "domain") else 1
+        if len(calls) >= threshold and not invalidations:
+            monkeypatch.setattr(technical_history, "_state", (1, ()))
+            invalidations.append(1)
+        return value
+
+    monkeypatch.setattr(
+        publisher, "_authenticate_interpretation_occurrence", authenticated
+    )
+    monkeypatch.setattr(target, name, changed)
+    history_refusal(service, request, source.available_at, R.HISTORY_INVALID)
+    assert invalidations == [1]
+    assert len(calls) == (3 if seam in ("projection", "codec", "domain") else 2)
+    assert service._committed is owner._state is state
+
+
+@pytest.mark.parametrize(
+    "change", ["type", "namespace", "sequence", "execution_id", "fingerprint"]
+)
+def test_history_final_seal_rejects_wrong_occurrence(
+    publication_case, monkeypatch, change
+):
+    service, request, source = publication_case
+    service.execute(request)
+    publisher = service._interpretation_service
+    authenticate = publisher._authenticate_interpretation_occurrence
+    calls = []
+
+    def authenticated(**selectors):
+        value = authenticate(**selectors)
+        calls.append(1)
+        if len(calls) == 3:
+            if change == "type":
+                return object()
+            field, replacement = {
+                "namespace": ("history_namespace_id", "wrong"),
+                "sequence": ("history_sequence", True),
+                "execution_id": ("execution_id", "wrong"),
+                "fingerprint": ("fingerprint", FP),
+            }[change]
+            object.__setattr__(value, field, replacement)
+        return value
+
+    monkeypatch.setattr(
+        publisher, "_authenticate_interpretation_occurrence", authenticated
+    )
+    history_refusal(service, request, source.available_at, R.SOURCE_MISMATCH)
+    assert len(calls) == 3
+
+
+@pytest.mark.parametrize("first_operation", ["read", "execute"])
+def test_history_and_execute_serialize_on_original_owner(
+    publication_case, monkeypatch, first_operation
+):
+    service, request, source = publication_case
+    service.execute(request)
+    owner, state = service._history_owner, service._committed
+    locks = assessment_locks(service)
+    second_operation = "execute" if first_operation == "read" else "read"
+    owner_attempted, second_attempted, in_work, release_work = (
+        Event() for _ in range(4)
+    )
+    attempted = {"read": [], "execute": []}
+    acquired = {"read": [], "execute": []}
+    stage, public_copy = owner._stage_publication, app._public_result_copy
+
+    def pause():
+        assert owner._lock.locked()
+        assert service._committed is owner._state is state
+        in_work.set()
+        assert release_work.wait(30)
+
+    def staged(value):
+        stage(value)
+        if first_operation == "execute":
+            pause()
+
+    def copied(value):
+        if first_operation == "read" and not in_work.is_set():
+            assert owner._pending is None
+            pause()
+        return public_copy(value)
+
+    def run(operation):
+        previous = sys.getprofile()
+
+        def observe(frame, event, call):
+            if event not in ("c_call", "c_return"):
+                return
+            lock = getattr(call, "__self__", None)
+            if getattr(call, "__name__", None) != "__enter__" or not any(
+                lock is candidate for candidate in locks
+            ):
+                return
+            if event == "c_call":
+                attempted[operation].append(lock)
+                if lock is owner._lock and operation == first_operation:
+                    owner_attempted.set()
+                if lock is locks[0] and operation == second_operation:
+                    second_attempted.set()
+            else:
+                acquired[operation].append(lock)
+
+        sys.setprofile(observe)
+        try:
+            return (
+                read_history(service, request, source.available_at)
+                if operation == "read"
+                else service.execute(request)
+            )
+        finally:
+            sys.setprofile(previous)
+
+    monkeypatch.setattr(owner, "_stage_publication", staged)
+    monkeypatch.setattr(app, "_public_result_copy", copied)
+    owner._lock.acquire()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        try:
+            first = pool.submit(run, first_operation)
+            assert owner_attempted.wait(30)
+            assert attempted[first_operation] == locks
+            assert acquired[first_operation] == locks[:-1]
+            second = pool.submit(run, second_operation)
+            assert second_attempted.wait(30)
+            assert acquired[second_operation] == []
+        finally:
+            owner._lock.release()
+        try:
+            assert in_work.wait(30)
+            assert service._committed is owner._state is state
+            assert (
+                owner._pending is not None
+                if first_operation == "execute"
+                else owner._pending is None
+            )
+            assert not first.done() and not second.done()
+        finally:
+            release_work.set()
+        values = {
+            first_operation: first.result(timeout=60),
+            second_operation: second.result(timeout=60),
+        }
+    assert [item.history_sequence for item in values["read"]] == (
+        [1] if first_operation == "read" else [1, 2]
+    )
+    assert values["execute"].history_sequence == 2
+    assert attempted == acquired == {"read": locks, "execute": locks}
+    assert service._history_owner is owner and service._committed is owner._state
+    assert owner._pending is None and service._committed[1][:-1] == state[1]
+
+
+def test_history_reauthenticates_invisible_source_after_copy(
+    preparation_publisher, monkeypatch
+):
+    publisher, first, second = preparation_publisher
+    source_facts = {
+        item.fingerprint: i._encode_result(item) for item in (first, second)
+    }
+    calls, copied = [], []
+
+    def authenticate(**selectors):
+        fingerprint = selectors["interpretation_fingerprint"]
+        calls.append(fingerprint)
+        if copied and fingerprint == second.fingerprint:
+            raise i._InterpretationOccurrenceUnavailable("nonvisible source lost")
+        value = i._reconstruct_result(source_facts[fingerprint])
+        assert selectors == _interpretation_selectors(value)
+        return value
+
+    monkeypatch.setattr(
+        publisher, "_authenticate_interpretation_occurrence", authenticate
+    )
+    service = Service(publisher, execution_clock=lambda: second.available_at)
+    request = assessment_request(first)
+    visible = service.execute(request)
+    service._clock = lambda: second.available_at + timedelta(days=1)
+    service.execute(assessment_request(second))
+    calls.clear()
+    original = app._public_result_copy
+
+    def public_copy(item):
+        value = original(item)
+        copied.append(item.history_sequence)
+        return value
+
+    monkeypatch.setattr(app, "_public_result_copy", public_copy)
+    history_refusal(service, request, visible.available_at, R.HISTORY_INVALID)
+    assert copied == [1]
+    assert calls == [first.fingerprint, second.fingerprint] * 2
+
+
+def test_history_rejects_alias_between_public_results(publication_case, monkeypatch):
+    service, request, source = publication_case
+    service.execute(request)
+    service.execute(request)
+    original = app._public_result_copy
+    public_values = []
+
+    def public_copy(item):
+        value = original(item)
+        if public_values:
+            object.__setattr__(
+                value.assessment,
+                "assessment_policy_identity",
+                public_values[0].assessment.assessment_policy_identity,
+            )
+        public_values.append(value)
+        return value
+
+    monkeypatch.setattr(app, "_public_result_copy", public_copy)
+    history_refusal(service, request, source.available_at, R.PUBLICATION_FAILED)
+    assert len(public_values) == 2
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "source_interpretation_content_fingerprint",
+        "canonical_instrument_id",
+        "source_trading_identity",
+        "analysis_as_of",
+        "source_quality",
+        "source_warnings",
+        "assessment_policy_identity",
+        "findings",
+        "outcome",
+    ],
+)
+def test_history_independent_retained_content_correspondence(
+    publication_case, monkeypatch, field
+):
+    service, request, source = publication_case
+    service.execute(request)
+    projection = app._decode_result(service._committed[1][0])
+    content = projection["assessment"]
+    replacements = {
+        "source_interpretation_content_fingerprint": FP,
+        "canonical_instrument_id": {
+            **content["canonical_instrument_id"],
+            "instrument_id": "other",
+        },
+        "source_trading_identity": {
+            **content["source_trading_identity"],
+            "symbol": "OTHER",
+        },
+        "analysis_as_of": (
+            source.interpretation.analysis_as_of - timedelta(days=1)
+        ).isoformat(),
+        "source_quality": "degraded"
+        if content["source_quality"] == "complete"
+        else "complete",
+        "source_warnings": [] if content["source_warnings"] else ["stale_evidence"],
+        "assessment_policy_identity": {
+            **content["assessment_policy_identity"],
+            "behavioral_revision": "other",
+        },
+        "findings": []
+        if content["findings"]
+        else [
+            {
+                "kind": "caution",
+                "code": "source_quality_degraded",
+                "comparison_evidence_ids": [],
+            }
+        ],
+        "outcome": "mixed" if content["outcome"] != "mixed" else "aligned",
+    }
+    content[field] = replacements[field]
+    refingerprint(content)
+    refingerprint(projection)
+    changed = (2, (app._canonical_bytes(projection),))
+    monkeypatch.setattr(service, "_committed", changed)
+    monkeypatch.setattr(service._history_owner, "_state", changed)
+    history_refusal(service, request, source.available_at, R.HISTORY_INVALID)
+
+
+@pytest.mark.parametrize("root", ["namespace", "owner_namespace"])
+def test_history_does_not_adopt_equal_namespace_replacement(
+    publication_case, monkeypatch, root
+):
+    service, request, source = publication_case
+    service.execute(request)
+    original = app._public_result_copy
+    namespace = service._namespace
+    replacement = namespace.encode().decode()
+    assert replacement == namespace and replacement is not namespace
+
+    def copied(item):
+        value = original(item)
+        target, name = (
+            (
+                service,
+                "_PolygonCompletedDailyProductionAssessmentApplicationService__namespace",
+            )
+            if root == "namespace"
+            else (service._history_owner, "_namespace_id")
+        )
+        monkeypatch.setattr(target, name, replacement)
+        return value
+
+    monkeypatch.setattr(app, "_public_result_copy", copied)
+    with pytest.raises(Refused) as caught:
+        read_history(service, request, source.available_at)
+    assert caught.value.reason == R.HISTORY_INVALID
+    assert service._committed is service._history_owner._state
+
+
+def test_history_requires_exact_retained_source_availability(
+    publication_case, monkeypatch
+):
+    service, request, source = publication_case
+    service.execute(request)
+    projection = app._decode_result(service._committed[1][0])
+    projection["interpretation_available_at"] = (
+        source.available_at - timedelta(microseconds=1)
+    ).isoformat()
+    refingerprint(projection)
+    fact = app._canonical_bytes(projection)
+    app._reconstruct_result(fact)  # Valid envelope, incorrect source correspondence.
+    state = (2, (fact,))
+    monkeypatch.setattr(service, "_committed", state)
+    monkeypatch.setattr(service._history_owner, "_state", state)
+    history_refusal(service, request, source.available_at, R.SOURCE_MISMATCH)
