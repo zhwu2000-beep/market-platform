@@ -1982,7 +1982,7 @@ def test_private_authentication_exact_selectors(authentication_publisher, select
     assert {
         name for name in selectors if selectors[name] != authentic_selectors[name]
     } == {selector}
-    with pytest.raises(ValueError, match="unavailable"):
+    with pytest.raises(app._InterpretationOccurrenceUnavailable):
         _authenticate_published(service, first, **selectors)
 
 
@@ -2046,7 +2046,7 @@ def test_private_authentication_empty_and_pending(
     if pending:
         service._history_owner._stage_publication(candidate)
     state = service._committed
-    with pytest.raises(ValueError, match="unavailable"):
+    with pytest.raises(app._InterpretationOccurrenceUnavailable):
         _authenticate_published(service, candidate)
     assert service._committed is service._history_owner._state is state
     assert service._history_owner._pending is (candidate if pending else None)
@@ -2083,7 +2083,7 @@ def test_private_authentication_authority_identity(
             "_namespace_id" if change == "namespace" else "_namespace",
             app._PREFIX + "_history:" + "0" * 32,
         )
-    with pytest.raises(ValueError, match="authority"):
+    with pytest.raises(app._InterpretationHistoryInvalid):
         _authenticate_published(service, first)
 
 
@@ -2165,7 +2165,7 @@ def test_private_authentication_complete_inventory(
     # state-identity guard. The requested first occurrence is not the corrupt one.
     monkeypatch.setattr(service, "_committed", state)
     monkeypatch.setattr(service._history_owner, "_state", state)
-    with pytest.raises((TypeError, ValueError)):
+    with pytest.raises(app._InterpretationHistoryInvalid):
         _authenticate_published(service, first)
     assert service._committed is service._history_owner._state is state
 
@@ -2219,7 +2219,12 @@ def test_private_authentication_nonsemantic_source_correspondence(
     state = (3, (one, app._encode_result(result)))
     monkeypatch.setattr(service, "_committed", state)
     monkeypatch.setattr(service._history_owner, "_state", state)
-    with pytest.raises(ValueError, match="lineage|unavailable"):
+    expected = (
+        app._InterpretationHistoryInvalid
+        if field_name == "source_technical_occurrence"
+        else app._InterpretationSourceMismatch
+    )
+    with pytest.raises(expected):
         _authenticate_published(service, first)
 
 
@@ -2256,7 +2261,7 @@ def test_private_authentication_original_support_required(
         freshness=admission._freshness_service,
     )[stage]
     monkeypatch.setattr(owner._history, "_state", (1, ()))
-    with pytest.raises(ValueError):
+    with pytest.raises(app._InterpretationHistoryInvalid):
         _authenticate_published(service, first)
 
 
@@ -2620,3 +2625,81 @@ def test_private_authentication_final_provenance_change_detected(
     with pytest.raises(ValueError):
         _authenticate_published(service, first)
     assert len(calls) == 4
+
+
+def _private_authentication_failure_case(service, first, monkeypatch, change):
+    """Controlled private state changes, retaining the real authentication seam."""
+    selectors = _interpretation_selectors(first)
+    if change == "selector":
+        selectors["interpretation_history_sequence"] = 999
+    elif change == "owner":
+        replacement = app._InterpretationHistory()
+        replacement._namespace_id = service._namespace
+        replacement._state = service._committed
+        monkeypatch.setattr(service, "_history_owner", replacement)
+    elif change == "commitment":
+        monkeypatch.setattr(
+            service._history_owner, "_state", tuple(list(service._committed))
+        )
+    elif change in ("inventory", "lineage"):
+        one, two = service._committed[1]
+        if change == "inventory":
+            two = b"invalid committed inventory"
+        else:
+            retained = app._reconstruct_result(two)
+            quality = retained.interpretation.source_quality
+            object.__setattr__(
+                retained,
+                "interpretation",
+                replace(
+                    retained.interpretation,
+                    source_quality="complete" if quality == "degraded" else "degraded",
+                ),
+            )
+            _refingerprint(retained)
+            two = app._encode_result(retained)
+        state = (3, (one, two))
+        monkeypatch.setattr(service, "_committed", state)
+        monkeypatch.setattr(service._history_owner, "_state", state)
+    else:
+        technical = service._technical_service
+        bridge = technical._bridge_service
+        qualification = bridge._qualification_service
+        stage = {
+            "technical": technical,
+            "bridge": bridge,
+            "qualification": qualification,
+        }[change]
+        monkeypatch.setattr(stage._history, "_state", (1, ()))
+    return selectors
+
+
+@pytest.mark.parametrize(
+    "change,expected",
+    [
+        ("inventory", app._InterpretationHistoryInvalid),
+        ("technical", app._InterpretationHistoryInvalid),
+        ("lineage", app._InterpretationSourceMismatch),
+    ],
+)
+def test_private_authentication_failure_category_precedes_selector_miss(
+    authentication_publisher, monkeypatch, change, expected
+):
+    service, first, _ = authentication_publisher
+    selectors = _private_authentication_failure_case(
+        service, first, monkeypatch, change
+    )
+    selectors["interpretation_history_sequence"] = 999
+    with pytest.raises(expected):
+        _authenticate_published(service, first, **selectors)
+
+
+def test_private_authentication_failure_types_remain_private_value_errors():
+    for category in (
+        app._InterpretationOccurrenceUnavailable,
+        app._InterpretationHistoryInvalid,
+        app._InterpretationSourceMismatch,
+    ):
+        assert category.__bases__ == (ValueError,)
+        assert category.__name__.startswith("_")
+        assert category.__name__ not in app.__all__

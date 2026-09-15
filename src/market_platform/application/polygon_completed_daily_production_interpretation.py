@@ -45,6 +45,18 @@ _EXECUTOR = (
 _PREFIX = "polygon_completed_daily_interpretation"
 
 
+class _InterpretationOccurrenceUnavailable(ValueError):
+    """Valid authentic inventory contains no exact selected occurrence."""
+
+
+class _InterpretationHistoryInvalid(ValueError):
+    """Publisher authority, inventory or original historical support is invalid."""
+
+
+class _InterpretationSourceMismatch(ValueError):
+    """Authenticated retained source correspondence differs."""
+
+
 class PolygonCompletedDailyInterpretationRefusalReason:
     TECHNICAL_UNAVAILABLE = "technical_occurrence_unavailable"
     HISTORY_INVALID = "history_incomplete_or_corrupt"
@@ -532,7 +544,9 @@ class PolygonCompletedDailyProductionInterpretationApplicationService:
             or content.source_warnings
             != tuple(warning.value for warning in source.snapshot.warnings)
         ):
-            raise ValueError("retained Interpretation source lineage mismatch")
+            raise _InterpretationSourceMismatch(
+                "retained Interpretation source lineage mismatch"
+            )
         return source, instrument, projection
 
     def _authenticate_interpretation_occurrence(
@@ -557,69 +571,98 @@ class PolygonCompletedDailyProductionInterpretationApplicationService:
         t._sequence(interpretation_history_sequence)
         t._identity(interpretation_execution_id, _PREFIX)
         domain._fingerprint(interpretation_fingerprint)
-        owner = self._history_owner
-        namespace = self._namespace
-        state = self._committed
-        observed, retention = self._observed, self._retention
+        try:
+            owner = self._history_owner
+            namespace = self._namespace
+            state = self._committed
+            observed, retention = self._observed, self._retention
 
-        def check_authority() -> None:
+            def check_authority() -> None:
+                if (
+                    type(owner) is not _InterpretationHistory
+                    or self._history_owner is not owner
+                    or self._history is not owner
+                    or type(self._namespace) is not str
+                    or self._namespace != namespace
+                    or type(owner._namespace_id) is not str
+                    or owner._namespace_id != namespace
+                    or self._committed is not state
+                    or owner._state is not state
+                    or self._observed is not observed
+                    or self._retention is not retention
+                ):
+                    raise ValueError("Interpretation authority changed or incomplete")
+
+            check_authority()
+            owner._validate()
+            upstream_before = self._authentication_retention()
+            items = tuple(_reconstruct_result(fact) for fact in state[1])
+            support_before = tuple(
+                self._authenticate_interpretation_support(item) for item in items
+            )
+            matches = tuple(
+                index
+                for index, item in enumerate(items)
+                if (
+                    item.source_technical_occurrence.artifact_reference.to_dict()
+                    == reference
+                )
+                and item.history_namespace_id == interpretation_history_namespace_id
+                and item.history_sequence == interpretation_history_sequence
+                and item.execution_id == interpretation_execution_id
+                and item.fingerprint == interpretation_fingerprint
+            )
+            if len(matches) != 1:
+                check_authority()
+                owner._validate()
+                if self._authentication_retention() != upstream_before:
+                    raise _InterpretationHistoryInvalid(
+                        "upstream inventory changed during authentication"
+                    )
+                check_authority()
+                raise _InterpretationOccurrenceUnavailable(
+                    "exact committed Interpretation occurrence unavailable"
+                )
+            fact = state[1][matches[0]]
+            public = _reconstruct_result(fact)
+            _check_copy(public, items[matches[0]], _decode_result(fact))
+            # Revalidate the entire inventory and its original support after the
+            # return reconstruction. No observation may adopt changed source facts.
+            check_authority()
+            owner._validate()
+            for original, retained_fact in zip(support_before, state[1], strict=True):
+                source, _, before = original
+                resolved, _, after = self._authenticate_interpretation_support(
+                    _reconstruct_result(retained_fact)
+                )
+                if resolved is not source:
+                    raise _InterpretationHistoryInvalid(
+                        "original Interpretation support changed"
+                    )
+                if after != before:
+                    raise _InterpretationSourceMismatch(
+                        "original Interpretation support changed"
+                    )
+            _check_copy(public, items[matches[0]], _decode_result(fact))
             if (
-                type(owner) is not _InterpretationHistory
-                or self._history_owner is not owner
-                or self._history is not owner
-                or type(self._namespace) is not str
-                or self._namespace != namespace
-                or type(owner._namespace_id) is not str
-                or owner._namespace_id != namespace
-                or self._committed is not state
-                or owner._state is not state
-                or self._observed is not observed
-                or self._retention is not retention
+                _encode_result(public) != fact
+                or artifact_reference.to_dict() != reference
             ):
-                raise ValueError("Interpretation authority changed or incomplete")
-
-        check_authority()
-        owner._validate()
-        upstream_before = self._authentication_retention()
-        items = tuple(_reconstruct_result(fact) for fact in state[1])
-        support_before = tuple(
-            self._authenticate_interpretation_support(item) for item in items
-        )
-        matches = tuple(
-            index
-            for index, item in enumerate(items)
-            if (
-                item.source_technical_occurrence.artifact_reference.to_dict()
-                == reference
-            )
-            and item.history_namespace_id == interpretation_history_namespace_id
-            and item.history_sequence == interpretation_history_sequence
-            and item.execution_id == interpretation_execution_id
-            and item.fingerprint == interpretation_fingerprint
-        )
-        if len(matches) != 1:
-            raise ValueError("exact committed Interpretation occurrence unavailable")
-        fact = state[1][matches[0]]
-        public = _reconstruct_result(fact)
-        _check_copy(public, items[matches[0]], _decode_result(fact))
-        # Revalidate the entire inventory and its original support after the
-        # return reconstruction. No observation may adopt changed source facts.
-        check_authority()
-        owner._validate()
-        for original, retained_fact in zip(support_before, state[1], strict=True):
-            source, _, before = original
-            resolved, _, after = self._authenticate_interpretation_support(
-                _reconstruct_result(retained_fact)
-            )
-            if resolved is not source or after != before:
-                raise ValueError("original Interpretation support changed")
-        _check_copy(public, items[matches[0]], _decode_result(fact))
-        if _encode_result(public) != fact or artifact_reference.to_dict() != reference:
-            raise ValueError("selected Interpretation correspondence changed")
-        if self._authentication_retention() != upstream_before:
-            raise ValueError("upstream inventory changed during authentication")
-        check_authority()
-        return public
+                raise _InterpretationSourceMismatch(
+                    "selected Interpretation correspondence changed"
+                )
+            if self._authentication_retention() != upstream_before:
+                raise ValueError("upstream inventory changed during authentication")
+            check_authority()
+            return public
+        except (
+            _InterpretationOccurrenceUnavailable,
+            _InterpretationHistoryInvalid,
+            _InterpretationSourceMismatch,
+        ):
+            raise
+        except Exception as error:
+            raise _InterpretationHistoryInvalid(str(error)) from error
 
     def _authenticate(
         self, item: t.PolygonCompletedDailyTechnicalResult

@@ -1,4 +1,4 @@
-"""Governed Assessment result and authority foundation; no execution workflow."""
+"""Governed Assessment foundation and private preparation; no publication workflow."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import json
 import math
 from contextlib import ExitStack
 from copy import deepcopy
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass, replace
 from datetime import datetime
 from threading import Lock
 from typing import Any
@@ -315,6 +315,17 @@ class _AssessmentHistory:
             previous = item.available_at
 
 
+@dataclass(frozen=True, slots=True)
+class _PreparedAssessment:
+    """Detached prospective facts, without Assessment occurrence authority."""
+
+    request: domain.PolygonCompletedDailyAssessmentRequest
+    source_projection: dict[str, object]
+    assessment: GovernedDailyTechnicalAssessment
+    interpretation_available_at: datetime
+    started: datetime
+
+
 class PolygonCompletedDailyProductionAssessmentApplicationService:
     def __init__(
         self,
@@ -326,10 +337,17 @@ class PolygonCompletedDailyProductionAssessmentApplicationService:
             i.PolygonCompletedDailyProductionInterpretationApplicationService
         ):
             raise TypeError("exact trusted Interpretation service required")
-        self._interpretation_service = interpretation_service
+        self.__interpretation_service = interpretation_service
         self.__history_owner = _AssessmentHistory()
         self.__namespace = self._history_owner._namespace_id
         self._committed = self._history_owner._state
+
+    @property
+    def _interpretation_service(
+        self,
+    ) -> i.PolygonCompletedDailyProductionInterpretationApplicationService:
+        """Read-only access to the constructor-pinned Interpretation publisher."""
+        return self.__interpretation_service
 
     @property
     def _history_owner(self) -> _AssessmentHistory:
@@ -340,9 +358,13 @@ class PolygonCompletedDailyProductionAssessmentApplicationService:
     def _namespace(self) -> str:
         return self.__namespace
 
-    def _lock_inputs(self, stack: ExitStack) -> None:
-        self._interpretation_service._lock_inputs(stack)
+    def _lock_inputs(
+        self, stack: ExitStack
+    ) -> i.PolygonCompletedDailyProductionInterpretationApplicationService:
+        publisher = self.__interpretation_service
+        publisher._lock_inputs(stack)
         stack.enter_context(self._history_owner._lock)
+        return publisher
 
     def _check_history(self) -> None:
         """Check structural authority under held locks, without adopting state."""
@@ -355,6 +377,149 @@ class PolygonCompletedDailyProductionAssessmentApplicationService:
         ):
             raise ValueError("Assessment publication commitment replaced or incomplete")
         owner._validate()
+
+    def _prepare_assessment(
+        self,
+        request: domain.PolygonCompletedDailyAssessmentRequest,
+        started: datetime,
+    ) -> _PreparedAssessment:
+        """Resolve and assess one publication under the complete input lock chain."""
+        if type(request) is not domain.PolygonCompletedDailyAssessmentRequest:
+            raise TypeError("only exact Assessment selector requests are accepted")
+        request = replace(request)
+        reasons = PolygonCompletedDailyAssessmentRefusalReason
+        reason = reasons.TEMPORAL_FAILURE
+        try:
+            a._require_canonical_timestamp(started, "Assessment start")
+            owner, namespace, state = (
+                self._history_owner,
+                self._namespace,
+                self._committed,
+            )
+
+            def check_authority() -> None:
+                if (
+                    self.__interpretation_service is not publisher
+                    or self._history_owner is not owner
+                    or type(self._namespace) is not str
+                    or self._namespace != namespace
+                    or type(owner._namespace_id) is not str
+                    or owner._namespace_id != namespace
+                    or self._committed is not state
+                    or owner._state is not state
+                    or owner._pending is not None
+                ):
+                    raise PolygonCompletedDailyAssessmentRefused(
+                        reasons.HISTORY_INVALID,
+                        "Assessment authority changed or preparation is pending",
+                    )
+
+            def authenticate() -> i.PolygonCompletedDailyInterpretationResult:
+                check_authority()
+                try:
+                    source = publisher._authenticate_interpretation_occurrence(
+                        artifact_reference=request.artifact_reference,
+                        interpretation_history_namespace_id=(
+                            request.interpretation_history_namespace_id
+                        ),
+                        interpretation_history_sequence=(
+                            request.interpretation_history_sequence
+                        ),
+                        interpretation_execution_id=request.interpretation_execution_id,
+                        interpretation_fingerprint=request.interpretation_fingerprint,
+                    )
+                except i._InterpretationOccurrenceUnavailable as error:
+                    raise PolygonCompletedDailyAssessmentRefused(
+                        reasons.INTERPRETATION_UNAVAILABLE, str(error)
+                    ) from error
+                except i._InterpretationHistoryInvalid as error:
+                    raise PolygonCompletedDailyAssessmentRefused(
+                        reasons.HISTORY_INVALID, str(error)
+                    ) from error
+                except i._InterpretationSourceMismatch as error:
+                    raise PolygonCompletedDailyAssessmentRefused(
+                        reasons.SOURCE_MISMATCH, str(error)
+                    ) from error
+                check_authority()
+                return source
+
+            reason = reasons.HISTORY_INVALID
+            with ExitStack() as stack:
+                publisher = self._lock_inputs(stack)
+                check_authority()
+                self._check_history()
+                check_authority()
+                reason = reasons.SOURCE_MISMATCH
+                request_before = deepcopy(request.to_dict())
+                reason = reasons.HISTORY_INVALID
+                source = authenticate()
+                reason = reasons.SOURCE_MISMATCH
+                if type(source) is not i.PolygonCompletedDailyInterpretationResult:
+                    raise ValueError(
+                        "exact authenticated Interpretation result required"
+                    )
+                source_before = deepcopy(source.to_dict())
+                interpretation_before = deepcopy(source.interpretation.to_dict())
+                if request_before != {
+                    "artifact_reference": (
+                        source.source_technical_occurrence.artifact_reference.to_dict()
+                    ),
+                    "interpretation_history_namespace_id": source.history_namespace_id,
+                    "interpretation_history_sequence": source.history_sequence,
+                    "interpretation_execution_id": source.execution_id,
+                    "interpretation_fingerprint": source.fingerprint,
+                }:
+                    raise ValueError("authenticated Interpretation selectors differ")
+                if source.available_at > started:
+                    raise PolygonCompletedDailyAssessmentRefused(
+                        reasons.INTERPRETATION_UNAVAILABLE,
+                        "exact Interpretation occurrence unavailable by start",
+                    )
+                reason = reasons.SEMANTIC_FAILED
+                content = domain.assess_governed_daily_technical_interpretation(
+                    interpretation=source.interpretation,
+                    source_interpretation_occurrence=request,
+                )
+                if type(content) is not GovernedDailyTechnicalAssessment:
+                    raise TypeError("exact governed Assessment content required")
+                content_before = deepcopy(content.to_dict())
+                domain.validate_governed_daily_technical_assessment(
+                    content=content,
+                    interpretation=source.interpretation,
+                    source_interpretation_occurrence=request,
+                )
+                prepared = _PreparedAssessment(
+                    request, source_before, content, source.available_at, started
+                )
+                reason = reasons.SOURCE_MISMATCH
+                if request.to_dict() != request_before:
+                    raise ValueError("Assessment request changed during preparation")
+                reason = reasons.HISTORY_INVALID
+                self._check_history()
+                check_authority()
+                reason = reasons.SOURCE_MISMATCH
+                # Fresh reconstructions require complete fact correspondence.
+                reauthenticated = authenticate()
+                if (
+                    type(reauthenticated)
+                    is not i.PolygonCompletedDailyInterpretationResult
+                    or reauthenticated.to_dict() != source_before
+                    or source.to_dict() != source_before
+                    or source.interpretation.to_dict() != interpretation_before
+                    or request.to_dict() != request_before
+                ):
+                    raise ValueError(
+                        "authenticated Interpretation changed during preparation"
+                    )
+                reason = reasons.SEMANTIC_FAILED
+                if content.to_dict() != content_before:
+                    raise ValueError("prepared Assessment content changed")
+                check_authority()
+                return prepared
+        except PolygonCompletedDailyAssessmentRefused:
+            raise
+        except Exception as error:
+            raise PolygonCompletedDailyAssessmentRefused(reason, str(error)) from error
 
 
 __all__ = [
