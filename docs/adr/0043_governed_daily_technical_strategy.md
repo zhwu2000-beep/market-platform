@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted
 
 This is the architecture draft for v0.82.0. It authorizes no implementation,
 branch creation, staging, commit, push or release. v0.81.0 and every earlier
