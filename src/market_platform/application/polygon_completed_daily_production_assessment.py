@@ -33,6 +33,9 @@ from market_platform.research.governed_daily_technical_interpretation import (
     _choice,
     _fingerprint,
 )
+from market_platform.research.governed_daily_technical_strategy import (
+    PolygonCompletedDailyStrategyRequest as _StrategyRequest,
+)
 from market_platform.trading.instrument import TradingInstrumentIdentity
 
 _SCHEMA = "polygon_completed_daily_assessment_result/v1"
@@ -42,6 +45,18 @@ _EXECUTOR = (
     "market_platform.application/polygon_completed_daily_production_assessment/v1"
 )
 _PREFIX = "polygon_completed_daily_assessment"
+
+
+class _AssessmentOccurrenceUnavailable(ValueError):
+    """Valid complete history contains no exact requested occurrence."""
+
+
+class _AssessmentHistoryInvalid(ValueError):
+    """Pinned authority, committed inventory or required support is invalid."""
+
+
+class _AssessmentSourceMismatch(ValueError):
+    """Authenticated retained source correspondence differs."""
 
 
 class PolygonCompletedDailyAssessmentRefusalReason:
@@ -333,6 +348,64 @@ class _PreparedAssessment:
     started: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class _AssessmentPair:
+    """Detached values and immutable facts, never publication authority."""
+
+    assessment: PolygonCompletedDailyAssessmentResult
+    interpretation: i.PolygonCompletedDailyInterpretationResult
+    assessment_fact: bytes
+    interpretation_fact: bytes
+
+
+def _check_assessment_pair(
+    item: PolygonCompletedDailyAssessmentResult,
+    source: i.PolygonCompletedDailyInterpretationResult,
+) -> None:
+    # These codecs validate retained structure, policies and comparison relational
+    # self-consistency. They do not derive findings, outcomes or Interpretation states.
+    item.to_dict()
+    source.to_dict()
+    content = item.assessment
+    interpretation = source.interpretation
+    request = content.source_interpretation_occurrence
+    if (
+        request.to_dict()
+        != {
+            "artifact_reference": (
+                source.source_technical_occurrence.artifact_reference.to_dict()
+            ),
+            "interpretation_history_namespace_id": source.history_namespace_id,
+            "interpretation_history_sequence": source.history_sequence,
+            "interpretation_execution_id": source.execution_id,
+            "interpretation_fingerprint": source.fingerprint,
+        }
+        or content.source_interpretation_content_fingerprint
+        != interpretation.fingerprint
+        or content.canonical_instrument_id.to_dict()
+        != interpretation.canonical_instrument_id.to_dict()
+        or content.source_trading_identity.to_dict()
+        != interpretation.source_trading_identity.to_dict()
+        or content.analysis_as_of != interpretation.analysis_as_of
+        or content.source_quality != interpretation.source_quality
+        or content.source_warnings != interpretation.source_warnings
+        or item.interpretation_available_at != source.available_at
+        or source.available_at > item.execution_started_at
+    ):
+        raise _AssessmentSourceMismatch(
+            "retained Assessment source correspondence differs"
+        )
+    comparison_ids = {value.evidence_id for value in interpretation.comparison_evidence}
+    if any(
+        reference not in comparison_ids
+        for finding in content.findings
+        for reference in finding.comparison_evidence_ids
+    ):
+        raise _AssessmentSourceMismatch(
+            "retained finding comparison reference unavailable"
+        )
+
+
 class PolygonCompletedDailyProductionAssessmentApplicationService:
     def __init__(
         self,
@@ -352,6 +425,14 @@ class PolygonCompletedDailyProductionAssessmentApplicationService:
         self.__history_owner = _AssessmentHistory()
         self.__namespace = self._history_owner._namespace_id
         self._committed = self._history_owner._state
+        self.__consumption_roots = (
+            self.__history_owner,
+            self.__namespace,
+            interpretation_service,
+            vars(interpretation_service).get("_history_owner"),
+            vars(interpretation_service).get("_namespace"),
+        )
+        self.__consumption_locks: tuple[object, ...] | None = None
 
     @property
     def _interpretation_service(
@@ -374,9 +455,263 @@ class PolygonCompletedDailyProductionAssessmentApplicationService:
     ) -> i.PolygonCompletedDailyProductionInterpretationApplicationService:
         publisher = self.__interpretation_service
         owner = self.__history_owner
+        consumption_locks = (
+            publisher,
+            owner,
+            vars(publisher).get("_history_owner"),
+        )
         publisher._lock_inputs(stack)
         stack.enter_context(owner._lock)
+        self.__consumption_locks = consumption_locks
         return publisher
+
+    def _check_consumption_roots(
+        self,
+        state: tuple[int, tuple[bytes, ...]],
+        interpretation_state: tuple[int, tuple[bytes, ...]],
+    ) -> None:
+        owner, namespace, publisher, source_owner, source_namespace = (
+            self.__consumption_roots
+        )
+        locks = self.__consumption_locks
+        if (
+            self.__history_owner is not owner
+            or self.__namespace is not namespace
+            or owner._namespace_id is not namespace
+            or self.__interpretation_service is not publisher
+            or self._committed is not state
+            or owner._state is not state
+            or owner._pending is not None
+            or type(source_owner) is not i._InterpretationHistory
+            or not owner._lock.locked()
+            or not source_owner._lock.locked()
+            or publisher._history_owner is not source_owner
+            or publisher._history is not source_owner
+            or publisher._namespace is not source_namespace
+            or source_owner._namespace_id is not source_namespace
+            or publisher._committed is not interpretation_state
+            or source_owner._state is not interpretation_state
+            or source_owner._pending is not None
+            or locks is None
+            or locks[0] is not publisher
+            or locks[1] is not owner
+            or locks[2] is not source_owner
+        ):
+            raise _AssessmentHistoryInvalid(
+                "original Assessment consumption roots changed"
+            )
+
+    def _authenticate_consumption_source(
+        self,
+        request: domain.PolygonCompletedDailyAssessmentRequest,
+    ) -> i.PolygonCompletedDailyInterpretationResult:
+        publisher = self.__consumption_roots[2]
+        try:
+            return publisher._authenticate_interpretation_occurrence(
+                artifact_reference=request.artifact_reference,
+                interpretation_history_namespace_id=request.interpretation_history_namespace_id,
+                interpretation_history_sequence=request.interpretation_history_sequence,
+                interpretation_execution_id=request.interpretation_execution_id,
+                interpretation_fingerprint=request.interpretation_fingerprint,
+            )
+        except (
+            i._InterpretationOccurrenceUnavailable,
+            i._InterpretationHistoryInvalid,
+        ) as error:
+            raise _AssessmentHistoryInvalid(str(error)) from error
+        except i._InterpretationSourceMismatch as error:
+            raise _AssessmentSourceMismatch(str(error)) from error
+
+    def _consume_assessments(
+        self,
+        request: _StrategyRequest | None,
+        expected: tuple[_AssessmentPair, ...] | None,
+    ) -> tuple[_AssessmentPair, ...]:
+        """One resolution/recheck contract under the already held ten-lock chain.
+
+        All local preparation precedes final authentication of EVERY bound pair
+        in inventory order. Each released Interpretation call also authenticates
+        its complete inventory/support, including sources checked earlier in
+        this operation. State identities bind the inventory throughout.
+        """
+        try:
+            owner, namespace, publisher, source_owner, source_namespace = (
+                self.__consumption_roots
+            )
+            roots = self.__consumption_roots
+            locks = self.__consumption_locks
+            state, source_state = self._committed, publisher._committed
+            self._check_consumption_roots(state, source_state)
+            request_before = request.to_dict() if request is not None else None
+            # Authenticate every committed Assessment before resolving any source.
+            owner._validate()
+            items = tuple(_reconstruct_result(fact) for fact in state[1])
+            self._check_consumption_roots(state, source_state)
+            pairs = []
+            for item, fact in zip(items, state[1], strict=True):
+                source = self._authenticate_consumption_source(
+                    item.assessment.source_interpretation_occurrence
+                )
+                self._check_consumption_roots(state, source_state)
+                source_fact = i._encode_result(source)
+                # Membership comes from the publisher, not the returned object.
+                if source_fact not in source_state[1]:
+                    raise _AssessmentSourceMismatch(
+                        "authenticated source fact differs from commitment"
+                    )
+                pairs.append(_AssessmentPair(item, source, fact, source_fact))
+            prepared = tuple(pairs)
+            for pair in prepared:
+                _check_assessment_pair(pair.assessment, pair.interpretation)
+            if expected is not None:
+                if type(expected) is not tuple or len(expected) != len(prepared):
+                    raise _AssessmentHistoryInvalid(
+                        "expected complete Assessment inventory differs"
+                    )
+                for before, current in zip(expected, prepared, strict=True):
+                    if (
+                        type(before) is not _AssessmentPair
+                        or type(before.assessment_fact) is not bytes
+                        or type(before.interpretation_fact) is not bytes
+                        or before.assessment_fact != current.assessment_fact
+                        or before.interpretation_fact != current.interpretation_fact
+                        or _encode_result(before.assessment) != before.assessment_fact
+                        or i._encode_result(before.interpretation)
+                        != before.interpretation_fact
+                    ):
+                        raise _AssessmentSourceMismatch(
+                            "expected Assessment pair or facts changed"
+                        )
+            # Selection follows COMPLETE inventory and pair authentication.
+            selected = prepared
+            if request is not None:
+                selected = tuple(
+                    pair
+                    for pair in prepared
+                    if (
+                        pair.assessment.assessment.source_interpretation_occurrence.artifact_reference.to_dict()
+                    )
+                    == request.artifact_reference.to_dict()
+                    and pair.assessment.history_namespace_id
+                    == request.assessment_history_namespace_id
+                    and pair.assessment.history_sequence
+                    == request.assessment_history_sequence
+                    and pair.assessment.execution_id == request.assessment_execution_id
+                    and pair.assessment.fingerprint == request.assessment_fingerprint
+                )
+            graphs: set[int] = set()
+            for pair in prepared:
+                if (
+                    _encode_result(pair.assessment) != pair.assessment_fact
+                    or i._encode_result(pair.interpretation) != pair.interpretation_fact
+                ):
+                    raise _AssessmentSourceMismatch("prepared pair changed")
+                for value in (pair.assessment, pair.interpretation):
+                    graph = _graph_ids(value)
+                    if graphs & graph:
+                        raise _AssessmentHistoryInvalid(
+                            "consumption result graphs alias"
+                        )
+                    graphs.update(graph)
+            if request is not None and request.to_dict() != request_before:
+                raise _AssessmentSourceMismatch("Assessment selectors changed")
+            owner._validate()
+            self._check_consumption_roots(state, source_state)
+            # Prepare every request and exact scalar expectation before sealing.
+            seal_expectations = tuple(
+                (
+                    deepcopy(
+                        pair.assessment.assessment.source_interpretation_occurrence
+                    ),
+                    pair.interpretation.history_namespace_id,
+                    pair.interpretation.history_sequence,
+                    pair.interpretation.execution_id,
+                    pair.interpretation.fingerprint,
+                )
+                for pair in prepared
+            )
+            missing = request is not None and len(selected) != 1
+            self._check_consumption_roots(state, source_state)
+            for (
+                seal_request,
+                seal_namespace,
+                seal_sequence,
+                seal_execution,
+                seal_fingerprint,
+            ) in seal_expectations:
+                sealed = self._authenticate_consumption_source(seal_request)
+                if (
+                    type(sealed) is not i.PolygonCompletedDailyInterpretationResult
+                    or type(sealed.history_namespace_id) is not str
+                    or type(sealed.history_sequence) is not int
+                    or type(sealed.execution_id) is not str
+                    or type(sealed.fingerprint) is not str
+                    or sealed.history_namespace_id != seal_namespace
+                    or sealed.history_sequence != seal_sequence
+                    or sealed.execution_id != seal_execution
+                    or sealed.fingerprint != seal_fingerprint
+                ):
+                    raise _AssessmentSourceMismatch(
+                        "sealed Interpretation occurrence changed"
+                    )
+            # Direct identity checks only after the complete upstream support seal.
+            if (
+                self.__consumption_roots is not roots
+                or self.__consumption_locks is not locks
+                or self.__history_owner is not owner
+                or self.__namespace is not namespace
+                or owner._namespace_id is not namespace
+                or self.__interpretation_service is not publisher
+                or self._committed is not state
+                or owner._state is not state
+                or owner._pending is not None
+                or publisher._history_owner is not source_owner
+                or publisher._history is not source_owner
+                or publisher._namespace is not source_namespace
+                or source_owner._namespace_id is not source_namespace
+                or publisher._committed is not source_state
+                or source_owner._state is not source_state
+                or source_owner._pending is not None
+            ):
+                raise _AssessmentHistoryInvalid(
+                    "consumption authority changed during support seal"
+                )
+            if missing:
+                raise _AssessmentOccurrenceUnavailable(
+                    "exact committed Assessment occurrence unavailable"
+                )
+            return selected
+        except (
+            _AssessmentOccurrenceUnavailable,
+            _AssessmentHistoryInvalid,
+            _AssessmentSourceMismatch,
+        ):
+            raise
+        except Exception as error:
+            raise _AssessmentHistoryInvalid(str(error)) from error
+
+    def _authenticate_assessment_occurrence(
+        self,
+        request: _StrategyRequest,
+    ) -> _AssessmentPair:
+        """Resolve only Assessment selectors; the bound Interpretation is internal."""
+        if type(request) is not _StrategyRequest:
+            raise TypeError("exact Strategy selector request required")
+        detached = deepcopy(request)
+        detached.to_dict()
+        return self._consume_assessments(detached, None)[0]
+
+    def _authenticate_assessment_inventory(self) -> tuple[_AssessmentPair, ...]:
+        """Capture all detached pairs for a subsequent complete revalidation."""
+        return self._consume_assessments(None, None)
+
+    def _revalidate_assessment_inventory(
+        self, expected: tuple[_AssessmentPair, ...]
+    ) -> None:
+        """Reauthenticate every fact/support; expected values grant no authority."""
+        if type(expected) is not tuple:
+            raise TypeError("exact complete Assessment pair tuple required")
+        self._consume_assessments(None, expected)
 
     def _check_history(self) -> None:
         """Check structural authority under held locks, without adopting state."""
