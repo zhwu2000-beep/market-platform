@@ -1,4 +1,4 @@
-"""Governed Strategy result and private application authority foundation."""
+"""Governed Strategy execution and atomic canonical publication."""
 
 from __future__ import annotations
 
@@ -25,6 +25,9 @@ from market_platform.application import (
     polygon_completed_daily_production_technical as t,
 )
 from market_platform.instruments.identity import CanonicalInstrumentId
+from market_platform.research import (
+    governed_daily_technical_assessment as assessment_domain,
+)
 from market_platform.research import governed_daily_technical_strategy as domain
 from market_platform.research.governed_daily_technical_interpretation import (
     GovernedTechnicalArtifactReference,
@@ -268,6 +271,12 @@ class _StrategyHistory:
         )
         self._pending: PolygonCompletedDailyStrategyResult | None = None
 
+    def _stage_publication(self, result: PolygonCompletedDailyStrategyResult) -> None:
+        if type(result) is not PolygonCompletedDailyStrategyResult:
+            raise TypeError("exact Strategy result required")
+        result.to_dict()
+        self._pending = result
+
     def _validate(self) -> None:
         if type(self._state) is not tuple or len(self._state) != 2:
             raise ValueError("exact history state tuple required")
@@ -417,6 +426,385 @@ class PolygonCompletedDailyProductionStrategyApplicationService:
         root.publisher._lock_inputs(stack)
         stack.enter_context(root.lock)
         self._check_locked_roots()
+
+    def _check_transaction(
+        self,
+        root: _StrategyRoot,
+        state: tuple[int, tuple[bytes, ...]],
+        pending: PolygonCompletedDailyStrategyResult | None,
+    ) -> None:
+        try:
+            self._check_roots()
+        except Exception as error:
+            raise PolygonCompletedDailyStrategyRefused(
+                PolygonCompletedDailyStrategyRefusalReason.HISTORY_INVALID, str(error)
+            ) from error
+        if (
+            self.__root is not root
+            or self._committed is not state
+            or root.owner._state is not state
+            or root.owner._pending is not pending
+        ):
+            raise PolygonCompletedDailyStrategyRefused(
+                PolygonCompletedDailyStrategyRefusalReason.HISTORY_INVALID,
+                "Strategy transaction authority changed",
+            )
+
+    def _authenticate_history_locked(
+        self, root: _StrategyRoot, state: tuple[int, tuple[bytes, ...]]
+    ) -> tuple[PolygonCompletedDailyStrategyResult, ...]:
+        root.owner._validate()
+        prior = tuple(_reconstruct_result(fact) for fact in state[1])
+        for item, fact in zip(prior, state[1], strict=True):
+            request = item.strategy.source_assessment_occurrence
+            try:
+                pair = root.publisher._authenticate_assessment_occurrence(request)
+            except assessment._AssessmentOccurrenceUnavailable as error:
+                raise assessment._AssessmentHistoryInvalid(
+                    "committed Strategy source unavailable"
+                ) from error
+            _check_pair(request.to_dict(), pair)
+            _check_strategy_source(item, pair)
+            _validate_committed_assessment(pair)
+            domain.validate_governed_daily_technical_strategy(
+                content=item.strategy,
+                assessment=pair.assessment.assessment,
+                interpretation=pair.interpretation.interpretation,
+                source_assessment_occurrence=request,
+            )
+            if _encode_result(item) != fact:
+                raise ValueError("committed Strategy changed during authentication")
+            _check_pair(request.to_dict(), pair)
+        return prior
+
+    def execute(
+        self, request: domain.PolygonCompletedDailyStrategyRequest
+    ) -> PolygonCompletedDailyStrategyResult:
+        if type(request) is not domain.PolygonCompletedDailyStrategyRequest:
+            raise TypeError("only exact Strategy selector requests are accepted")
+        if type(request.artifact_reference) is not GovernedTechnicalArtifactReference:
+            raise TypeError("exact governed artifact reference required")
+        reasons = PolygonCompletedDailyStrategyRefusalReason
+        try:
+            request = deepcopy(request)
+        except Exception as error:
+            raise PolygonCompletedDailyStrategyRefused(
+                reasons.PUBLICATION_FAILED, str(error)
+            ) from error
+        # Malformed detached values remain boundary TypeError/ValueError failures.
+        projection = request.to_dict()
+        try:
+            request_before = deepcopy(projection)
+        except Exception as error:
+            raise PolygonCompletedDailyStrategyRefused(
+                reasons.PUBLICATION_FAILED, str(error)
+            ) from error
+        reason = reasons.TEMPORAL_FAILURE
+        try:
+            started = a._timestamp(self._clock())
+            root = self.__root
+            owner, publisher = root.owner, root.publisher
+            reason = reasons.HISTORY_INVALID
+            with ExitStack() as stack:
+                self._lock_inputs(stack)
+                # A predecessor may commit while this execution waits for the chain.
+                state = self._committed
+                staged = None
+                staging = False
+                try:
+                    self._check_transaction(root, state, None)
+                    prior = self._authenticate_history_locked(root, state)
+                    self._check_transaction(root, state, None)
+                    inventory = publisher._authenticate_assessment_inventory()
+                    inventory_facts = tuple(
+                        (pair.assessment_fact, pair.interpretation_fact)
+                        for pair in inventory
+                    )
+                    self._check_transaction(root, state, None)
+                    pair = publisher._authenticate_assessment_occurrence(request)
+                    _check_pair(request_before, pair)
+                    if (pair.assessment_fact, pair.interpretation_fact) not in (
+                        inventory_facts
+                    ):
+                        raise assessment._AssessmentSourceMismatch(
+                            "selected pair differs from complete captured inventory"
+                        )
+                    source_available = pair.assessment.available_at
+                    if source_available > started:
+                        raise assessment._AssessmentOccurrenceUnavailable(
+                            "Assessment unavailable at Strategy start"
+                        )
+                    self._check_transaction(root, state, None)
+                    _validate_committed_assessment(pair)
+                    reason = reasons.SEMANTIC_FAILED
+                    content = domain.derive_governed_daily_technical_strategy(
+                        assessment=pair.assessment.assessment,
+                        interpretation=pair.interpretation.interpretation,
+                        source_assessment_occurrence=request,
+                    )
+                    domain.validate_governed_daily_technical_strategy(
+                        content=content,
+                        assessment=pair.assessment.assessment,
+                        interpretation=pair.interpretation.interpretation,
+                        source_assessment_occurrence=request,
+                    )
+                    content_before = content.to_dict()
+                    reason = reasons.TEMPORAL_FAILURE
+                    completed = a._timestamp(self._clock())
+                    if completed < started:
+                        raise ValueError("Strategy completion clock moved backward")
+                    reason = reasons.PUBLICATION_FAILED
+                    sequence, entries = state
+                    previous = prior[-1].available_at if prior else None
+                    execution_ids = {item.execution_id for item in prior}
+                    execution_id = f"{_PREFIX}:{uuid4().hex}"
+                    if execution_id in execution_ids:
+                        raise ValueError("duplicate Strategy execution ID")
+                    staged = object.__new__(PolygonCompletedDailyStrategyResult)
+                    values = {
+                        "strategy": deepcopy(content),
+                        "assessment_available_at": source_available,
+                        "execution_id": execution_id,
+                        "history_namespace_id": root.namespace,
+                        "history_sequence": sequence,
+                        "execution_started_at": started,
+                        "execution_completed_at": completed,
+                        "available_at": completed,
+                    }
+                    for name, value in values.items():
+                        object.__setattr__(staged, name, value)
+                    object.__setattr__(
+                        staged, "fingerprint", canonical_fingerprint(staged._payload())
+                    )
+                    staged_before = staged.to_dict()
+                    if staged.strategy.to_dict() != content_before:
+                        raise ValueError("staging changed Strategy content")
+                    self._check_transaction(root, state, None)
+                    staging = True
+                    owner._stage_publication(staged)
+                    self._check_transaction(root, state, staged)
+                    if staged.to_dict() != staged_before:
+                        raise ValueError("staging changed Strategy occurrence")
+                    reason = reasons.TEMPORAL_FAILURE
+                    available = a._timestamp(self._clock())
+                    if available < completed or (
+                        previous is not None and available < previous
+                    ):
+                        raise ValueError("Strategy publication clock moved backward")
+                    reason = reasons.PUBLICATION_FAILED
+                    published = deepcopy(staged)
+                    object.__setattr__(published, "available_at", available)
+                    object.__setattr__(
+                        published,
+                        "fingerprint",
+                        canonical_fingerprint(published._payload()),
+                    )
+                    expected = {**staged_before, "available_at": available.isoformat()}
+                    expected.pop("fingerprint")
+                    expected["fingerprint"] = canonical_fingerprint(expected)
+                    fact = _encode_result(published)
+                    retained = _reconstruct_result(fact)
+                    public = _public_result_copy(retained)
+                    next_state = sequence + 1, (*entries, fact)
+
+                    reason = reasons.HISTORY_INVALID
+                    self._check_transaction(root, state, staged)
+                    self._authenticate_history_locked(root, state)
+                    _validate_committed_assessment(pair)
+                    reason = reasons.SEMANTIC_FAILED
+                    domain.validate_governed_daily_technical_strategy(
+                        content=retained.strategy,
+                        assessment=pair.assessment.assessment,
+                        interpretation=pair.interpretation.interpretation,
+                        source_assessment_occurrence=request,
+                    )
+                    reason = reasons.SOURCE_MISMATCH
+                    if request.to_dict() != request_before:
+                        raise ValueError("detached Strategy selectors changed")
+                    _check_pair(request_before, pair)
+                    _check_strategy_source(retained, pair)
+                    if (
+                        tuple(
+                            (item.assessment_fact, item.interpretation_fact)
+                            for item in inventory
+                        )
+                        != inventory_facts
+                    ):
+                        raise ValueError("captured complete pair facts changed")
+                    reason = reasons.PUBLICATION_FAILED
+                    if (
+                        content.to_dict() != content_before
+                        or staged.to_dict() != staged_before
+                    ):
+                        raise ValueError("prepared Strategy changed")
+                    graphs = [_graph_ids(content)]
+                    for value in (staged, published, retained, public):
+                        projection = value.to_dict()
+                        if projection != (
+                            staged_before if value is staged else expected
+                        ):
+                            raise ValueError("prepared Strategy envelope changed")
+                        current = _graph_ids(value)
+                        if any(current & earlier for earlier in graphs):
+                            raise ValueError("Strategy publication graphs alias")
+                        graphs.append(current)
+                    if type(fact) is not bytes or any(
+                        _encode_result(value) != fact
+                        for value in (published, retained, public)
+                    ):
+                        raise ValueError("Strategy final canonical fact differs")
+                    if (
+                        public.execution_id != execution_id
+                        or public.execution_id in execution_ids
+                        or public.history_sequence != sequence
+                        or public.history_namespace_id != root.namespace
+                    ):
+                        raise ValueError("prepared occurrence identity differs")
+                    reason = reasons.HISTORY_INVALID
+                    self._check_transaction(root, state, staged)
+                    # Capture direct dictionaries before the final support seal.
+                    own = vars(self)
+                    source = vars(publisher)
+                    namespace = root.namespace
+                    source_roots = root.assessment_roots
+                    source_state = publisher._committed
+                    # Every fallible local operation and the entire next state are
+                    # complete. This seals ALL captured pairs, including unrelated ones.
+                    publisher._revalidate_assessment_inventory(inventory)
+                    if (
+                        object.__getattribute__(self, "__dict__") is not own
+                        or object.__getattribute__(publisher, "__dict__") is not source
+                        or own[
+                            "_PolygonCompletedDailyProductionStrategyApplicationService"
+                            "__root"
+                        ]
+                        is not root
+                        or own[
+                            "_PolygonCompletedDailyProductionStrategyApplicationService"
+                            "__history_owner"
+                        ]
+                        is not owner
+                        or own[
+                            "_PolygonCompletedDailyProductionStrategyApplicationService"
+                            "__namespace"
+                        ]
+                        is not namespace
+                        or own[
+                            "_PolygonCompletedDailyProductionStrategyApplicationService"
+                            "__assessment_service"
+                        ]
+                        is not publisher
+                        or own["_committed"] is not state
+                        or root.owner is not owner
+                        or root.namespace is not namespace
+                        or root.publisher is not publisher
+                        or owner._lock is not root.lock
+                        or owner._namespace_id is not namespace
+                        or owner._state is not state
+                        or owner._pending is not staged
+                        or source[
+                            "_PolygonCompletedDailyProductionAssessmentApplicationService"
+                            "__consumption_roots"
+                        ]
+                        is not source_roots
+                        or source[
+                            "_PolygonCompletedDailyProductionAssessmentApplicationService"
+                            "__history_owner"
+                        ]
+                        is not source_roots[0]
+                        or source[
+                            "_PolygonCompletedDailyProductionAssessmentApplicationService"
+                            "__namespace"
+                        ]
+                        is not source_roots[1]
+                        or source[
+                            "_PolygonCompletedDailyProductionAssessmentApplicationService"
+                            "__interpretation_service"
+                        ]
+                        is not source_roots[2]
+                        or source["_committed"] is not source_state
+                        or source_roots[0]._state is not source_state
+                        or source_roots[0]._namespace_id is not source_roots[1]
+                        or source_roots[0]._pending is not None
+                        or source_roots[0]._lock is not root.assessment_lock
+                    ):
+                        raise ValueError("Strategy authority changed during final seal")
+                finally:
+                    if staging:
+                        object.__setattr__(owner, "_pending", None)
+                object.__setattr__(self, "_committed", next_state)
+                object.__setattr__(owner, "_state", next_state)
+                return public
+        except PolygonCompletedDailyStrategyRefused:
+            raise
+        except assessment._AssessmentOccurrenceUnavailable as error:
+            raise PolygonCompletedDailyStrategyRefused(
+                reasons.ASSESSMENT_UNAVAILABLE, str(error)
+            ) from error
+        except assessment._AssessmentHistoryInvalid as error:
+            raise PolygonCompletedDailyStrategyRefused(
+                reasons.HISTORY_INVALID, str(error)
+            ) from error
+        except assessment._AssessmentSourceMismatch as error:
+            raise PolygonCompletedDailyStrategyRefused(
+                reasons.SOURCE_MISMATCH, str(error)
+            ) from error
+        except Exception as error:
+            raise PolygonCompletedDailyStrategyRefused(reason, str(error)) from error
+
+
+def _validate_committed_assessment(pair: assessment._AssessmentPair) -> None:
+    # This retained-decision check is a distinct application validation stage;
+    # private source authentication and the final support seal remain structural.
+    content = pair.assessment.assessment
+    try:
+        assessment_domain.validate_governed_daily_technical_assessment(
+            content=content,
+            interpretation=pair.interpretation.interpretation,
+            source_interpretation_occurrence=content.source_interpretation_occurrence,
+        )
+    except Exception as error:
+        raise PolygonCompletedDailyStrategyRefused(
+            PolygonCompletedDailyStrategyRefusalReason.HISTORY_INVALID, str(error)
+        ) from error
+
+
+def _check_pair(selectors: dict[str, object], pair: assessment._AssessmentPair) -> None:
+    if type(pair) is not assessment._AssessmentPair:
+        raise assessment._AssessmentSourceMismatch("exact authenticated pair required")
+    source = pair.assessment
+    if (
+        selectors
+        != {
+            "artifact_reference": (
+                source.assessment.source_interpretation_occurrence.artifact_reference.to_dict()
+            ),
+            "assessment_history_namespace_id": source.history_namespace_id,
+            "assessment_history_sequence": source.history_sequence,
+            "assessment_execution_id": source.execution_id,
+            "assessment_fingerprint": source.fingerprint,
+        }
+        or assessment._encode_result(source) != pair.assessment_fact
+        or _canonical_bytes(pair.interpretation.to_dict()) != pair.interpretation_fact
+    ):
+        raise assessment._AssessmentSourceMismatch("authenticated pair changed")
+
+
+def _check_strategy_source(
+    item: PolygonCompletedDailyStrategyResult, pair: assessment._AssessmentPair
+) -> None:
+    content = item.strategy
+    if (
+        item.assessment_available_at != pair.assessment.available_at
+        or content.source_assessment_content_fingerprint
+        != pair.assessment.assessment.fingerprint
+        or content.source_interpretation_content_fingerprint
+        != pair.interpretation.interpretation.fingerprint
+        or content.canonical_instrument_id.to_dict()
+        != pair.assessment.assessment.canonical_instrument_id.to_dict()
+        or content.analysis_as_of != pair.assessment.assessment.analysis_as_of
+    ):
+        raise assessment._AssessmentSourceMismatch("retained Strategy source differs")
 
 
 __all__ = [
