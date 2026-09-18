@@ -1,4 +1,4 @@
-"""Governed Strategy execution and atomic canonical publication."""
+"""Governed Strategy atomic publication and authenticated history."""
 
 from __future__ import annotations
 
@@ -451,7 +451,11 @@ class PolygonCompletedDailyProductionStrategyApplicationService:
             )
 
     def _authenticate_history_locked(
-        self, root: _StrategyRoot, state: tuple[int, tuple[bytes, ...]]
+        self,
+        root: _StrategyRoot,
+        state: tuple[int, tuple[bytes, ...]],
+        *,
+        inventory_facts: tuple[tuple[bytes, bytes], ...] | None = None,
     ) -> tuple[PolygonCompletedDailyStrategyResult, ...]:
         root.owner._validate()
         prior = tuple(_reconstruct_result(fact) for fact in state[1])
@@ -464,6 +468,14 @@ class PolygonCompletedDailyProductionStrategyApplicationService:
                     "committed Strategy source unavailable"
                 ) from error
             _check_pair(request.to_dict(), pair)
+            if (
+                inventory_facts is not None
+                and (pair.assessment_fact, pair.interpretation_fact)
+                not in inventory_facts
+            ):
+                raise assessment._AssessmentSourceMismatch(
+                    "retained pair differs from complete captured inventory"
+                )
             _check_strategy_source(item, pair)
             _validate_committed_assessment(pair)
             domain.validate_governed_daily_technical_strategy(
@@ -476,6 +488,188 @@ class PolygonCompletedDailyProductionStrategyApplicationService:
                 raise ValueError("committed Strategy changed during authentication")
             _check_pair(request.to_dict(), pair)
         return prior
+
+    def get_result_history_as_of(
+        self,
+        artifact_reference: GovernedTechnicalArtifactReference,
+        *,
+        knowledge_as_of: datetime,
+    ) -> tuple[PolygonCompletedDailyStrategyResult, ...]:
+        if type(artifact_reference) is not GovernedTechnicalArtifactReference:
+            raise TypeError("exact governed artifact reference required")
+        reasons = PolygonCompletedDailyStrategyRefusalReason
+        try:
+            artifact_reference = deepcopy(artifact_reference)
+        except Exception as error:
+            raise PolygonCompletedDailyStrategyRefused(
+                reasons.PUBLICATION_FAILED, str(error)
+            ) from error
+        # Validate only the detached graph; malformed values remain boundary errors.
+        projection = artifact_reference.to_dict()
+        try:
+            artifact_before = deepcopy(projection)
+        except Exception as error:
+            raise PolygonCompletedDailyStrategyRefused(
+                reasons.PUBLICATION_FAILED, str(error)
+            ) from error
+        reason = reasons.TEMPORAL_FAILURE
+        try:
+            cutoff = a._timestamp(knowledge_as_of)
+            root = self.__root
+            owner, publisher = root.owner, root.publisher
+            reason = reasons.HISTORY_INVALID
+            with ExitStack() as stack:
+                self._lock_inputs(stack)
+                # A successful execute preceding lock acquisition is valid history.
+                state = self._committed
+                self._check_transaction(root, state, None)
+                source_roots = root.assessment_roots
+                source_state = publisher._committed
+                interpretation_state = source_roots[2]._committed
+                inventory = publisher._authenticate_assessment_inventory()
+                inventory_facts = tuple(
+                    (pair.assessment_fact, pair.interpretation_fact)
+                    for pair in inventory
+                )
+                self._check_transaction(root, state, None)
+                prior = self._authenticate_history_locked(
+                    root, state, inventory_facts=inventory_facts
+                )
+                self._check_transaction(root, state, None)
+
+                # Complete authentication precedes any artifact/cutoff selection.
+                reason = reasons.PUBLICATION_FAILED
+                selected = tuple(
+                    item
+                    for item in prior
+                    if (
+                        item.strategy.source_assessment_occurrence.artifact_reference.to_dict()
+                        == artifact_before
+                        and item.available_at <= cutoff
+                    )
+                )
+                public = tuple(_public_result_copy(item) for item in selected)
+                # Check the entire prepared return after the last copy: later copy
+                # work must not change an earlier result or introduce cross-aliases.
+                graphs = _graph_ids(prior) | _graph_ids(inventory)
+                for item, retained in zip(public, selected, strict=True):
+                    _check_copy(item, retained, retained.to_dict())
+                    current = _graph_ids(item)
+                    if current & graphs:
+                        raise ValueError("public Strategy graphs alias")
+                    graphs.update(current)
+                if artifact_reference.to_dict() != artifact_before:
+                    raise ValueError("detached history artifact changed")
+                for item, fact in zip(prior, state[1], strict=True):
+                    if _encode_result(item) != fact:
+                        raise ValueError("retained Strategy changed during copying")
+                for item, retained in zip(public, selected, strict=True):
+                    if _encode_result(item) != state[1][retained.history_sequence - 1]:
+                        raise ValueError("public Strategy differs from committed bytes")
+                if (
+                    tuple(
+                        (pair.assessment_fact, pair.interpretation_fact)
+                        for pair in inventory
+                    )
+                    != inventory_facts
+                ):
+                    raise assessment._AssessmentSourceMismatch(
+                        "captured complete pair facts changed"
+                    )
+                reason = reasons.HISTORY_INVALID
+                self._check_transaction(root, state, None)
+                own = vars(self)
+                source = vars(publisher)
+                upstream = vars(source_roots[2])
+                namespace = root.namespace
+                # The return tuple and every local projection/copy/check are ready.
+                # Seal all Assessment facts and original support, even on no match.
+                publisher._revalidate_assessment_inventory(inventory)
+                if (
+                    object.__getattribute__(self, "__dict__") is not own
+                    or object.__getattribute__(publisher, "__dict__") is not source
+                    or object.__getattribute__(source_roots[2], "__dict__")
+                    is not upstream
+                    or own[
+                        "_PolygonCompletedDailyProductionStrategyApplicationService"
+                        "__root"
+                    ]
+                    is not root
+                    or own[
+                        "_PolygonCompletedDailyProductionStrategyApplicationService"
+                        "__history_owner"
+                    ]
+                    is not owner
+                    or own[
+                        "_PolygonCompletedDailyProductionStrategyApplicationService"
+                        "__namespace"
+                    ]
+                    is not namespace
+                    or own[
+                        "_PolygonCompletedDailyProductionStrategyApplicationService"
+                        "__assessment_service"
+                    ]
+                    is not publisher
+                    or own["_committed"] is not state
+                    or root.owner is not owner
+                    or root.namespace is not namespace
+                    or root.publisher is not publisher
+                    or root.assessment_roots is not source_roots
+                    or owner._lock is not root.lock
+                    or owner._namespace_id is not namespace
+                    or owner._state is not state
+                    or owner._pending is not None
+                    or source[
+                        "_PolygonCompletedDailyProductionAssessmentApplicationService"
+                        "__consumption_roots"
+                    ]
+                    is not source_roots
+                    or source[
+                        "_PolygonCompletedDailyProductionAssessmentApplicationService"
+                        "__history_owner"
+                    ]
+                    is not source_roots[0]
+                    or source[
+                        "_PolygonCompletedDailyProductionAssessmentApplicationService"
+                        "__namespace"
+                    ]
+                    is not source_roots[1]
+                    or source[
+                        "_PolygonCompletedDailyProductionAssessmentApplicationService"
+                        "__interpretation_service"
+                    ]
+                    is not source_roots[2]
+                    or source["_committed"] is not source_state
+                    or source_roots[0]._state is not source_state
+                    or source_roots[0]._namespace_id is not source_roots[1]
+                    or source_roots[0]._pending is not None
+                    or source_roots[0]._lock is not root.assessment_lock
+                    or upstream["_history_owner"] is not source_roots[3]
+                    or upstream["_history"] is not source_roots[3]
+                    or upstream["_namespace"] is not source_roots[4]
+                    or upstream["_committed"] is not interpretation_state
+                    or source_roots[3]._state is not interpretation_state
+                    or source_roots[3]._namespace_id is not source_roots[4]
+                    or source_roots[3]._pending is not None
+                    or source_roots[3]._lock is not root.interpretation_lock
+                ):
+                    raise ValueError("Strategy authority changed during read seal")
+                return public
+        except PolygonCompletedDailyStrategyRefused:
+            raise
+        except (
+            assessment._AssessmentOccurrenceUnavailable,
+            assessment._AssessmentHistoryInvalid,
+        ) as error:
+            raise PolygonCompletedDailyStrategyRefused(
+                reasons.HISTORY_INVALID, str(error)
+            ) from error
+        except assessment._AssessmentSourceMismatch as error:
+            raise PolygonCompletedDailyStrategyRefused(
+                reasons.SOURCE_MISMATCH, str(error)
+            ) from error
+        except Exception as error:
+            raise PolygonCompletedDailyStrategyRefused(reason, str(error)) from error
 
     def execute(
         self, request: domain.PolygonCompletedDailyStrategyRequest

@@ -721,7 +721,7 @@ class RecordingStack(ExitStack):
         self.callback(lock.release)
 
 
-def test_exact_exports_and_execute_only_public_workflow():
+def test_exact_exports_and_public_workflows():
     assert app.__all__ == [
         "PolygonCompletedDailyStrategyRefusalReason",
         "PolygonCompletedDailyStrategyRefused",
@@ -732,9 +732,9 @@ def test_exact_exports_and_execute_only_public_workflow():
         name
         for name, value in inspect.getmembers(Service)
         if not name.startswith("_") and callable(value)
-    ] == ["execute"]
+    ] == ["execute", "get_result_history_as_of"]
     service = Service(publisher()[0])
-    for name in ("get_result_history_as_of", "_publish", "_history"):
+    for name in ("_publish", "_history"):
         assert not hasattr(service, name)
     assert tuple(field.name for field in fields(Result)) == RESULT_FIELDS
 
@@ -1092,12 +1092,12 @@ def test_constructor_and_lock_ast_are_foundation_only():
         if isinstance(node, ast.ClassDef) and node.name == Service.__name__
     )
     assert all(
-        node.name.startswith("_") or node.name == "execute"
+        node.name.startswith("_")
+        or node.name in ("execute", "get_result_history_as_of")
         for node in service.body
         if isinstance(node, ast.FunctionDef)
     )
     forbidden_names = {
-        "get_result_history_as_of",
         "_publish",
         "_observe_technical_history",
     }
@@ -2167,7 +2167,7 @@ def test_execute_no_action_fields_or_downstream_integration():
         "allocation",
         "execution_authorization",
     }
-    assert not hasattr(Service, "get_result_history_as_of")
+    assert callable(Service.get_result_history_as_of)
     assert not hasattr(Service, "_publish")
 
 
@@ -2499,3 +2499,1103 @@ def test_private_assessment_authentication_and_seal_do_not_validate_semantics(
         source._revalidate_assessment_inventory(inventory)
     assert source._committed is source._history_owner._state is state
     assert service._committed == (1, ())
+
+
+def history_read(service, artifact, cutoff=TIME):
+    return service.get_result_history_as_of(artifact, knowledge_as_of=cutoff)
+
+
+def authority_snapshot(service):
+    source = service._assessment_service
+    upstream = source._interpretation_service
+    return tuple(
+        (value, value._history_owner, value._committed, value._history_owner._pending)
+        for value in (service, source, upstream)
+    )
+
+
+def assert_authority_unchanged(snapshot):
+    for service, owner, state, pending in snapshot:
+        assert service._committed is owner._state is state
+        assert owner._pending is pending
+
+
+def history_refusal(service, artifact, reason, cutoff=TIME):
+    before = authority_snapshot(service)
+    with pytest.raises(Refused) as caught:
+        history_read(service, artifact, cutoff)
+    assert caught.value.reason == reason
+    assert_authority_unchanged(before)
+    return caught.value
+
+
+def install_strategy_projection(service, index, projection):
+    refingerprint(projection["strategy"])
+    refingerprint(projection)
+    facts = list(service._committed[1])
+    facts[index] = app._canonical_bytes(projection)
+    service._committed = service._history_owner._state = (len(facts) + 1, tuple(facts))
+
+
+def test_history_signature():
+    signature = inspect.signature(Service.get_result_history_as_of)
+    assert list(signature.parameters) == [
+        "self",
+        "artifact_reference",
+        "knowledge_as_of",
+    ]
+    artifact = signature.parameters["artifact_reference"]
+    cutoff = signature.parameters["knowledge_as_of"]
+    assert artifact.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+    assert artifact.annotation == "GovernedTechnicalArtifactReference"
+    assert cutoff.kind is inspect.Parameter.KEYWORD_ONLY
+    assert cutoff.default is inspect.Parameter.empty
+    assert cutoff.annotation == "datetime"
+    assert (
+        signature.return_annotation == "tuple[PolygonCompletedDailyStrategyResult, ...]"
+    )
+
+
+@pytest.mark.parametrize("kind", ["none", "mapping", "request", "subclass"])
+def test_history_exact_outer_type_before_detach_or_locks(
+    execute_case, monkeypatch, kind
+):
+    service, request, _ = execute_case
+    artifact = request.artifact_reference
+    supplied = {
+        "none": None,
+        "mapping": artifact.to_dict(),
+        "request": request,
+        "subclass": object.__new__(type("Child", (type(artifact),), {})),
+    }[kind]
+    monkeypatch.setattr(app, "deepcopy", forbidden)
+    monkeypatch.setattr(service, "_lock_inputs", forbidden)
+    monkeypatch.setattr(service, "_clock", forbidden)
+    with pytest.raises(TypeError):
+        history_read(service, supplied)
+
+
+@pytest.mark.parametrize("field", ["fingerprint", "artifact_fingerprint", "authority"])
+def test_history_detached_invalid_artifact_is_not_repaired(
+    execute_case, monkeypatch, field
+):
+    service, request, _ = execute_case
+    artifact = request.artifact_reference
+    object.__setattr__(artifact, field, "bad")
+    project = type(artifact).to_dict
+    seen = []
+
+    def detached(value):
+        assert value is not artifact
+        seen.append(value)
+        return project(value)
+
+    monkeypatch.setattr(type(artifact), "to_dict", detached)
+    monkeypatch.setattr(service, "_lock_inputs", forbidden)
+    monkeypatch.setattr(app.a, "_timestamp", forbidden)
+    with pytest.raises((TypeError, ValueError)):
+        history_read(service, artifact)
+    assert seen
+
+
+def test_history_detach_capture_cutoff_then_exact_eleven_locks(
+    execute_case, monkeypatch
+):
+    service, request, _ = execute_case
+    service.execute(request)
+    artifact = request.artifact_reference
+    expected = artifact.to_dict()
+    project = type(artifact).to_dict
+    normalize = app.a._timestamp
+    lock_inputs = service._lock_inputs
+    events, stacks, projected = [], [], []
+
+    def projection(value):
+        assert value is not artifact
+        result = project(value)
+        if not projected:
+            projected.append(result)
+            events.append("projection")
+        return result
+
+    def timestamp(value):
+        assert events == ["projection"]
+        assert not stacks
+        events.append("cutoff")
+        # Mutate both caller state and the earlier projection after its capture.
+        object.__setattr__(artifact, "artifact_version", "caller changed")
+        projected[0]["artifact_version"] = "projection changed"
+        result = normalize(value)
+        assert result.tzinfo is UTC
+        return result
+
+    class Stack(RecordingStack):
+        def __init__(self):
+            super().__init__()
+            stacks.append(self)
+
+    def lock_once(stack):
+        assert events == ["projection", "cutoff"]
+        events.append("locks")
+        lock_inputs(stack)
+        root = vars(service)[
+            "_PolygonCompletedDailyProductionStrategyApplicationService__root"
+        ]
+        assert len(stack.locks) == len(set(stack.locks)) == 11
+        assert stack.locks[-3:] == [
+            root.interpretation_lock,
+            root.assessment_lock,
+            root.lock,
+        ]
+        assert all(lock.locked() for lock in stack.locks)
+
+    monkeypatch.setattr(type(artifact), "to_dict", projection)
+    monkeypatch.setattr(app.a, "_timestamp", timestamp)
+    monkeypatch.setattr(service, "_lock_inputs", lock_once)
+    monkeypatch.setattr(app, "ExitStack", Stack)
+    monkeypatch.setattr(service, "_clock", forbidden)
+    monkeypatch.setattr(app, "uuid4", forbidden)
+    values = history_read(
+        service, artifact, TIME.astimezone(timezone(timedelta(hours=8)))
+    )
+    assert len(values) == 1
+    assert (
+        project(values[0].strategy.source_assessment_occurrence.artifact_reference)
+        == expected
+    )
+    assert events == ["projection", "cutoff", "locks"]
+    assert len(stacks) == 1 and not any(lock.locked() for lock in stacks[0].locks)
+
+
+@pytest.mark.parametrize(
+    "cutoff",
+    [
+        None,
+        "2026-01-02",
+        TIME.replace(tzinfo=None),
+        1,
+        type("DateSubclass", (datetime,), {})(2026, 1, 2, tzinfo=UTC),
+    ],
+)
+def test_history_invalid_cutoff_is_temporal_before_locks(
+    execute_case, monkeypatch, cutoff
+):
+    service, request, _ = execute_case
+    monkeypatch.setattr(service, "_lock_inputs", forbidden)
+    monkeypatch.setattr(service, "_clock", forbidden)
+    history_refusal(service, request.artifact_reference, R.TEMPORAL_FAILURE, cutoff)
+
+
+@pytest.mark.parametrize("copy_number", [1, 2])
+def test_history_input_copy_failure_before_cutoff(
+    execute_case, monkeypatch, copy_number
+):
+    service, request, _ = execute_case
+    original = app.deepcopy
+    calls = []
+
+    def fail(value):
+        calls.append(value)
+        if len(calls) == copy_number:
+            raise ValueError("copy failed")
+        return original(value)
+
+    monkeypatch.setattr(app, "deepcopy", fail)
+    monkeypatch.setattr(app.a, "_timestamp", forbidden)
+    monkeypatch.setattr(service, "_lock_inputs", forbidden)
+    history_refusal(service, request.artifact_reference, R.PUBLICATION_FAILED)
+
+
+@pytest.mark.parametrize("empty", [True, False])
+def test_history_empty_selection_authenticates_and_seals_complete_inventory(
+    execute_case, monkeypatch, empty
+):
+    service, request, _ = execute_case
+    if not empty:
+        service.execute(request)
+    source = service._assessment_service
+    capture = source._authenticate_assessment_inventory
+    authenticate = service._authenticate_history_locked
+    seal = source._revalidate_assessment_inventory
+    events = []
+
+    def capture_all():
+        values = capture()
+        assert len(values) == 2
+        events.append("capture")
+        return values
+
+    def complete(*args, **kwargs):
+        events.append("strategy")
+        return authenticate(*args, **kwargs)
+
+    def final(expected):
+        assert len(expected) == 2
+        assert tuple(pair.assessment_fact for pair in expected) == source._committed[1]
+        events.append("seal")
+        return seal(expected)
+
+    monkeypatch.setattr(source, "_authenticate_assessment_inventory", capture_all)
+    monkeypatch.setattr(service, "_authenticate_history_locked", complete)
+    monkeypatch.setattr(source, "_revalidate_assessment_inventory", final)
+    before = authority_snapshot(service)
+    values = history_read(
+        service, request.artifact_reference, TIME - timedelta(microseconds=1)
+    )
+    assert type(values) is tuple and values == ()
+    assert events == ["capture", "strategy", "seal"]
+    assert_authority_unchanged(before)
+
+
+@pytest.mark.parametrize("invisible", ["unrelated", "future"])
+@pytest.mark.parametrize(
+    "attack,reason",
+    [
+        ("bytes", R.HISTORY_INVALID),
+        ("semantic", R.HISTORY_INVALID),
+        ("availability", R.SOURCE_MISMATCH),
+        ("content_source", R.SOURCE_MISMATCH),
+    ],
+)
+def test_history_complete_inventory_corruption_precedes_filtering(
+    execute_case, monkeypatch, invisible, attack, reason
+):
+    service, request, _ = execute_case
+    service.execute(request)
+    later = TIME + timedelta(seconds=1)
+    monkeypatch.setattr(service, "_clock", lambda: later)
+    service.execute(request)
+    projection = app._decode_result(service._committed[1][1])
+    if attack == "semantic":
+        projection["strategy"]["mode"] = "positive_directional_continuation"
+        projection["strategy"]["rule_code"] = "aligned_positive_continuation"
+    elif attack == "availability":
+        projection["assessment_available_at"] = (
+            TIME - timedelta(seconds=1)
+        ).isoformat()
+    elif attack == "content_source":
+        projection["strategy"]["source_assessment_content_fingerprint"] = FP
+    install_strategy_projection(service, 1, projection)
+    if attack == "bytes":
+        service._committed = service._history_owner._state = (
+            3,
+            (service._committed[1][0], b"bad"),
+        )
+    artifact = (
+        request.artifact_reference
+        if invisible == "future"
+        else content().source_assessment_occurrence.artifact_reference
+    )
+    if invisible == "unrelated":
+        object.__setattr__(artifact, "artifact_id", "test:unrelated")
+        object.__setattr__(
+            artifact,
+            "fingerprint",
+            canonical_fingerprint(artifact._fingerprint_payload()),
+        )
+    monkeypatch.setattr(app, "_public_result_copy", forbidden)
+    history_refusal(service, artifact, reason)
+
+
+@pytest.mark.parametrize("stage", ["assessment", "strategy"])
+def test_history_same_semantic_diagnostic_is_committed_history_invalid(
+    execute_case, monkeypatch, stage
+):
+    service, request, _ = execute_case
+    service.execute(request)
+    events = []
+    validate = app.assessment_domain.validate_governed_daily_technical_assessment
+
+    def assessment_validation(**kwargs):
+        events.append("assessment")
+        if stage == "assessment":
+            raise ValueError("identical diagnostic")
+        validate(**kwargs)
+
+    def strategy_validation(**kwargs):
+        assert events == ["assessment"]
+        events.append("strategy")
+        raise ValueError("identical diagnostic")
+
+    monkeypatch.setattr(
+        app.assessment_domain,
+        "validate_governed_daily_technical_assessment",
+        assessment_validation,
+    )
+    monkeypatch.setattr(
+        domain, "validate_governed_daily_technical_strategy", strategy_validation
+    )
+    failure = history_refusal(service, request.artifact_reference, R.HISTORY_INVALID)
+    assert str(failure.__cause__) == "identical diagnostic"
+    assert events[-1] == stage
+
+
+def test_history_coherent_committed_assessment_semantic_corruption(
+    execute_case, monkeypatch
+):
+    service, request, _ = execute_case
+    service.execute(request)
+    invalid = corrupt_committed_assessment_semantics(service._assessment_service)
+    projection = app._decode_result(service._committed[1][0])
+    projection["strategy"]["source_assessment_occurrence"]["assessment_fingerprint"] = (
+        invalid.fingerprint
+    )
+    projection["strategy"]["source_assessment_content_fingerprint"] = (
+        invalid.assessment.fingerprint
+    )
+    install_strategy_projection(service, 0, projection)
+    monkeypatch.setattr(domain, "validate_governed_daily_technical_strategy", forbidden)
+    history_refusal(service, request.artifact_reference, R.HISTORY_INVALID)
+
+
+@pytest.mark.parametrize("phase", ["capture", "resolve", "seal"])
+@pytest.mark.parametrize(
+    "failure,reason",
+    [
+        (assessment._AssessmentOccurrenceUnavailable, R.HISTORY_INVALID),
+        (assessment._AssessmentHistoryInvalid, R.HISTORY_INVALID),
+        (assessment._AssessmentSourceMismatch, R.SOURCE_MISMATCH),
+    ],
+)
+def test_history_structured_private_failures_ignore_diagnostic(
+    execute_case, monkeypatch, phase, failure, reason
+):
+    service, request, _ = execute_case
+    service.execute(request)
+    name = {
+        "capture": "_authenticate_assessment_inventory",
+        "resolve": "_authenticate_assessment_occurrence",
+        "seal": "_revalidate_assessment_inventory",
+    }[phase]
+
+    def fail(*args):
+        raise failure("identical diagnostic")
+
+    monkeypatch.setattr(service._assessment_service, name, fail)
+    error = history_refusal(service, request.artifact_reference, reason)
+    assert str(error.__cause__) in (
+        "identical diagnostic",
+        "committed Strategy source unavailable",
+    )
+
+
+@pytest.mark.parametrize(
+    "selector",
+    [
+        "artifact_reference",
+        "assessment_history_namespace_id",
+        "assessment_history_sequence",
+        "assessment_execution_id",
+        "assessment_fingerprint",
+    ],
+)
+def test_history_all_retained_assessment_selectors_authenticate_conjunctively(
+    execute_case, selector
+):
+    service, request, other = execute_case
+    service.execute(request)
+    projection = app._decode_result(service._committed[1][0])
+    occurrence = projection["strategy"]["source_assessment_occurrence"]
+    if selector == "artifact_reference":
+        occurrence[selector]["artifact_version"] = "other"
+        refingerprint(occurrence[selector])
+    elif selector == "assessment_history_namespace_id":
+        occurrence[selector] = "polygon_completed_daily_assessment_history:" + "0" * 32
+    elif selector == "assessment_history_sequence":
+        occurrence[selector] = other.history_sequence
+    elif selector == "assessment_execution_id":
+        occurrence[selector] = other.execution_id
+    else:
+        occurrence[selector] = other.assessment.fingerprint
+    install_strategy_projection(service, 0, projection)
+    history_refusal(service, request.artifact_reference, R.HISTORY_INVALID)
+
+
+@pytest.mark.parametrize("lost", ["assessment", "interpretation"])
+def test_history_missing_required_committed_source_is_history_invalid(
+    execute_case, lost
+):
+    service, request, _ = execute_case
+    service.execute(request)
+    source = service._assessment_service
+    target = source if lost == "assessment" else source._interpretation_service
+    target._committed = target._history_owner._state = (1, ())
+    history_refusal(service, request.artifact_reference, R.HISTORY_INVALID)
+
+
+@pytest.mark.parametrize("attack", ["omit", "other_pair", "content_fact"])
+def test_history_retained_pair_must_be_exactly_in_captured_inventory(
+    execute_case, monkeypatch, attack
+):
+    service, request, other = execute_case
+    service.execute(request)
+    source = service._assessment_service
+    capture = source._authenticate_assessment_inventory
+    resolve = source._authenticate_assessment_occurrence
+
+    def inventory():
+        pairs = capture()
+        if attack == "omit":
+            return pairs[1:]
+        if attack == "content_fact":
+            pair = pairs[0]
+            object.__setattr__(
+                pair,
+                "assessment_fact",
+                app._canonical_bytes(pair.assessment.assessment.to_dict()),
+            )
+        return pairs
+
+    monkeypatch.setattr(source, "_authenticate_assessment_inventory", inventory)
+    if attack == "other_pair":
+        monkeypatch.setattr(
+            source,
+            "_authenticate_assessment_occurrence",
+            lambda value: resolve(strategy_request(other)),
+        )
+    history_refusal(service, request.artifact_reference, R.SOURCE_MISMATCH)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("artifact_id", "other:id"),
+        ("artifact_version", "2.0.0"),
+        ("artifact_fingerprint", "sha256:" + "b" * 64),
+        ("information_class", "source_assertion"),
+        ("authority", "platform_origin"),
+    ],
+)
+def test_history_complete_artifact_projection_required(execute_case, field, value):
+    service, request, _ = execute_case
+    service.execute(request)
+    artifact = deepcopy(request.artifact_reference)
+    assert getattr(artifact, field) != value
+    object.__setattr__(artifact, field, value)
+    object.__setattr__(
+        artifact, "fingerprint", canonical_fingerprint(artifact._fingerprint_payload())
+    )
+    assert history_read(service, artifact) == ()
+
+
+def test_history_inclusive_cutoff_sequence_order_and_repeated_content(
+    execute_case, monkeypatch
+):
+    service, request, _ = execute_case
+    first = service.execute(request)
+    second = service.execute(request)
+    later = TIME + timedelta(microseconds=1)
+    monkeypatch.setattr(service, "_clock", lambda: later)
+    third = service.execute(request)
+    assert (
+        first.strategy.fingerprint
+        == second.strategy.fingerprint
+        == third.strategy.fingerprint
+    )
+    for cutoff, expected in [
+        (TIME - timedelta(microseconds=1), []),
+        (TIME, [first, second]),
+        (TIME.astimezone(timezone(timedelta(hours=-5))), [first, second]),
+        (later, [first, second, third]),
+    ]:
+        values = history_read(service, request.artifact_reference, cutoff)
+        assert type(values) is tuple
+        assert [v.to_dict() for v in values] == [v.to_dict() for v in expected]
+        assert [v.history_sequence for v in values] == list(range(1, len(expected) + 1))
+
+
+def test_history_public_graphs_from_final_bytes_fresh_disjoint_and_mutation_safe(
+    execute_case, monkeypatch
+):
+    service, request, _ = execute_case
+    service.execute(request)
+    service.execute(request)
+    state = service._committed
+    captured, retained = [], []
+    capture = service._assessment_service._authenticate_assessment_inventory
+    copy_result = app._public_result_copy
+
+    def inventory():
+        result = capture()
+        captured.extend(result)
+        return result
+
+    def copying(value):
+        retained.append(value)
+        return copy_result(value)
+
+    monkeypatch.setattr(
+        service._assessment_service, "_authenticate_assessment_inventory", inventory
+    )
+    monkeypatch.setattr(app, "_public_result_copy", copying)
+    one = history_read(service, request.artifact_reference)
+    two = history_read(service, request.artifact_reference)
+    values = (*one, *two)
+    for index, value in enumerate(values):
+        assert type(value) is Result
+        assert app._encode_result(value) == state[1][value.history_sequence - 1]
+        assert not any(isinstance(item, Enum) for item in graph(value))
+        assert not mutable_ids(value) & mutable_ids((tuple(captured), tuple(retained)))
+        for earlier in values[:index]:
+            assert not mutable_ids(value) & mutable_ids(earlier)
+    object.__setattr__(
+        one[0].strategy.source_assessment_occurrence.artifact_reference,
+        "artifact_id",
+        "caller:changed",
+    )
+    object.__setattr__(
+        one[1].strategy.canonical_instrument_id, "instrument_id", "changed"
+    )
+    assert service._committed is state
+    assert tuple(app._encode_result(v) for v in two) == state[1]
+    assert (
+        tuple(
+            app._encode_result(v)
+            for v in history_read(service, request.artifact_reference)
+        )
+        == state[1]
+    )
+
+
+@pytest.mark.parametrize(
+    "attack",
+    ["raise", "alias", "cross_alias", "earlier_mutation", "enum", "other_occurrence"],
+)
+def test_history_public_preparation_failures_are_atomic(
+    execute_case, monkeypatch, attack
+):
+    service, request, _ = execute_case
+    service.execute(request)
+    service.execute(request)
+    original = app._public_result_copy
+    prepared = []
+
+    def corrupt(value):
+        if attack == "raise":
+            raise RuntimeError("copy failed")
+        public = original(value)
+        if attack == "alias":
+            object.__setattr__(public, "strategy", value.strategy)
+        elif attack == "enum":
+            object.__setattr__(public, "history_sequence", NumberEnum.ONE)
+        elif attack == "other_occurrence":
+            public = app._reconstruct_result(service._committed[1][1])
+        elif prepared:
+            if attack == "cross_alias":
+                object.__setattr__(public, "strategy", prepared[0].strategy)
+            else:
+                object.__setattr__(prepared[0].strategy, "rule_code", "changed")
+        prepared.append(public)
+        return public
+
+    monkeypatch.setattr(app, "_public_result_copy", corrupt)
+    monkeypatch.setattr(
+        service._assessment_service, "_revalidate_assessment_inventory", forbidden
+    )
+    history_refusal(service, request.artifact_reference, R.PUBLICATION_FAILED)
+
+
+@pytest.mark.parametrize("visible", [False, True])
+def test_history_final_complete_seal_after_preparation_and_direct_return(
+    execute_case, monkeypatch, visible
+):
+    service, request, _ = execute_case
+    service.execute(request)
+    source = service._assessment_service
+    before = authority_snapshot(service)
+    seal = source._revalidate_assessment_inventory
+    calls = []
+    cutoff = TIME if visible else TIME - timedelta(microseconds=1)
+
+    def final(expected):
+        prepared = inspect.currentframe().f_back.f_locals
+        public = prepared["public"]
+        assert type(public) is tuple and len(public) == int(visible)
+        assert len(expected) == 2
+        assert tuple(pair.assessment_fact for pair in expected) == source._committed[1]
+        assert not mutable_ids(public) & mutable_ids(expected)
+        calls.append(public)
+        seal(expected)
+        for name in (
+            "_encode_result",
+            "_decode_result",
+            "_canonical_bytes",
+            "_check_scalars",
+            "_reconstruct_result",
+            "_public_result_copy",
+            "_check_copy",
+            "_graph_ids",
+            "deepcopy",
+            "uuid4",
+            "_check_pair",
+            "_check_strategy_source",
+            "_validate_committed_assessment",
+        ):
+            monkeypatch.setattr(app, name, forbidden)
+        for cls in (
+            Result,
+            app.GovernedTechnicalArtifactReference,
+            domain.GovernedDailyTechnicalStrategy,
+            domain.PolygonCompletedDailyStrategyRequest,
+        ):
+            monkeypatch.setattr(cls, "to_dict", forbidden)
+        for name in (
+            "_check_transaction",
+            "_check_roots",
+            "_authenticate_history_locked",
+            "_clock",
+        ):
+            monkeypatch.setattr(service, name, forbidden)
+        monkeypatch.setattr(app._StrategyHistory, "_validate", forbidden)
+        monkeypatch.setattr(
+            app.assessment_domain,
+            "validate_governed_daily_technical_assessment",
+            forbidden,
+        )
+        monkeypatch.setattr(
+            domain, "validate_governed_daily_technical_strategy", forbidden
+        )
+        for name in (
+            "_authenticate_assessment_inventory",
+            "_authenticate_assessment_occurrence",
+            "_revalidate_assessment_inventory",
+        ):
+            monkeypatch.setattr(source, name, forbidden)
+        monkeypatch.setattr(
+            source._interpretation_service,
+            "_authenticate_interpretation_occurrence",
+            forbidden,
+        )
+        for cls, names in (
+            (Service, ("_history_owner", "_namespace", "_assessment_service")),
+            (Publisher, ("_history_owner", "_namespace", "_interpretation_service")),
+        ):
+            for name in names:
+                monkeypatch.setattr(cls, name, property(forbidden))
+
+    monkeypatch.setattr(source, "_revalidate_assessment_inventory", final)
+    values = history_read(service, request.artifact_reference, cutoff)
+    assert len(calls) == 1 and values is calls[0]
+    assert_authority_unchanged(before)
+    # Assert the successful post-seal path has no calls/allocations beyond direct
+    # dictionary identity reads, the drift refusal, and returning the prepared tuple.
+    import textwrap
+
+    method = ast.parse(
+        textwrap.dedent(inspect.getsource(Service.get_result_history_as_of))
+    )
+    block = next(node for node in ast.walk(method) if isinstance(node, ast.With))
+    index = next(
+        index
+        for index, node in enumerate(block.body)
+        if isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Attribute)
+        and node.value.func.attr == "_revalidate_assessment_inventory"
+    )
+    tail = block.body[index + 1 :]
+    assert (
+        len(tail) == 2
+        and isinstance(tail[0], ast.If)
+        and isinstance(tail[1], ast.Return)
+    )
+    assert isinstance(tail[1].value, ast.Name) and tail[1].value.id == "public"
+    for node in ast.walk(tail[0].test):
+        assert not isinstance(
+            node,
+            (ast.List, ast.Tuple, ast.Dict, ast.Set, ast.ListComp, ast.GeneratorExp),
+        )
+        if isinstance(node, ast.Call):
+            assert ast.unparse(node.func) == "object.__getattribute__"
+
+
+@pytest.mark.parametrize("seam", ["copy", "graph", "domain"])
+@pytest.mark.parametrize("lost", ["unselected_assessment", "invisible_strategy"])
+def test_history_final_seal_catches_real_invisible_support_loss(
+    authentic_execute_case, monkeypatch, seam, lost
+):
+    service, request, other = authentic_execute_case
+    service.execute(request)
+    cutoff = other.available_at
+    if lost == "invisible_strategy":
+        monkeypatch.setattr(
+            service, "_clock", lambda: cutoff + timedelta(microseconds=1)
+        )
+        service.execute(strategy_request(other))
+    source = service._assessment_service
+    tech = source._interpretation_service._technical_service
+    target, name = {
+        "copy": (app, "_public_result_copy"),
+        "graph": (app, "_graph_ids"),
+        "domain": (domain, "validate_governed_daily_technical_strategy"),
+    }[seam]
+    original = getattr(target, name)
+    seal = source._revalidate_assessment_inventory
+    lost_support, sealed = [], []
+
+    def late_work(*args, **kwargs):
+        result = original(*args, **kwargs)
+        # On domain work, wait until the last retained Strategy validation so the
+        # final seal, rather than another retained-source lookup, catches loss.
+        if not lost_support and (
+            seam != "domain"
+            or kwargs[
+                "content"
+            ].source_assessment_occurrence.assessment_history_sequence
+            == (2 if lost == "invisible_strategy" else 1)
+        ):
+            state = tech._history._state
+            monkeypatch.setattr(tech._history, "_state", (state[0] - 1, state[1][:-1]))
+            lost_support.append(True)
+        return result
+
+    def final(expected):
+        sealed.append(expected)
+        assert len(expected) == 2
+        return seal(expected)
+
+    monkeypatch.setattr(target, name, late_work)
+    monkeypatch.setattr(source, "_revalidate_assessment_inventory", final)
+    history_refusal(service, request.artifact_reference, R.HISTORY_INVALID, cutoff)
+    assert lost_support and len(sealed) == 1
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "root",
+        "owner",
+        "namespace",
+        "commitment",
+        "owner_state",
+        "pending",
+        "assessment_root",
+        "assessment_state",
+        "interpretation_state",
+    ],
+)
+def test_history_post_seal_direct_drift_refuses_without_repair(
+    execute_case, monkeypatch, target
+):
+    service, request, _ = execute_case
+    service.execute(request)
+    source = service._assessment_service
+    upstream = source._interpretation_service
+    owner, state = service._history_owner, service._committed
+    seal = source._revalidate_assessment_inventory
+    strategy_prefix = "_PolygonCompletedDailyProductionStrategyApplicationService__"
+    assessment_prefix = "_PolygonCompletedDailyProductionAssessmentApplicationService__"
+    targets = {
+        "root": (
+            service,
+            strategy_prefix + "root",
+            copy(vars(service)[strategy_prefix + "root"]),
+        ),
+        "owner": (service, strategy_prefix + "history_owner", app._StrategyHistory()),
+        "namespace": (owner, "_namespace_id", (owner._namespace_id + " ")[:-1]),
+        "commitment": (service, "_committed", tuple(list(state))),
+        "owner_state": (owner, "_state", tuple(list(state))),
+        "pending": (owner, "_pending", object()),
+        "assessment_root": (
+            source,
+            assessment_prefix + "consumption_roots",
+            tuple(list(vars(source)[assessment_prefix + "consumption_roots"])),
+        ),
+        "assessment_state": (source, "_committed", tuple(list(source._committed))),
+        "interpretation_state": (
+            upstream,
+            "_committed",
+            tuple(list(upstream._committed)),
+        ),
+    }
+    changed, name, replacement = targets[target]
+    assert getattr(changed, name) is not replacement
+    after_callback = []
+
+    def drift(expected):
+        seal(expected)
+        setattr(changed, name, replacement)
+        after_callback.append((service._committed, owner._state, owner._pending))
+
+    monkeypatch.setattr(source, "_revalidate_assessment_inventory", drift)
+    with pytest.raises(Refused) as caught:
+        history_read(service, request.artifact_reference)
+    assert caught.value.reason == R.HISTORY_INVALID
+    assert (
+        getattr(changed, name) is replacement
+    )  # Reads do not repair or clean pending.
+    assert all(
+        current is before
+        for current, before in zip(
+            (service._committed, owner._state, owner._pending),
+            after_callback[0],
+            strict=True,
+        )
+    )
+
+
+@pytest.mark.parametrize("attack", ["equal_state", "pending", "namespace", "root"])
+def test_history_requires_original_idle_authority(execute_case, attack):
+    service, request, _ = execute_case
+    service.execute(request)
+    owner = service._history_owner
+    if attack == "equal_state":
+        owner._state = tuple(list(owner._state))
+    elif attack == "pending":
+        owner._pending = object()
+    elif attack == "namespace":
+        owner._namespace_id = (owner._namespace_id + " ")[:-1]
+    else:
+        vars(service)[
+            "_PolygonCompletedDailyProductionStrategyApplicationService__history_owner"
+        ] = app._StrategyHistory()
+    state, pending = owner._state, owner._pending
+    with pytest.raises(Refused) as caught:
+        history_read(service, request.artifact_reference)
+    assert caught.value.reason == R.HISTORY_INVALID
+    assert owner._state is state and owner._pending is pending
+
+
+@pytest.mark.parametrize("view", ["owner", "publisher", "namespace"])
+def test_history_replaceable_views_do_not_choose_authority(
+    execute_case, monkeypatch, view
+):
+    service, request, _ = execute_case
+    issued = service.execute(request)
+    before = authority_snapshot(service)
+    name = {
+        "owner": "_history_owner",
+        "publisher": "_assessment_service",
+        "namespace": "_namespace",
+    }[view]
+    monkeypatch.setattr(Service, name, property(forbidden))
+    assert (
+        history_read(service, request.artifact_reference)[0].to_dict()
+        == issued.to_dict()
+    )
+    assert_authority_unchanged(before)
+
+
+def test_history_never_executes_upstream_stages_clock_uuid_or_derivation(
+    authentic_execute_case, monkeypatch
+):
+    service, request, other = authentic_execute_case
+    service.execute(request)
+    source = service._assessment_service
+    upstream = source._interpretation_service
+    tech = upstream._technical_service
+    bridge = tech._bridge_service
+    from market_platform.data.providers.polygon import PolygonProvider
+
+    for target, names in (
+        (service, ("execute", "_clock")),
+        (service._history_owner, ("_stage_publication",)),
+        (app, ("uuid4",)),
+        (domain, ("derive_governed_daily_technical_strategy",)),
+        (source, ("execute", "get_result_history_as_of")),
+        (
+            upstream,
+            (
+                "execute",
+                "get_result_history_as_of",
+                "_check_history",
+                "_observe_technical_history",
+            ),
+        ),
+        (tech, ("execute", "get_result_history_as_of")),
+        (bridge, ("bridge", "get_bridge_history_as_of")),
+        (bridge._qualification_service, ("qualify",)),
+        (technical.technical, ("analyze_daily_technical_snapshot",)),
+        (PolygonProvider, ("get_daily_prices", "get_completed_daily_acquisition")),
+        (assessment.domain, ("assess_governed_daily_technical_interpretation",)),
+        (
+            interpretation.domain,
+            (
+                "interpret_governed_daily_technical_snapshot",
+                "validate_governed_daily_technical_interpretation",
+                "classic_states",
+                "build_classic_comparison_evidence",
+            ),
+        ),
+    ):
+        for name in names:
+            monkeypatch.setattr(target, name, forbidden)
+    before = authority_snapshot(service)
+    assert (
+        len(history_read(service, request.artifact_reference, other.available_at)) == 1
+    )
+    assert_authority_unchanged(before)
+
+
+@pytest.mark.parametrize("first", ["reader", "writer"])
+def test_history_execute_concurrency_complete_old_or_new_state(
+    execute_case, monkeypatch, first
+):
+    service, request, other = execute_case
+    one = service.execute(request)
+    old_state = service._committed
+    held, release, waiting = Event(), Event(), Event()
+    lock_inputs = service._lock_inputs
+    seal = service._assessment_service._revalidate_assessment_inventory
+    stage = service._history_owner._stage_publication
+    attempts = []
+    captured = []
+    authenticate = service._authenticate_history_locked
+
+    def locking(stack):
+        attempts.append(True)
+        if len(attempts) == 2:
+            waiting.set()
+        lock_inputs(stack)
+
+    def capture(root, state, **kwargs):
+        if kwargs:  # Only history supplies complete expected inventory facts.
+            captured.append(state)
+        return authenticate(root, state, **kwargs)
+
+    def pause_stage(value):
+        stage(value)
+        if first == "writer":
+            held.set()
+            assert release.wait(20)
+
+    def pause_seal(expected):
+        seal(expected)
+        if first == "reader" and not held.is_set():
+            held.set()
+            assert release.wait(20)
+
+    monkeypatch.setattr(service, "_lock_inputs", locking)
+    monkeypatch.setattr(service, "_authenticate_history_locked", capture)
+    monkeypatch.setattr(service._history_owner, "_stage_publication", pause_stage)
+    monkeypatch.setattr(
+        service._assessment_service, "_revalidate_assessment_inventory", pause_seal
+    )
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        if first == "writer":
+            writer = pool.submit(service.execute, request)
+        else:
+            reader = pool.submit(
+                history_read, service, request.artifact_reference, other.available_at
+            )
+        try:
+            assert held.wait(20)
+            if first == "writer":
+                reader = pool.submit(
+                    history_read,
+                    service,
+                    request.artifact_reference,
+                    other.available_at,
+                )
+            else:
+                writer = pool.submit(service.execute, request)
+            assert waiting.wait(20)
+            assert not (reader if first == "writer" else writer).done()
+            assert service._committed is old_state
+        finally:
+            release.set()
+        two = writer.result(timeout=30)
+        values = reader.result(timeout=30)
+    assert [value.history_sequence for value in values] == (
+        [1, 2] if first == "writer" else [1]
+    )
+    expected = [one, two] if first == "writer" else [one]
+    assert [value.to_dict() for value in values] == [
+        value.to_dict() for value in expected
+    ]
+    assert len(captured) == 1
+    assert captured[0] is (service._committed if first == "writer" else old_state)
+    assert service._committed is service._history_owner._state
+    assert service._committed[0] == 3 and service._history_owner._pending is None
+
+
+def test_history_exact_original_eleven_lock_order_once(monkeypatch):
+    source, upstream = publisher()
+    service = Service(source, forbidden)
+    expected = [*upstream, service._history_owner._lock]
+    stacks, seals = [], []
+
+    class Stack(RecordingStack):
+        def __init__(self):
+            super().__init__()
+            stacks.append(self)
+
+    def inventory():
+        assert stacks[0].locks == expected
+        return ()
+
+    def seal(values):
+        assert values == ()
+        assert stacks[0].locks == expected
+        assert all(lock.locked() for lock in expected)
+        seals.append(True)
+
+    monkeypatch.setattr(app, "ExitStack", Stack)
+    monkeypatch.setattr(source, "_authenticate_assessment_inventory", inventory)
+    monkeypatch.setattr(source, "_revalidate_assessment_inventory", seal)
+    artifact = content().source_assessment_occurrence.artifact_reference
+    assert history_read(service, artifact) == ()
+    assert len(stacks) == 1 and seals == [True]
+    assert len(expected) == len(set(expected)) == 11
+    assert not any(lock.locked() for lock in expected)
+
+
+def test_history_later_graph_work_cannot_change_earlier_public_result(
+    execute_case, monkeypatch
+):
+    service, request, _ = execute_case
+    service.execute(request)
+    service.execute(request)
+    original = app._public_result_copy
+    graph_ids = app._graph_ids
+    prepared = []
+
+    def copying(value):
+        public = original(value)
+        prepared.append(public)
+        return public
+
+    def late_graph(value):
+        ids = graph_ids(value)
+        if len(prepared) == 2 and value is prepared[1]:
+            object.__setattr__(prepared[0].strategy, "rule_code", "changed")
+        return ids
+
+    monkeypatch.setattr(app, "_public_result_copy", copying)
+    monkeypatch.setattr(app, "_graph_ids", late_graph)
+    history_refusal(service, request.artifact_reference, R.PUBLICATION_FAILED)
+
+
+def test_history_final_seal_catches_unreturned_assessment_loss_after_copy(
+    execute_case, monkeypatch
+):
+    service, request, _ = execute_case
+    service.execute(request)
+    source = service._assessment_service
+    original = app._public_result_copy
+    seal = source._revalidate_assessment_inventory
+    sealed = []
+    original_state = source._committed
+
+    def copying(value):
+        public = original(value)
+        # Remove an Assessment that has no corresponding Strategy result at all.
+        source._committed = source._history_owner._state = (2, original_state[1][:1])
+        return public
+
+    def final(expected):
+        assert len(expected) == 2
+        sealed.append(True)
+        return seal(expected)
+
+    monkeypatch.setattr(app, "_public_result_copy", copying)
+    monkeypatch.setattr(source, "_revalidate_assessment_inventory", final)
+    state = service._committed
+    with pytest.raises(Refused) as caught:
+        history_read(service, request.artifact_reference)
+    assert caught.value.reason == R.HISTORY_INVALID
+    assert sealed == [True]
+    assert service._committed is service._history_owner._state is state
+    assert service._history_owner._pending is None
+    assert source._committed is source._history_owner._state
+    assert source._committed == (2, original_state[1][:1])  # No read-side repair.
