@@ -862,12 +862,17 @@ class PolygonCompletedDailyProductionStrategyApplicationService:
                     namespace = root.namespace
                     source_roots = root.assessment_roots
                     source_state = publisher._committed
+                    interpretation_publisher = source_roots[2]
+                    upstream = vars(interpretation_publisher)
+                    interpretation_state = upstream["_committed"]
                     # Every fallible local operation and the entire next state are
                     # complete. This seals ALL captured pairs, including unrelated ones.
                     publisher._revalidate_assessment_inventory(inventory)
                     if (
                         object.__getattribute__(self, "__dict__") is not own
                         or object.__getattribute__(publisher, "__dict__") is not source
+                        or object.__getattribute__(interpretation_publisher, "__dict__")
+                        is not upstream
                         or own[
                             "_PolygonCompletedDailyProductionStrategyApplicationService"
                             "__root"
@@ -892,6 +897,7 @@ class PolygonCompletedDailyProductionStrategyApplicationService:
                         or root.owner is not owner
                         or root.namespace is not namespace
                         or root.publisher is not publisher
+                        or root.assessment_roots is not source_roots
                         or owner._lock is not root.lock
                         or owner._namespace_id is not namespace
                         or owner._state is not state
@@ -921,6 +927,14 @@ class PolygonCompletedDailyProductionStrategyApplicationService:
                         or source_roots[0]._namespace_id is not source_roots[1]
                         or source_roots[0]._pending is not None
                         or source_roots[0]._lock is not root.assessment_lock
+                        or upstream["_history_owner"] is not source_roots[3]
+                        or upstream["_history"] is not source_roots[3]
+                        or upstream["_namespace"] is not source_roots[4]
+                        or upstream["_committed"] is not interpretation_state
+                        or source_roots[3]._state is not interpretation_state
+                        or source_roots[3]._namespace_id is not source_roots[4]
+                        or source_roots[3]._pending is not None
+                        or source_roots[3]._lock is not root.interpretation_lock
                     ):
                         raise ValueError("Strategy authority changed during final seal")
                 finally:

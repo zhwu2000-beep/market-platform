@@ -1970,25 +1970,78 @@ def test_execute_final_seal_complete_inventory_and_preallocated_state(
     assert service._committed is service._history_owner._state is seen[0]
 
 
-@pytest.mark.parametrize("target", ["namespace", "commitment", "assessment_root"])
+@pytest.mark.parametrize(
+    "target",
+    [
+        "namespace",
+        "commitment",
+        "assessment_root",
+        "interpretation_dictionary",
+        "interpretation_owner",
+        "interpretation_history",
+        "interpretation_state",
+        "interpretation_owner_state",
+        "interpretation_namespace",
+        "interpretation_owner_namespace",
+        "interpretation_pending",
+        "interpretation_lock",
+    ],
+)
 def test_execute_post_seal_direct_root_drift(execute_case, monkeypatch, target):
     service, request, _ = execute_case
     owner, state = service._history_owner, service._committed
     source = service._assessment_service
+    upstream = source._interpretation_service
+    upstream_owner = upstream._history_owner
     seal = source._revalidate_assessment_inventory
+    key = (
+        "_PolygonCompletedDailyProductionAssessmentApplicationService"
+        "__consumption_roots"
+    )
+    targets = {
+        "namespace": (owner, "_namespace_id", (owner._namespace_id + " ")[:-1]),
+        "commitment": (service, "_committed", tuple(list(state))),
+        "assessment_root": (source, key, tuple(list(vars(source)[key]))),
+        "interpretation_dictionary": (upstream, "__dict__", vars(upstream).copy()),
+        "interpretation_owner": (
+            upstream,
+            "_history_owner",
+            interpretation._InterpretationHistory(),
+        ),
+        "interpretation_history": (
+            upstream,
+            "_history",
+            interpretation._InterpretationHistory(),
+        ),
+        "interpretation_state": (
+            upstream,
+            "_committed",
+            tuple(list(upstream._committed)),
+        ),
+        "interpretation_owner_state": (
+            upstream_owner,
+            "_state",
+            tuple(list(upstream_owner._state)),
+        ),
+        "interpretation_namespace": (
+            upstream,
+            "_namespace",
+            (upstream._namespace + " ")[:-1],
+        ),
+        "interpretation_owner_namespace": (
+            upstream_owner,
+            "_namespace_id",
+            (upstream_owner._namespace_id + " ")[:-1],
+        ),
+        "interpretation_pending": (upstream_owner, "_pending", object()),
+        "interpretation_lock": (upstream_owner, "_lock", Lock()),
+    }
+    changed, name, replacement = targets[target]
+    assert getattr(changed, name) is not replacement
 
     def drift(expected):
         seal(expected)
-        if target == "namespace":
-            owner._namespace_id = (owner._namespace_id + " ")[:-1]
-        elif target == "commitment":
-            service._committed = tuple(list(state))
-        else:
-            key = (
-                "_PolygonCompletedDailyProductionAssessmentApplicationService"
-                "__consumption_roots"
-            )
-            vars(source)[key] = tuple(list(vars(source)[key]))
+        setattr(changed, name, replacement)
 
     monkeypatch.setattr(source, "_revalidate_assessment_inventory", drift)
     with pytest.raises(Refused) as caught:
@@ -1996,6 +2049,38 @@ def test_execute_post_seal_direct_root_drift(execute_case, monkeypatch, target):
     assert caught.value.reason == R.HISTORY_INVALID
     assert owner._state is state and owner._pending is None
     assert service._committed == state
+    if target != "commitment":
+        assert service._committed is state
+    assert getattr(changed, name) is replacement  # Refusal never repairs drift.
+
+
+def test_execute_post_seal_authentic_interpretation_commitment_replacement(
+    authentic_execute_case, monkeypatch
+):
+    service, request, _ = authentic_execute_case
+    service.execute(request)
+    owner, state = service._history_owner, service._committed
+    source = service._assessment_service
+    source_state = source._committed
+    upstream = source._interpretation_service
+    interpretation_state = upstream._committed
+    replacement = tuple(list(interpretation_state))
+    assert (
+        replacement == interpretation_state and replacement is not interpretation_state
+    )
+    seal = source._revalidate_assessment_inventory
+
+    def drift(expected):
+        seal(expected)
+        monkeypatch.setattr(upstream, "_committed", replacement)
+
+    monkeypatch.setattr(source, "_revalidate_assessment_inventory", drift)
+    execute_refusal(service, request, R.HISTORY_INVALID)
+    assert service._committed is owner._state is state
+    assert owner._pending is None
+    assert source._committed is source._history_owner._state is source_state
+    assert upstream._committed is replacement  # No publication-side repair.
+    assert upstream._history_owner._state is interpretation_state
 
 
 def test_execute_three_authentic_concurrent_publications(
