@@ -7,7 +7,7 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from copy import copy, deepcopy
-from dataclasses import FrozenInstanceError, fields, is_dataclass
+from dataclasses import FrozenInstanceError, fields, is_dataclass, replace
 from datetime import UTC, datetime, timedelta, timezone
 from enum import Enum, IntEnum, StrEnum
 from itertools import product
@@ -716,6 +716,8 @@ class RecordingStack(ExitStack):
         self.locks = []
 
     def enter_context(self, lock):
+        if not hasattr(lock, "acquire"):
+            return super().enter_context(lock)
         assert lock.acquire(blocking=False), "recursive lock acquisition"
         self.locks.append(lock)
         self.callback(lock.release)
@@ -787,6 +789,8 @@ def forbid_work(monkeypatch, source):
         "_authenticate_assessment_occurrence",
         "_authenticate_assessment_inventory",
         "_revalidate_assessment_inventory",
+        "_prepare_assessment_inventory",
+        "_seal_prepared_assessment_inventory",
     ):
         monkeypatch.setattr(source, name, forbidden)
     for name in (
@@ -1457,7 +1461,7 @@ def test_execute_detach_projection_start_and_eleven_lock_order(
     events, stacks, selected = [], [], []
     project = domain.PolygonCompletedDailyStrategyRequest.to_dict
     reference_project = app.GovernedTechnicalArtifactReference.to_dict
-    consume = service._assessment_service._authenticate_assessment_occurrence
+    consume = assessment._select_prepared_assessment
     derive = domain.derive_governed_daily_technical_strategy
     validate = domain.validate_governed_daily_technical_strategy
 
@@ -1491,13 +1495,13 @@ def test_execute_detach_projection_start_and_eleven_lock_order(
             assert "derive" in events and "validate" in events
         return TIME
 
-    def occurrence(value):
+    def occurrence(prepared, value, **kwargs):
         assert events.count("clock") == 1
         assert project(value) == expected
         assert len(stacks[0].locks) == len(set(stacks[0].locks)) == 11
         selected.append(value)
         events.append("consume")
-        return consume(value)
+        return consume(prepared, value, **kwargs)
 
     def derivation(**kwargs):
         events.append("derive")
@@ -1515,9 +1519,7 @@ def test_execute_detach_projection_start_and_eleven_lock_order(
     )
     monkeypatch.setattr(app, "ExitStack", Stack)
     monkeypatch.setattr(service, "_clock", clock)
-    monkeypatch.setattr(
-        service._assessment_service, "_authenticate_assessment_occurrence", occurrence
-    )
+    monkeypatch.setattr(assessment, "_select_prepared_assessment", occurrence)
     monkeypatch.setattr(domain, "derive_governed_daily_technical_strategy", derivation)
     monkeypatch.setattr(
         domain, "validate_governed_daily_technical_strategy", validation
@@ -1580,12 +1582,10 @@ def test_execute_private_failure_types_only(
 ):
     service, request, _ = execute_case
 
-    def failed(value):
+    def failed(*args, **kwargs):
         raise failure(message)
 
-    monkeypatch.setattr(
-        service._assessment_service, "_authenticate_assessment_occurrence", failed
-    )
+    monkeypatch.setattr(assessment, "_select_prepared_assessment", failed)
     execute_refusal(service, request, reason)
 
 
@@ -1822,19 +1822,17 @@ def test_execute_complete_prior_inventory_before_new_selection(
         fact = app._canonical_bytes(projection)
     # Corrupt both independent pins to reach deep committed-fact authentication.
     service._committed = service._history_owner._state = (2, (fact,))
-    consume = service._assessment_service._authenticate_assessment_occurrence
+    consume = assessment._select_prepared_assessment
     calls = []
 
-    def occurrence(value):
+    def occurrence(prepared, value, **kwargs):
         calls.append(value)
         assert value != request, (
             "new source selected before complete prior authentication"
         )
-        return consume(value)
+        return consume(prepared, value, **kwargs)
 
-    monkeypatch.setattr(
-        service._assessment_service, "_authenticate_assessment_occurrence", occurrence
-    )
+    monkeypatch.setattr(assessment, "_select_prepared_assessment", occurrence)
     monkeypatch.setattr(domain, "derive_governed_daily_technical_strategy", forbidden)
     execute_refusal(service, request, reason)
     assert len(calls) == (0 if attack == "bytes" else 1)
@@ -1842,11 +1840,14 @@ def test_execute_complete_prior_inventory_before_new_selection(
 
 def test_execute_selected_pair_must_match_captured_inventory(execute_case, monkeypatch):
     service, request, _ = execute_case
-    capture = service._assessment_service._authenticate_assessment_inventory
+    capture = service._assessment_service._prepare_assessment_inventory
+
+    def incomplete(transaction):
+        prepared = capture(transaction)
+        return replace(prepared, pairs=prepared.pairs[1:])
+
     monkeypatch.setattr(
-        service._assessment_service,
-        "_authenticate_assessment_inventory",
-        lambda: capture()[1:],
+        service._assessment_service, "_prepare_assessment_inventory", incomplete
     )
     execute_refusal(service, request, R.SOURCE_MISMATCH)
 
@@ -1887,7 +1888,7 @@ def test_execute_original_cleanup_survives_owner_replacement(
     target, name = {
         "stage": (owner, "_stage_publication"),
         "copy": (app, "_public_result_copy"),
-        "seal": (service._assessment_service, "_revalidate_assessment_inventory"),
+        "seal": (service._assessment_service, "_seal_prepared_assessment_inventory"),
     }[phase]
     original = getattr(target, name)
 
@@ -1915,10 +1916,10 @@ def test_execute_final_seal_complete_inventory_and_preallocated_state(
     service, request, _ = execute_case
     source = service._assessment_service
     state = service._committed
-    seal = source._revalidate_assessment_inventory
+    seal = source._seal_prepared_assessment_inventory
     seen = []
 
-    def final_seal(expected):
+    def final_seal(expected, *transaction):
         frame = inspect.currentframe().f_back
         prepared = frame.f_locals
         next_state = prepared["next_state"]
@@ -1926,10 +1927,13 @@ def test_execute_final_seal_complete_inventory_and_preallocated_state(
         assert service._committed is state
         assert service._history_owner._pending is prepared["staged"]
         assert next_state == (2, (app._encode_result(public),))
-        assert len(expected) == 2  # New Strategy consumes only the first Assessment.
-        assert tuple(pair.assessment_fact for pair in expected) == source._committed[1]
+        assert len(expected.pairs) == 2  # Only the first is selected.
+        assert (
+            tuple(pair.assessment_fact for pair in expected.pairs)
+            == source._committed[1]
+        )
         seen.append(next_state)
-        seal(expected)
+        seal(expected, *transaction)
         # No local fallible dispatch may follow the complete seal.
         for name in (
             "_encode_result",
@@ -1964,7 +1968,7 @@ def test_execute_final_seal_complete_inventory_and_preallocated_state(
         ):
             monkeypatch.setattr(source, name, forbidden)
 
-    monkeypatch.setattr(source, "_revalidate_assessment_inventory", final_seal)
+    monkeypatch.setattr(source, "_seal_prepared_assessment_inventory", final_seal)
     public = service.execute(request)
     assert public.history_sequence == 1
     assert service._committed is service._history_owner._state is seen[0]
@@ -1993,7 +1997,7 @@ def test_execute_post_seal_direct_root_drift(execute_case, monkeypatch, target):
     source = service._assessment_service
     upstream = source._interpretation_service
     upstream_owner = upstream._history_owner
-    seal = source._revalidate_assessment_inventory
+    seal = source._seal_prepared_assessment_inventory
     key = (
         "_PolygonCompletedDailyProductionAssessmentApplicationService"
         "__consumption_roots"
@@ -2039,11 +2043,11 @@ def test_execute_post_seal_direct_root_drift(execute_case, monkeypatch, target):
     changed, name, replacement = targets[target]
     assert getattr(changed, name) is not replacement
 
-    def drift(expected):
-        seal(expected)
+    def drift(expected, *transaction):
+        seal(expected, *transaction)
         setattr(changed, name, replacement)
 
-    monkeypatch.setattr(source, "_revalidate_assessment_inventory", drift)
+    monkeypatch.setattr(source, "_seal_prepared_assessment_inventory", drift)
     with pytest.raises(Refused) as caught:
         service.execute(request)
     assert caught.value.reason == R.HISTORY_INVALID
@@ -2068,13 +2072,13 @@ def test_execute_post_seal_authentic_interpretation_commitment_replacement(
     assert (
         replacement == interpretation_state and replacement is not interpretation_state
     )
-    seal = source._revalidate_assessment_inventory
+    seal = source._seal_prepared_assessment_inventory
 
-    def drift(expected):
-        seal(expected)
+    def drift(expected, *transaction):
+        seal(expected, *transaction)
         monkeypatch.setattr(upstream, "_committed", replacement)
 
-    monkeypatch.setattr(source, "_revalidate_assessment_inventory", drift)
+    monkeypatch.setattr(source, "_seal_prepared_assessment_inventory", drift)
     execute_refusal(service, request, R.HISTORY_INVALID)
     assert service._committed is owner._state is state
     assert owner._pending is None
@@ -2203,7 +2207,7 @@ def test_execute_final_seal_catches_unrelated_real_support_loss(
         "validation": (domain, "validate_governed_daily_technical_strategy"),
     }[seam]
     original = getattr(target, name)
-    seal = service._assessment_service._revalidate_assessment_inventory
+    seal = service._assessment_service._seal_prepared_assessment_inventory
     sealing = []
 
     def remove(*args, **kwargs):
@@ -2214,13 +2218,13 @@ def test_execute_final_seal_catches_unrelated_real_support_loss(
             monkeypatch.setattr(tech._history, "_state", (state[0] - 1, state[1][:-1]))
         return value
 
-    def final(expected):
-        sealing.append(len(expected))
-        return seal(expected)
+    def final(expected, *transaction):
+        sealing.append(len(expected.pairs))
+        return seal(expected, *transaction)
 
     monkeypatch.setattr(target, name, remove)
     monkeypatch.setattr(
-        service._assessment_service, "_revalidate_assessment_inventory", final
+        service._assessment_service, "_seal_prepared_assessment_inventory", final
     )
     execute_refusal(service, request, R.HISTORY_INVALID)
     # Earlier prior-history rechecks may already detect the loss. On the final
@@ -2269,9 +2273,9 @@ def test_execute_complete_inventory_failure_categories(
 ):
     service, request, _ = execute_case
     name = (
-        "_authenticate_assessment_inventory"
+        "_prepare_assessment_inventory"
         if phase == "capture"
-        else "_revalidate_assessment_inventory"
+        else "_seal_prepared_assessment_inventory"
     )
 
     def fail(*args):
@@ -2336,11 +2340,12 @@ def test_execute_final_R_is_fingerprinted(execute_case, monkeypatch):
 
 def test_execute_wrong_authenticated_pair_is_source_mismatch(execute_case, monkeypatch):
     service, request, _ = execute_case
-    source = service._assessment_service
-    occurrence = source._authenticate_assessment_occurrence
+    occurrence = assessment._select_prepared_assessment
     other = strategy_request(execute_case[2])
     monkeypatch.setattr(
-        source, "_authenticate_assessment_occurrence", lambda request: occurrence(other)
+        assessment,
+        "_select_prepared_assessment",
+        lambda prepared, request: occurrence(prepared, other),
     )
     execute_refusal(service, request, R.SOURCE_MISMATCH)
 
@@ -2352,8 +2357,8 @@ def test_execute_final_seal_catches_earlier_support_loss_after_later_pair_work(
     source = service._assessment_service
     upstream = source._interpretation_service
     check_pair = assessment._check_assessment_pair
-    seal = source._revalidate_assessment_inventory
-    authenticate = upstream._authenticate_interpretation_occurrence
+    seal = source._seal_prepared_assessment_inventory
+    authenticate = upstream._authenticate_interpretation_support
     active, lost, selected = [], [], []
     with ExitStack() as stack:
         source._lock_inputs(stack)
@@ -2365,19 +2370,19 @@ def test_execute_final_seal_catches_earlier_support_loss_after_later_pair_work(
         if active and item.history_sequence == 2:
             lost.append(first_execution)
 
-    def support(**selectors):
-        selected.append(selectors["interpretation_execution_id"])
-        if lost and selectors["interpretation_execution_id"] == first_execution:
+    def support(item):
+        selected.append(item.execution_id)
+        if lost and item.execution_id == first_execution:
             raise interpretation._InterpretationHistoryInvalid("earlier support lost")
-        return authenticate(**selectors)
+        return authenticate(item)
 
-    def final(expected):
+    def final(expected, *transaction):
         active.append(True)
-        return seal(expected)
+        return seal(expected, *transaction)
 
     monkeypatch.setattr(assessment, "_check_assessment_pair", pair_work)
-    monkeypatch.setattr(upstream, "_authenticate_interpretation_occurrence", support)
-    monkeypatch.setattr(source, "_revalidate_assessment_inventory", final)
+    monkeypatch.setattr(upstream, "_authenticate_interpretation_support", support)
+    monkeypatch.setattr(source, "_seal_prepared_assessment_inventory", final)
     execute_refusal(service, request, R.HISTORY_INVALID)
     assert active and lost
     assert selected[-1] == first_execution
@@ -2389,10 +2394,10 @@ def test_execute_final_seal_rechecks_unselected_assessment_after_last_graph_work
     service, request, other = execute_case
     source = service._assessment_service
     upstream = source._interpretation_service
-    authenticate = upstream._authenticate_interpretation_occurrence
+    authenticate = upstream._authenticate_interpretation_support
     ids = app._graph_ids
     lost, sealed = [], []
-    seal = source._revalidate_assessment_inventory
+    seal = source._seal_prepared_assessment_inventory
     unselected_id = (
         other.assessment.source_interpretation_occurrence.interpretation_execution_id
     )
@@ -2403,22 +2408,22 @@ def test_execute_final_seal_rechecks_unselected_assessment_after_last_graph_work
             lost.append(True)
         return result
 
-    def support(**selectors):
-        if lost and selectors["interpretation_execution_id"] == unselected_id:
+    def support(item):
+        if lost and item.execution_id == unselected_id:
             raise interpretation._InterpretationHistoryInvalid(
                 "unselected support lost"
             )
-        return authenticate(**selectors)
+        return authenticate(item)
 
-    def final(expected):
+    def final(expected, *transaction):
         sealed.append(expected)
-        return seal(expected)
+        return seal(expected, *transaction)
 
     monkeypatch.setattr(app, "_graph_ids", graph_work)
-    monkeypatch.setattr(upstream, "_authenticate_interpretation_occurrence", support)
-    monkeypatch.setattr(source, "_revalidate_assessment_inventory", final)
+    monkeypatch.setattr(upstream, "_authenticate_interpretation_support", support)
+    monkeypatch.setattr(source, "_seal_prepared_assessment_inventory", final)
     execute_refusal(service, request, R.HISTORY_INVALID)
-    assert len(sealed) == 1 and len(sealed[0]) == 2
+    assert len(sealed) == 1 and len(sealed[0].pairs) == 2
 
 
 @pytest.mark.parametrize("copy_number", [1, 2])
@@ -2543,16 +2548,16 @@ def test_execute_prior_strategy_invalid_committed_assessment_is_history_invalid(
     refingerprint(projection)
     fact = app._canonical_bytes(projection)
     service._committed = service._history_owner._state = (2, (fact,))
-    consume = source._authenticate_assessment_occurrence
+    consume = assessment._select_prepared_assessment
     calls = []
 
-    def prior_only(value):
+    def prior_only(prepared, value, **kwargs):
         assert value.to_dict() == strategy_request(invalid).to_dict()
         calls.append(value)
-        return consume(value)
+        return consume(prepared, value, **kwargs)
 
-    monkeypatch.setattr(source, "_authenticate_assessment_occurrence", prior_only)
-    monkeypatch.setattr(source, "_authenticate_assessment_inventory", forbidden)
+    monkeypatch.setattr(assessment, "_select_prepared_assessment", prior_only)
+    monkeypatch.setattr(source, "_authenticate_assessment_occurrence", forbidden)
     monkeypatch.setattr(domain, "derive_governed_daily_technical_strategy", forbidden)
     monkeypatch.setattr(domain, "validate_governed_daily_technical_strategy", forbidden)
     failure = execute_refusal(service, strategy_request(other), R.HISTORY_INVALID)
@@ -2799,14 +2804,14 @@ def test_history_empty_selection_authenticates_and_seals_complete_inventory(
     if not empty:
         service.execute(request)
     source = service._assessment_service
-    capture = source._authenticate_assessment_inventory
+    capture = source._prepare_assessment_inventory
     authenticate = service._authenticate_history_locked
-    seal = source._revalidate_assessment_inventory
+    seal = source._seal_prepared_assessment_inventory
     events = []
 
-    def capture_all():
-        values = capture()
-        assert len(values) == 2
+    def capture_all(transaction):
+        values = capture(transaction)
+        assert len(values.pairs) == 2
         events.append("capture")
         return values
 
@@ -2814,15 +2819,18 @@ def test_history_empty_selection_authenticates_and_seals_complete_inventory(
         events.append("strategy")
         return authenticate(*args, **kwargs)
 
-    def final(expected):
-        assert len(expected) == 2
-        assert tuple(pair.assessment_fact for pair in expected) == source._committed[1]
+    def final(expected, *transaction):
+        assert len(expected.pairs) == 2
+        assert (
+            tuple(pair.assessment_fact for pair in expected.pairs)
+            == source._committed[1]
+        )
         events.append("seal")
-        return seal(expected)
+        return seal(expected, *transaction)
 
-    monkeypatch.setattr(source, "_authenticate_assessment_inventory", capture_all)
+    monkeypatch.setattr(source, "_prepare_assessment_inventory", capture_all)
     monkeypatch.setattr(service, "_authenticate_history_locked", complete)
-    monkeypatch.setattr(source, "_revalidate_assessment_inventory", final)
+    monkeypatch.setattr(source, "_seal_prepared_assessment_inventory", final)
     before = authority_snapshot(service)
     values = history_read(
         service, request.artifact_reference, TIME - timedelta(microseconds=1)
@@ -2948,15 +2956,17 @@ def test_history_structured_private_failures_ignore_diagnostic(
     service, request, _ = execute_case
     service.execute(request)
     name = {
-        "capture": "_authenticate_assessment_inventory",
-        "resolve": "_authenticate_assessment_occurrence",
-        "seal": "_revalidate_assessment_inventory",
+        "capture": "_prepare_assessment_inventory",
+        "resolve": "_select_prepared_assessment",
+        "seal": "_seal_prepared_assessment_inventory",
     }[phase]
 
-    def fail(*args):
+    def fail(*args, **kwargs):
         raise failure("identical diagnostic")
 
-    monkeypatch.setattr(service._assessment_service, name, fail)
+    monkeypatch.setattr(
+        assessment if phase == "resolve" else service._assessment_service, name, fail
+    )
     error = history_refusal(service, request.artifact_reference, reason)
     assert str(error.__cause__) in (
         "identical diagnostic",
@@ -3015,13 +3025,14 @@ def test_history_retained_pair_must_be_exactly_in_captured_inventory(
     service, request, other = execute_case
     service.execute(request)
     source = service._assessment_service
-    capture = source._authenticate_assessment_inventory
-    resolve = source._authenticate_assessment_occurrence
+    capture = source._prepare_assessment_inventory
+    resolve = assessment._select_prepared_assessment
 
-    def inventory():
-        pairs = capture()
+    def inventory(transaction):
+        prepared = capture(transaction)
+        pairs = prepared.pairs
         if attack == "omit":
-            return pairs[1:]
+            return replace(prepared, pairs=pairs[1:])
         if attack == "content_fact":
             pair = pairs[0]
             object.__setattr__(
@@ -3029,14 +3040,16 @@ def test_history_retained_pair_must_be_exactly_in_captured_inventory(
                 "assessment_fact",
                 app._canonical_bytes(pair.assessment.assessment.to_dict()),
             )
-        return pairs
+        return prepared
 
-    monkeypatch.setattr(source, "_authenticate_assessment_inventory", inventory)
+    monkeypatch.setattr(source, "_prepare_assessment_inventory", inventory)
     if attack == "other_pair":
         monkeypatch.setattr(
-            source,
-            "_authenticate_assessment_occurrence",
-            lambda value: resolve(strategy_request(other)),
+            assessment,
+            "_select_prepared_assessment",
+            lambda prepared, value, **kwargs: resolve(
+                prepared, strategy_request(other)
+            ),
         )
     history_refusal(service, request.artifact_reference, R.SOURCE_MISMATCH)
 
@@ -3097,12 +3110,12 @@ def test_history_public_graphs_from_final_bytes_fresh_disjoint_and_mutation_safe
     service.execute(request)
     state = service._committed
     captured, retained = [], []
-    capture = service._assessment_service._authenticate_assessment_inventory
+    capture = service._assessment_service._prepare_assessment_inventory
     copy_result = app._public_result_copy
 
-    def inventory():
-        result = capture()
-        captured.extend(result)
+    def inventory(transaction):
+        result = capture(transaction)
+        captured.extend(result.pairs)
         return result
 
     def copying(value):
@@ -3110,7 +3123,7 @@ def test_history_public_graphs_from_final_bytes_fresh_disjoint_and_mutation_safe
         return copy_result(value)
 
     monkeypatch.setattr(
-        service._assessment_service, "_authenticate_assessment_inventory", inventory
+        service._assessment_service, "_prepare_assessment_inventory", inventory
     )
     monkeypatch.setattr(app, "_public_result_copy", copying)
     one = history_read(service, request.artifact_reference)
@@ -3175,7 +3188,7 @@ def test_history_public_preparation_failures_are_atomic(
 
     monkeypatch.setattr(app, "_public_result_copy", corrupt)
     monkeypatch.setattr(
-        service._assessment_service, "_revalidate_assessment_inventory", forbidden
+        service._assessment_service, "_seal_prepared_assessment_inventory", forbidden
     )
     history_refusal(service, request.artifact_reference, R.PUBLICATION_FAILED)
 
@@ -3188,19 +3201,22 @@ def test_history_final_complete_seal_after_preparation_and_direct_return(
     service.execute(request)
     source = service._assessment_service
     before = authority_snapshot(service)
-    seal = source._revalidate_assessment_inventory
+    seal = source._seal_prepared_assessment_inventory
     calls = []
     cutoff = TIME if visible else TIME - timedelta(microseconds=1)
 
-    def final(expected):
+    def final(expected, *transaction):
         prepared = inspect.currentframe().f_back.f_locals
         public = prepared["public"]
         assert type(public) is tuple and len(public) == int(visible)
-        assert len(expected) == 2
-        assert tuple(pair.assessment_fact for pair in expected) == source._committed[1]
+        assert len(expected.pairs) == 2
+        assert (
+            tuple(pair.assessment_fact for pair in expected.pairs)
+            == source._committed[1]
+        )
         assert not mutable_ids(public) & mutable_ids(expected)
         calls.append(public)
-        seal(expected)
+        seal(expected, *transaction)
         for name in (
             "_encode_result",
             "_decode_result",
@@ -3243,7 +3259,7 @@ def test_history_final_complete_seal_after_preparation_and_direct_return(
         for name in (
             "_authenticate_assessment_inventory",
             "_authenticate_assessment_occurrence",
-            "_revalidate_assessment_inventory",
+            "_seal_prepared_assessment_inventory",
         ):
             monkeypatch.setattr(source, name, forbidden)
         monkeypatch.setattr(
@@ -3258,7 +3274,7 @@ def test_history_final_complete_seal_after_preparation_and_direct_return(
             for name in names:
                 monkeypatch.setattr(cls, name, property(forbidden))
 
-    monkeypatch.setattr(source, "_revalidate_assessment_inventory", final)
+    monkeypatch.setattr(source, "_seal_prepared_assessment_inventory", final)
     values = history_read(service, request.artifact_reference, cutoff)
     assert len(calls) == 1 and values is calls[0]
     assert_authority_unchanged(before)
@@ -3276,7 +3292,7 @@ def test_history_final_complete_seal_after_preparation_and_direct_return(
         if isinstance(node, ast.Expr)
         and isinstance(node.value, ast.Call)
         and isinstance(node.value.func, ast.Attribute)
-        and node.value.func.attr == "_revalidate_assessment_inventory"
+        and node.value.func.attr == "_seal_prepared_assessment_inventory"
     )
     tail = block.body[index + 1 :]
     assert (
@@ -3315,7 +3331,7 @@ def test_history_final_seal_catches_real_invisible_support_loss(
         "domain": (domain, "validate_governed_daily_technical_strategy"),
     }[seam]
     original = getattr(target, name)
-    seal = source._revalidate_assessment_inventory
+    seal = source._seal_prepared_assessment_inventory
     lost_support, sealed = [], []
 
     def late_work(*args, **kwargs):
@@ -3334,13 +3350,13 @@ def test_history_final_seal_catches_real_invisible_support_loss(
             lost_support.append(True)
         return result
 
-    def final(expected):
+    def final(expected, *transaction):
         sealed.append(expected)
-        assert len(expected) == 2
-        return seal(expected)
+        assert len(expected.pairs) == 2
+        return seal(expected, *transaction)
 
     monkeypatch.setattr(target, name, late_work)
-    monkeypatch.setattr(source, "_revalidate_assessment_inventory", final)
+    monkeypatch.setattr(source, "_seal_prepared_assessment_inventory", final)
     history_refusal(service, request.artifact_reference, R.HISTORY_INVALID, cutoff)
     assert lost_support and len(sealed) == 1
 
@@ -3367,7 +3383,7 @@ def test_history_post_seal_direct_drift_refuses_without_repair(
     source = service._assessment_service
     upstream = source._interpretation_service
     owner, state = service._history_owner, service._committed
-    seal = source._revalidate_assessment_inventory
+    seal = source._seal_prepared_assessment_inventory
     strategy_prefix = "_PolygonCompletedDailyProductionStrategyApplicationService__"
     assessment_prefix = "_PolygonCompletedDailyProductionAssessmentApplicationService__"
     targets = {
@@ -3397,12 +3413,12 @@ def test_history_post_seal_direct_drift_refuses_without_repair(
     assert getattr(changed, name) is not replacement
     after_callback = []
 
-    def drift(expected):
-        seal(expected)
+    def drift(expected, *transaction):
+        seal(expected, *transaction)
         setattr(changed, name, replacement)
         after_callback.append((service._committed, owner._state, owner._pending))
 
-    monkeypatch.setattr(source, "_revalidate_assessment_inventory", drift)
+    monkeypatch.setattr(source, "_seal_prepared_assessment_inventory", drift)
     with pytest.raises(Refused) as caught:
         history_read(service, request.artifact_reference)
     assert caught.value.reason == R.HISTORY_INVALID
@@ -3521,7 +3537,7 @@ def test_history_execute_concurrency_complete_old_or_new_state(
     old_state = service._committed
     held, release, waiting = Event(), Event(), Event()
     lock_inputs = service._lock_inputs
-    seal = service._assessment_service._revalidate_assessment_inventory
+    seal = service._assessment_service._seal_prepared_assessment_inventory
     stage = service._history_owner._stage_publication
     attempts = []
     captured = []
@@ -3534,7 +3550,7 @@ def test_history_execute_concurrency_complete_old_or_new_state(
         lock_inputs(stack)
 
     def capture(root, state, **kwargs):
-        if kwargs:  # Only history supplies complete expected inventory facts.
+        if inspect.currentframe().f_back.f_code.co_name == "get_result_history_as_of":
             captured.append(state)
         return authenticate(root, state, **kwargs)
 
@@ -3544,8 +3560,8 @@ def test_history_execute_concurrency_complete_old_or_new_state(
             held.set()
             assert release.wait(20)
 
-    def pause_seal(expected):
-        seal(expected)
+    def pause_seal(expected, *transaction):
+        seal(expected, *transaction)
         if first == "reader" and not held.is_set():
             held.set()
             assert release.wait(20)
@@ -3554,7 +3570,7 @@ def test_history_execute_concurrency_complete_old_or_new_state(
     monkeypatch.setattr(service, "_authenticate_history_locked", capture)
     monkeypatch.setattr(service._history_owner, "_stage_publication", pause_stage)
     monkeypatch.setattr(
-        service._assessment_service, "_revalidate_assessment_inventory", pause_seal
+        service._assessment_service, "_seal_prepared_assessment_inventory", pause_seal
     )
     with ThreadPoolExecutor(max_workers=2) as pool:
         if first == "writer":
@@ -3596,6 +3612,14 @@ def test_history_execute_concurrency_complete_old_or_new_state(
 
 def test_history_exact_original_eleven_lock_order_once(monkeypatch):
     source, upstream = publisher()
+    interpretation_source = source._interpretation_service
+    technical = interpretation_source._technical_service
+    root = vars(technical)[
+        "_PolygonCompletedDailyProductionTechnicalApplicationService__committed"
+    ]
+    technical._history = root.owner
+    monkeypatch.setattr(interpretation_source, "_authentication_retention", lambda: ())
+    prepare = source._prepare_assessment_inventory
     service = Service(source, forbidden)
     expected = [*upstream, service._history_owner._lock]
     stacks, seals = [], []
@@ -3605,19 +3629,19 @@ def test_history_exact_original_eleven_lock_order_once(monkeypatch):
             super().__init__()
             stacks.append(self)
 
-    def inventory():
+    def inventory(transaction):
         assert stacks[0].locks == expected
-        return ()
+        return prepare(transaction)
 
-    def seal(values):
-        assert values == ()
+    def seal(values, *transaction):
+        assert values.pairs == ()
         assert stacks[0].locks == expected
         assert all(lock.locked() for lock in expected)
         seals.append(True)
 
     monkeypatch.setattr(app, "ExitStack", Stack)
-    monkeypatch.setattr(source, "_authenticate_assessment_inventory", inventory)
-    monkeypatch.setattr(source, "_revalidate_assessment_inventory", seal)
+    monkeypatch.setattr(source, "_prepare_assessment_inventory", inventory)
+    monkeypatch.setattr(source, "_seal_prepared_assessment_inventory", seal)
     artifact = content().source_assessment_occurrence.artifact_reference
     assert history_read(service, artifact) == ()
     assert len(stacks) == 1 and seals == [True]
@@ -3658,7 +3682,7 @@ def test_history_final_seal_catches_unreturned_assessment_loss_after_copy(
     service.execute(request)
     source = service._assessment_service
     original = app._public_result_copy
-    seal = source._revalidate_assessment_inventory
+    seal = source._seal_prepared_assessment_inventory
     sealed = []
     original_state = source._committed
 
@@ -3668,13 +3692,13 @@ def test_history_final_seal_catches_unreturned_assessment_loss_after_copy(
         source._committed = source._history_owner._state = (2, original_state[1][:1])
         return public
 
-    def final(expected):
-        assert len(expected) == 2
+    def final(expected, *transaction):
+        assert len(expected.pairs) == 2
         sealed.append(True)
-        return seal(expected)
+        return seal(expected, *transaction)
 
     monkeypatch.setattr(app, "_public_result_copy", copying)
-    monkeypatch.setattr(source, "_revalidate_assessment_inventory", final)
+    monkeypatch.setattr(source, "_seal_prepared_assessment_inventory", final)
     state = service._committed
     with pytest.raises(Refused) as caught:
         history_read(service, request.artifact_reference)
@@ -3684,3 +3708,596 @@ def test_history_final_seal_catches_unreturned_assessment_loss_after_copy(
     assert service._history_owner._pending is None
     assert source._committed is source._history_owner._state
     assert source._committed == (2, original_state[1][:1])  # No read-side repair.
+
+
+@pytest.mark.parametrize("workflow", ["execute", "history"])
+@pytest.mark.parametrize("target", ["assessment", "interpretation"])
+@pytest.mark.parametrize("phase", ["preparation", "copy"])
+def test_prepared_transaction_start_commitment_continuity(
+    execute_case, monkeypatch, workflow, target, phase
+):
+    service, request, _ = execute_case
+    service.execute(request)
+    source = service._assessment_service
+    changed = source if target == "assessment" else source._interpretation_service
+    original = changed._committed
+    replacement = tuple(list(original))
+    assert replacement == original and replacement is not original
+    boundary, name = (
+        (source, "_prepare_assessment_inventory")
+        if phase == "preparation"
+        else (app, "_public_result_copy")
+    )
+    prepare = getattr(boundary, name)
+
+    def drift(*args, **kwargs):
+        result = prepare(*args, **kwargs)
+        monkeypatch.setattr(changed, "_committed", replacement)
+        monkeypatch.setattr(changed._history_owner, "_state", replacement)
+        return result
+
+    monkeypatch.setattr(boundary, name, drift)
+    if workflow == "execute":
+        execute_refusal(service, request, R.HISTORY_INVALID)
+    else:
+        strategy_state = service._committed
+        with pytest.raises(Refused) as caught:
+            history_read(service, request.artifact_reference)
+        assert caught.value.reason == R.HISTORY_INVALID
+        assert service._committed is service._history_owner._state is strategy_state
+        assert service._history_owner._pending is None
+    assert changed._committed is changed._history_owner._state is replacement
+
+
+@pytest.mark.parametrize("extra_technical", [False, True])
+def test_prepared_strategy_multiplicity_released_interpretation_topology(
+    authentic_execute_case, monkeypatch, extra_technical
+):
+    import sys
+    from contextlib import ExitStack
+
+    service, request, _ = authentic_execute_case
+    source = service._assessment_service
+    upstream = source._interpretation_service
+    tech = upstream._technical_service
+    bridge = tech._bridge_service
+    issued = tech._history._state[1][0]
+    original_bridge = bridge._history._state[1][0]
+    qualification = bridge._qualification_service
+    validity = qualification._validity_service
+    admission = validity._admission_service
+    stores = tuple(
+        x._history
+        for x in (
+            admission._construction_service,
+            admission._validation_service,
+            admission._freshness_service,
+            admission,
+            validity,
+            qualification,
+            bridge,
+            tech,
+        )
+    )
+    # Setup publication and detached mock payloads precede all counters. Mock only
+    # below the REAL injected Technical occurrence-authentication method.
+    with ExitStack() as stack:
+        service._lock_inputs(stack)
+        for store in stores:
+            for item in store._state[1]:
+                cls = type(item)
+                if hasattr(cls, "to_dict"):
+                    original = cls.to_dict
+                    projection = original(item)
+
+                    def projection_copy(
+                        self, _item=item, _data=projection, _old=original
+                    ):
+                        return deepcopy(_data) if self is _item else _old(self)
+
+                    monkeypatch.setattr(cls, "to_dict", projection_copy)
+                if hasattr(cls, "_validate"):
+                    original_validate = cls._validate
+
+                    def validation(
+                        self, *args, _item=item, _old=original_validate, **kwargs
+                    ):
+                        if self is not _item:
+                            return _old(self, *args, **kwargs)
+
+                    monkeypatch.setattr(cls, "_validate", validation)
+    monkeypatch.setattr(tech, "_validate_authority", lambda: None)
+    monkeypatch.setattr(tech, "_resolve", lambda *args: original_bridge)
+    monkeypatch.setattr(technical, "_source_lineage", lambda value: issued.source)
+    if extra_technical:
+        original = upstream._prepare_interpretation_correspondence
+
+        def extra(*args):
+            original(*args)
+            upstream._authenticate(issued)  # Additional REAL production boundary call.
+
+        monkeypatch.setattr(upstream, "_prepare_interpretation_correspondence", extra)
+    methods = {
+        "preparations": upstream._prepare_interpretation_inventory,
+        "seals": upstream._seal_prepared_interpretation_inventory,
+        "interpretation": upstream._authenticate_interpretation_occurrence,
+        "support": upstream._authenticate_interpretation_support,
+        "technical": tech._authenticate_occurrence,
+    }
+    codes = {method.__func__.__code__: name for name, method in methods.items()}
+    counts = dict.fromkeys(methods, 0)
+
+    def profile(frame, event, arg):
+        if event == "call" and frame.f_code in codes:
+            counts[codes[frame.f_code]] += 1
+
+    previous = sys.getprofile()
+    try:
+        sys.setprofile(profile)
+        service.execute(request)
+        service.execute(request)
+    finally:
+        sys.setprofile(previous)
+    expected = dict(preparations=2, seals=2, interpretation=0, support=12, technical=12)
+    if extra_technical:
+        with pytest.raises(AssertionError):
+            assert counts == expected
+        assert counts == expected | {"technical": 16}
+    else:
+        assert counts == expected
+
+
+@pytest.mark.parametrize("selection", ["visible", "cutoff", "unrelated", "empty"])
+def test_prepared_history_once_complete_before_filter_and_read_only(
+    execute_case, monkeypatch, selection
+):
+    service, request, _ = execute_case
+    if selection != "empty":
+        service.execute(request)
+    source = service._assessment_service
+    before = authority_snapshot(service)
+    prepare = source._prepare_assessment_inventory
+    seal = source._seal_prepared_assessment_inventory
+    events = []
+    visits = []
+    upstream = source._interpretation_service
+    authenticate = upstream._authenticate_interpretation_support
+
+    def support(request):
+        visits.append(request.history_sequence)
+        return authenticate(request)
+
+    monkeypatch.setattr(upstream, "_authenticate_interpretation_support", support)
+    monkeypatch.setattr(upstream, "_authenticate_interpretation_occurrence", forbidden)
+
+    def preparation(transaction):
+        prepared = prepare(transaction)
+        assert len(prepared.pairs) == 2
+        events.append("prepare")
+        return prepared
+
+    def final(prepared, *transaction):
+        events.append("seal")
+        return seal(prepared, *transaction)
+
+    monkeypatch.setattr(source, "_prepare_assessment_inventory", preparation)
+    monkeypatch.setattr(source, "_seal_prepared_assessment_inventory", final)
+    monkeypatch.setattr(source, "_authenticate_assessment_occurrence", forbidden)
+    artifact = request.artifact_reference
+    if selection == "unrelated":
+        artifact = replace(artifact, artifact_id="unrelated:artifact")
+    result = history_read(
+        service,
+        artifact,
+        TIME - timedelta(seconds=1) if selection == "cutoff" else TIME,
+    )
+    assert len(result) == int(selection == "visible")
+    assert visits == [1, 2, 1, 2, 1, 2]
+    assert events == ["prepare", "seal"]
+    assert_authority_unchanged(before)
+
+
+def _mutate_earlier_pair_during_final_preparation(service, monkeypatch):
+    source = service._assessment_service
+    seal = source._seal_prepared_assessment_inventory
+    check_pair = assessment._check_assessment_pair
+    upstream = source._interpretation_service
+    authenticate = upstream._authenticate_interpretation_support
+    active, ordinary, changed, support = [], [], [], []
+
+    def pair_work(item, interpretation_value):
+        check_pair(item, interpretation_value)
+        if not active or changed:
+            return
+        prepared = active[0]
+        ordinary.append(item.history_sequence)
+        if item is prepared.pairs[1].assessment:
+            assert ordinary == [1, 2]  # Pair 1's ordinary work already finished.
+            earlier = prepared.pairs[0].assessment
+            assert assessment._encode_result(earlier) == prepared.facts[0][0]
+            object.__setattr__(
+                earlier,
+                "execution_id",
+                "polygon_completed_daily_assessment:" + "e" * 32,
+            )
+            object.__setattr__(
+                earlier, "fingerprint", canonical_fingerprint(earlier._payload())
+            )
+            changed_fact = assessment._encode_result(earlier)
+            assert changed_fact != prepared.facts[0][0]  # Coherent, but different.
+            changed.append((earlier, changed_fact))
+
+    def final(prepared, *transaction):
+        active.append(prepared)
+        try:
+            return seal(prepared, *transaction)
+        finally:
+            active.pop()
+
+    def fresh(request):
+        if active:
+            support.append(request)
+        return authenticate(request)
+
+    monkeypatch.setattr(assessment, "_check_assessment_pair", pair_work)
+    monkeypatch.setattr(source, "_seal_prepared_assessment_inventory", final)
+    monkeypatch.setattr(upstream, "_authenticate_interpretation_support", fresh)
+    return changed, support
+
+
+def test_execute_final_seal_rejects_earlier_pair_mutation_during_later_preparation(
+    execute_case, monkeypatch
+):
+    service, request, _ = execute_case
+    before = authority_snapshot(service)
+    owner, state = service._history_owner, service._committed
+    changed, support = _mutate_earlier_pair_during_final_preparation(
+        service, monkeypatch
+    )
+
+    error = execute_refusal(service, request, R.SOURCE_MISMATCH)
+    assert isinstance(error.__cause__, assessment._AssessmentSourceMismatch)
+    assert_authority_unchanged(before)
+    assert owner._pending is None and not support
+    assert len(changed) == 1
+    earlier, changed_fact = changed[0]
+    assert assessment._encode_result(earlier) == changed_fact  # No graph repair.
+
+    # The fault fires only once; a new transaction must prepare fresh data and
+    # reuse the failed sequence without adopting the changed working graph.
+    result = service.execute(request)
+    assert result.history_sequence == state[0]
+    assert service._committed is owner._state
+    assert owner._pending is None
+    assert_authority_unchanged(before[1:])
+    assert assessment._encode_result(earlier) == changed_fact
+
+
+def test_history_final_seal_rejects_earlier_pair_mutation_during_later_preparation(
+    execute_case, monkeypatch
+):
+    service, request, _ = execute_case
+    issued = service.execute(request)
+    before = authority_snapshot(service)
+    changed, support = _mutate_earlier_pair_during_final_preparation(
+        service, monkeypatch
+    )
+
+    error = history_refusal(service, request.artifact_reference, R.SOURCE_MISMATCH)
+    assert isinstance(error.__cause__, assessment._AssessmentSourceMismatch)
+    assert_authority_unchanged(before)
+    assert service._history_owner._pending is None and not support
+    assert len(changed) == 1
+    earlier, changed_fact = changed[0]
+    assert assessment._encode_result(earlier) == changed_fact
+
+    values = history_read(service, request.artifact_reference)
+    assert [value.to_dict() for value in values] == [issued.to_dict()]
+    assert_authority_unchanged(before)  # Neither refused nor successful reads write.
+    assert assessment._encode_result(earlier) == changed_fact  # No repair/adoption.
+
+
+@pytest.mark.parametrize("workflow", ["execute", "history", "empty_history"])
+def test_option_c_unreferenced_interpretation_final_support_is_required(
+    execute_case, monkeypatch, workflow
+):
+    service, request, _ = execute_case
+    source = service._assessment_service
+    upstream = source._interpretation_service
+    third = interpretation._reconstruct_result(upstream._committed[1][1])
+    object.__setattr__(third, "history_sequence", 3)
+    object.__setattr__(third, "execution_id", interpretation._PREFIX + ":" + "e" * 32)
+    object.__setattr__(third, "fingerprint", canonical_fingerprint(third._payload()))
+    upstream._committed = upstream._history_owner._state = (
+        4,
+        (*upstream._committed[1], interpretation._encode_result(third)),
+    )
+    if workflow == "history":
+        service.execute(request)
+    if workflow == "empty_history":
+        source._committed = source._history_owner._state = (1, ())
+    original = upstream._authenticate_interpretation_support
+    seal = upstream._seal_prepared_interpretation_inventory
+    final, visits = [], []
+
+    def support(item):
+        if final:
+            visits.append(item.history_sequence)
+            if item.history_sequence == 3:
+                raise interpretation._InterpretationHistoryInvalid(
+                    "unreferenced original support lost"
+                )
+        return original(item)
+
+    def sealing(prepared, transaction):
+        assert len(prepared.items) == 3
+        final.append(True)
+        return seal(prepared, transaction)
+
+    monkeypatch.setattr(upstream, "_authenticate_interpretation_support", support)
+    monkeypatch.setattr(upstream, "_seal_prepared_interpretation_inventory", sealing)
+    monkeypatch.setattr(upstream, "_authenticate_interpretation_occurrence", forbidden)
+    before = authority_snapshot(service)
+    if workflow == "execute":
+        execute_refusal(service, request, R.HISTORY_INVALID)
+    else:
+        history_refusal(
+            service,
+            replace(request.artifact_reference, artifact_id="unrelated:artifact"),
+            R.HISTORY_INVALID,
+        )
+    assert len(final) == 1 and visits == [1, 2, 3]
+    assert_authority_unchanged(before)
+
+
+@pytest.mark.parametrize("workflow", ["execute", "history"])
+@pytest.mark.parametrize("field", ["_observed", "_retention"])
+def test_option_c_strategy_original_equal_anchor_replacement(
+    execute_case, monkeypatch, workflow, field
+):
+    service, request, _ = execute_case
+    source = service._assessment_service
+    upstream = source._interpretation_service
+    monkeypatch.setattr(upstream, field, ((),))
+    if workflow == "history":
+        service.execute(request)
+    original = getattr(upstream, field)
+    replacement = tuple(list(original))
+    prepare = source._prepare_assessment_inventory
+
+    def drift(transaction):
+        result = prepare(transaction)
+        monkeypatch.setattr(upstream, field, replacement)
+        return result
+
+    monkeypatch.setattr(source, "_prepare_assessment_inventory", drift)
+    before = authority_snapshot(service)
+    if workflow == "execute":
+        execute_refusal(service, request, R.HISTORY_INVALID)
+    else:
+        history_refusal(service, request.artifact_reference, R.HISTORY_INVALID)
+    assert replacement == original and replacement is not original
+    assert getattr(upstream, field) is replacement
+    assert_authority_unchanged(before)
+
+
+def test_option_c_new_assessment_absence_retains_refusal(execute_case):
+    service, request, _ = execute_case
+    execute_refusal(
+        service,
+        replace(request, assessment_history_sequence=99),
+        R.ASSESSMENT_UNAVAILABLE,
+    )
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_option_c_selector_miss_final_support_precedence(
+    execute_case, monkeypatch, corrupt
+):
+    from contextlib import contextmanager
+
+    service, request, _ = execute_case
+    consumer = service._assessment_service
+    upstream = consumer._interpretation_service
+    contexts = []
+    original_context = upstream._interpretation_transaction
+
+    @contextmanager
+    def context(witness):
+        with original_context(witness) as transaction:
+            contexts.append(transaction)
+            yield transaction
+
+    monkeypatch.setattr(upstream, "_interpretation_transaction", context)
+    prepare = consumer._prepare_assessment_inventory
+    original_state = upstream._technical_history._state
+    changed_state = (2, ())
+
+    def prepared(transaction):
+        result = prepare(transaction)
+        if corrupt:
+            monkeypatch.setattr(upstream._technical_history, "_state", changed_state)
+        return result
+
+    monkeypatch.setattr(consumer, "_prepare_assessment_inventory", prepared)
+    execute_refusal(
+        service,
+        replace(request, assessment_history_sequence=99),
+        R.HISTORY_INVALID if corrupt else R.ASSESSMENT_UNAVAILABLE,
+    )
+    assert upstream._technical_history._state is (
+        changed_state if corrupt else original_state
+    )
+    assert len(contexts) == 1
+    assert contexts[0].phase == "CLOSED" and not contexts[0].active
+    assert contexts[0].witness.closed
+
+
+def test_option_c_strategy_failure_closes_transaction(execute_case, monkeypatch):
+    from contextlib import contextmanager
+
+    service, request, _ = execute_case
+    upstream = service._assessment_service._interpretation_service
+    contexts = []
+    original = upstream._interpretation_transaction
+
+    @contextmanager
+    def context(witness):
+        with original(witness) as transaction:
+            contexts.append(transaction)
+            yield transaction
+
+    monkeypatch.setattr(upstream, "_interpretation_transaction", context)
+
+    def failed(**kwargs):
+        raise RuntimeError("Strategy failure")
+
+    monkeypatch.setattr(domain, "derive_governed_daily_technical_strategy", failed)
+    execute_refusal(service, request, R.SEMANTIC_FAILED)
+    assert len(contexts) == 1 and not contexts[0].active
+    assert contexts[0].phase == "CLOSED" and contexts[0].witness.closed
+    with pytest.raises(interpretation._InterpretationHistoryInvalid):
+        upstream._prepare_interpretation_inventory(contexts[0])
+
+
+@pytest.mark.parametrize(
+    "mutation", ["lifecycle", "routing", "missing_routing", "dtype_cache"]
+)
+def test_option_c_real_intra_final_sweep_corruption(
+    authentic_execute_case, monkeypatch, mutation
+):
+    from contextlib import contextmanager
+
+    import numpy as np
+    from pandas.core.internals.blocks import NumpyBlock
+    from test_historical_prices import _storage_without_dtype_cache
+
+    service, request, _ = authentic_execute_case
+    if mutation == "missing_routing":
+        request = replace(request, assessment_history_sequence=99)
+    upstream = service._assessment_service._interpretation_service
+    tech = upstream._technical_service
+    bridge = tech._bridge_service
+    admission = bridge._qualification_service._validity_service._admission_service
+    validation = admission._validation_service._history._state[1][0]
+    original_id = validation.companion.execution_id
+    historical = bridge._history._state[1][0].completed_prices._prices
+    _ = historical.content_fingerprint
+    manager = historical._frame._mgr
+    routing_field = (
+        "_blknos" if manager._blknos[2] != manager._blknos[3] else "_blklocs"
+    )
+    support_states = tuple(
+        (x._history, x._history._state)
+        for x in (
+            admission._construction_service,
+            admission._validation_service,
+            admission._freshness_service,
+            admission,
+            bridge._qualification_service._validity_service,
+            bridge._qualification_service,
+            bridge,
+            tech,
+        )
+    )
+    # Isolate shared fixture teardown; the live attached array remains the SAME
+    # array throughout capture, corruption, refusal and all assertions.
+    monkeypatch.setattr(manager, routing_field, getattr(manager, routing_field).copy())
+    routing = getattr(manager, routing_field)
+    original_routes = routing.copy()
+    assert original_routes[2] != original_routes[3]
+    blocks, axes = manager.blocks, manager.axes
+    fingerprint = historical._content_fingerprint
+    numeric = next(b for b in blocks if type(b) is NumpyBlock)
+    unchanged_storage = _storage_without_dtype_cache(historical)
+    contexts = []
+    original_context = upstream._interpretation_transaction
+
+    @contextmanager
+    def context(witness):
+        with original_context(witness) as transaction:
+            contexts.append(transaction)
+            yield transaction
+
+    monkeypatch.setattr(upstream, "_interpretation_transaction", context)
+    retention = upstream._authentication_retention
+    sweep = 0
+    earlier_checked = False
+    attacked = False
+    original_validation = type(validation)._validate
+
+    def validation_checked(self):
+        nonlocal earlier_checked
+        original_validation(self)
+        if sweep == 3 and self is validation:
+            earlier_checked = True
+
+    monkeypatch.setattr(type(validation), "_validate", validation_checked)
+
+    def retained():
+        nonlocal sweep, earlier_checked
+        sweep += 1
+        earlier_checked = False
+        return retention()
+
+    monkeypatch.setattr(upstream, "_authentication_retention", retained)
+    original_projection = technical.PolygonCompletedDailyTechnicalResult.to_dict
+
+    def late_projection(self):
+        nonlocal attacked
+        result = original_projection(self)
+        if sweep == 3 and earlier_checked and not attacked:
+            attacked = True
+            if mutation == "lifecycle":
+                object.__setattr__(
+                    validation.companion, "execution_id", "persistently-corrupt"
+                )
+            elif mutation == "dtype_cache":
+                assert numeric.values.dtype == np.dtype("float64")
+                monkeypatch.setitem(numeric._cache, "dtype", np.dtype("int64"))
+            else:
+                routing[2] = routing[3]
+        return result
+
+    monkeypatch.setattr(
+        technical.PolygonCompletedDailyTechnicalResult, "to_dict", late_projection
+    )
+    try:
+        error = execute_refusal(service, request, R.HISTORY_INVALID)
+        assert attacked and sweep == 3
+        assert contexts[0].phase == "CLOSED" and not contexts[0].active
+        assert contexts[0].witness.closed
+        assert all(owner._state is state for owner, state in support_states)
+        assert manager.blocks is blocks and manager.axes is axes
+        assert historical._content_fingerprint == fingerprint
+        if mutation == "lifecycle":
+            assert validation.companion.execution_id == "persistently-corrupt"
+            node = next(
+                node
+                for node in contexts[0].native_support[0]
+                if node[0] is validation.companion
+            )
+            assert node[5][node[3].index("execution_id")] is original_id
+        elif mutation == "dtype_cache":
+            assert isinstance(error.__cause__, assessment._AssessmentHistoryInvalid)
+            assert isinstance(
+                error.__cause__.__cause__, interpretation._InterpretationHistoryInvalid
+            )
+            assert _storage_without_dtype_cache(historical) == unchanged_storage
+            assert numeric._cache["dtype"] == np.dtype("int64")
+            assert numeric.values.dtype == np.dtype("float64")
+        else:
+            assert getattr(manager, routing_field) is routing
+            assert routing[2] != original_routes[2]
+            captured = next(
+                data
+                for retained, data, _ in contexts[0].native_support[1]
+                if retained is historical
+            )
+            assert captured.state[-1][-1][2] != (
+                int(manager._blknos[2]),
+                int(manager._blklocs[2]),
+            )
+    finally:
+        # Fixture teardown only, after proving persistent corruption and refusal.
+        object.__setattr__(validation.companion, "execution_id", original_id)

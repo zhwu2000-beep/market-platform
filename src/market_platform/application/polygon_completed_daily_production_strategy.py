@@ -10,7 +10,7 @@ from contextlib import ExitStack
 from copy import deepcopy
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import datetime
-from threading import Lock
+from threading import Lock, get_ident
 from typing import Any
 from uuid import uuid4
 
@@ -20,6 +20,9 @@ from market_platform.application import (
 )
 from market_platform.application import (
     polygon_completed_daily_production_assessment as assessment,
+)
+from market_platform.application import (
+    polygon_completed_daily_production_interpretation as i,
 )
 from market_platform.application import (
     polygon_completed_daily_production_technical as t,
@@ -427,6 +430,36 @@ class PolygonCompletedDailyProductionStrategyApplicationService:
         stack.enter_context(root.lock)
         self._check_locked_roots()
 
+    def _interpretation_ownership(self) -> i._InterpretationOwnership:
+        root = self.__root
+        interpretation = root.assessment_roots[2]
+        technical = interpretation._technical_service
+        bridge = technical._bridge_service
+        qualification = bridge._qualification_service
+        validity = qualification._validity_service
+        admission = validity._admission_service
+        locks = tuple(
+            service._history._lock
+            for service in (
+                admission._construction_service,
+                admission._validation_service,
+                admission._freshness_service,
+                admission,
+                validity,
+                qualification,
+                bridge,
+                technical,
+                interpretation,
+            )
+        ) + (root.assessment_lock, root.lock)
+        if any(type(lock) is not LockType or not lock.locked() for lock in locks):
+            raise assessment._AssessmentHistoryInvalid(
+                "complete Strategy locks required"
+            )
+        return i._InterpretationOwnership(
+            get_ident(), locks, root.assessment_owner, root.owner
+        )
+
     def _check_transaction(
         self,
         root: _StrategyRoot,
@@ -455,27 +488,23 @@ class PolygonCompletedDailyProductionStrategyApplicationService:
         root: _StrategyRoot,
         state: tuple[int, tuple[bytes, ...]],
         *,
-        inventory_facts: tuple[tuple[bytes, bytes], ...] | None = None,
+        inventory: assessment._PreparedAssessmentInventory,
+        prior: tuple[PolygonCompletedDailyStrategyResult, ...] | None = None,
     ) -> tuple[PolygonCompletedDailyStrategyResult, ...]:
         root.owner._validate()
-        prior = tuple(_reconstruct_result(fact) for fact in state[1])
+        if prior is None:
+            prior = tuple(_reconstruct_result(fact) for fact in state[1])
         for item, fact in zip(prior, state[1], strict=True):
             request = item.strategy.source_assessment_occurrence
             try:
-                pair = root.publisher._authenticate_assessment_occurrence(request)
+                pair = assessment._select_prepared_assessment(
+                    inventory, request, committed=True
+                )
             except assessment._AssessmentOccurrenceUnavailable as error:
                 raise assessment._AssessmentHistoryInvalid(
                     "committed Strategy source unavailable"
                 ) from error
             _check_pair(request.to_dict(), pair)
-            if (
-                inventory_facts is not None
-                and (pair.assessment_fact, pair.interpretation_fact)
-                not in inventory_facts
-            ):
-                raise assessment._AssessmentSourceMismatch(
-                    "retained pair differs from complete captured inventory"
-                )
             _check_strategy_source(item, pair)
             _validate_committed_assessment(pair)
             domain.validate_governed_daily_technical_strategy(
@@ -522,18 +551,26 @@ class PolygonCompletedDailyProductionStrategyApplicationService:
                 self._lock_inputs(stack)
                 # A successful execute preceding lock acquisition is valid history.
                 state = self._committed
-                self._check_transaction(root, state, None)
                 source_roots = root.assessment_roots
                 source_state = publisher._committed
                 interpretation_state = source_roots[2]._committed
-                inventory = publisher._authenticate_assessment_inventory()
+                interpretation_ownership = self._interpretation_ownership()
+                interpretation_transaction = stack.enter_context(
+                    source_roots[2]._interpretation_transaction(
+                        interpretation_ownership
+                    )
+                )
+                self._check_transaction(root, state, None)
+                inventory = publisher._prepare_assessment_inventory(
+                    interpretation_transaction
+                )
                 inventory_facts = tuple(
                     (pair.assessment_fact, pair.interpretation_fact)
-                    for pair in inventory
+                    for pair in inventory.pairs
                 )
                 self._check_transaction(root, state, None)
                 prior = self._authenticate_history_locked(
-                    root, state, inventory_facts=inventory_facts
+                    root, state, inventory=inventory
                 )
                 self._check_transaction(root, state, None)
 
@@ -569,7 +606,7 @@ class PolygonCompletedDailyProductionStrategyApplicationService:
                 if (
                     tuple(
                         (pair.assessment_fact, pair.interpretation_fact)
-                        for pair in inventory
+                        for pair in inventory.pairs
                     )
                     != inventory_facts
                 ):
@@ -584,7 +621,15 @@ class PolygonCompletedDailyProductionStrategyApplicationService:
                 namespace = root.namespace
                 # The return tuple and every local projection/copy/check are ready.
                 # Seal all Assessment facts and original support, even on no match.
-                publisher._revalidate_assessment_inventory(inventory)
+                publisher._seal_prepared_assessment_inventory(
+                    inventory,
+                    source_state,
+                    interpretation_state,
+                    source_roots,
+                    root.assessment_lock,
+                    root.interpretation_lock,
+                    interpretation_transaction,
+                )
                 if (
                     object.__getattribute__(self, "__dict__") is not own
                     or object.__getattribute__(publisher, "__dict__") is not source
@@ -703,19 +748,48 @@ class PolygonCompletedDailyProductionStrategyApplicationService:
                 self._lock_inputs(stack)
                 # A predecessor may commit while this execution waits for the chain.
                 state = self._committed
+                source_roots = root.assessment_roots
+                source_state = publisher._committed
+                interpretation_state = source_roots[2]._committed
+                interpretation_ownership = self._interpretation_ownership()
+                interpretation_transaction = stack.enter_context(
+                    source_roots[2]._interpretation_transaction(
+                        interpretation_ownership
+                    )
+                )
                 staged = None
                 staging = False
                 try:
                     self._check_transaction(root, state, None)
-                    prior = self._authenticate_history_locked(root, state)
-                    self._check_transaction(root, state, None)
-                    inventory = publisher._authenticate_assessment_inventory()
+                    owner._validate()
+                    prior = tuple(_reconstruct_result(fact) for fact in state[1])
+                    inventory = publisher._prepare_assessment_inventory(
+                        interpretation_transaction
+                    )
                     inventory_facts = tuple(
                         (pair.assessment_fact, pair.interpretation_fact)
-                        for pair in inventory
+                        for pair in inventory.pairs
                     )
                     self._check_transaction(root, state, None)
-                    pair = publisher._authenticate_assessment_occurrence(request)
+                    prior = self._authenticate_history_locked(
+                        root, state, inventory=inventory, prior=prior
+                    )
+                    self._check_transaction(root, state, None)
+                    try:
+                        pair = assessment._select_prepared_assessment(
+                            inventory, request
+                        )
+                    except assessment._AssessmentOccurrenceUnavailable:
+                        publisher._seal_prepared_assessment_inventory(
+                            inventory,
+                            source_state,
+                            interpretation_state,
+                            source_roots,
+                            root.assessment_lock,
+                            root.interpretation_lock,
+                            interpretation_transaction,
+                        )
+                        raise
                     _check_pair(request_before, pair)
                     if (pair.assessment_fact, pair.interpretation_fact) not in (
                         inventory_facts
@@ -803,7 +877,7 @@ class PolygonCompletedDailyProductionStrategyApplicationService:
 
                     reason = reasons.HISTORY_INVALID
                     self._check_transaction(root, state, staged)
-                    self._authenticate_history_locked(root, state)
+                    self._authenticate_history_locked(root, state, inventory=inventory)
                     _validate_committed_assessment(pair)
                     reason = reasons.SEMANTIC_FAILED
                     domain.validate_governed_daily_technical_strategy(
@@ -820,7 +894,7 @@ class PolygonCompletedDailyProductionStrategyApplicationService:
                     if (
                         tuple(
                             (item.assessment_fact, item.interpretation_fact)
-                            for item in inventory
+                            for item in inventory.pairs
                         )
                         != inventory_facts
                     ):
@@ -860,14 +934,19 @@ class PolygonCompletedDailyProductionStrategyApplicationService:
                     own = vars(self)
                     source = vars(publisher)
                     namespace = root.namespace
-                    source_roots = root.assessment_roots
-                    source_state = publisher._committed
                     interpretation_publisher = source_roots[2]
                     upstream = vars(interpretation_publisher)
-                    interpretation_state = upstream["_committed"]
                     # Every fallible local operation and the entire next state are
                     # complete. This seals ALL captured pairs, including unrelated ones.
-                    publisher._revalidate_assessment_inventory(inventory)
+                    publisher._seal_prepared_assessment_inventory(
+                        inventory,
+                        source_state,
+                        interpretation_state,
+                        source_roots,
+                        root.assessment_lock,
+                        root.interpretation_lock,
+                        interpretation_transaction,
+                    )
                     if (
                         object.__getattribute__(self, "__dict__") is not own
                         or object.__getattribute__(publisher, "__dict__") is not source

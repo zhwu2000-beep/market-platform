@@ -4154,6 +4154,11 @@ _PRIVATE_TOP_LEVEL = {
     "_AssessmentSourceMismatch",
     "_AssessmentPair",
     "_check_assessment_pair",
+    "_PreparedAssessmentInventory",
+    "_assessment_selector_fact",
+    "_check_prepared_assessment_facts",
+    "_check_prepared_assessment_inventory",
+    "_select_prepared_assessment",
 }
 _PRIVATE_METHODS = {
     "_check_consumption_roots",
@@ -4162,6 +4167,8 @@ _PRIVATE_METHODS = {
     "_authenticate_assessment_occurrence",
     "_authenticate_assessment_inventory",
     "_revalidate_assessment_inventory",
+    "_prepare_assessment_inventory",
+    "_seal_prepared_assessment_inventory",
 }
 _PRIVATE_IMPORT = (
     "from market_platform.research.governed_daily_technical_strategy "
@@ -4413,6 +4420,39 @@ def consumption_case(monkeypatch):
     service = Service(publisher, execution_clock=lambda: TIME)
     first = service.execute(assessment_request(values[0]))
     second = service.execute(assessment_request(values[1]))
+
+    # Real Option C batch/context; only original upstream support is mocked.
+    def upstream_store(index):
+        return SimpleNamespace(_lock=locks[index], _state=(1, ()))
+
+    admission = SimpleNamespace(
+        _construction_service=SimpleNamespace(_history=upstream_store(0)),
+        _validation_service=SimpleNamespace(_history=upstream_store(1)),
+        _freshness_service=SimpleNamespace(_history=upstream_store(2)),
+        _history=upstream_store(3),
+    )
+    validity = SimpleNamespace(_admission_service=admission, _history=upstream_store(4))
+    qualification = SimpleNamespace(
+        _validity_service=validity, _history=upstream_store(5)
+    )
+    bridge = SimpleNamespace(
+        _qualification_service=qualification, _history=upstream_store(6)
+    )
+    technical = SimpleNamespace(_bridge_service=bridge, _history=upstream_store(7))
+    publisher._technical_service = technical
+    publisher._technical_history = technical._history
+    publisher._observed = publisher._retention = ()
+    shared_technical = object()
+
+    def entry_support(item):
+        assert all(lock.locked() for lock in locks)
+        calls.append(_interpretation_selectors(item))
+        return shared_technical, None, {"shared": 1}
+
+    monkeypatch.setattr(publisher, "_authentication_retention", lambda: ())
+    monkeypatch.setattr(
+        publisher, "_authenticate_interpretation_support", entry_support
+    )
     calls.clear()
     return service, first, second, values, calls
 
@@ -5407,3 +5447,439 @@ def test_slice2_historical_checkpoint_has_explicit_owned_scope(
         test_frozen_checkpoint_files_unchanged()
         assert len(commands) == 3
     assert commands
+
+
+# Prepared transactions retain data only; standalone consumption stays fresh.
+def _prepared_transaction(service, stack):
+    from test_polygon_completed_daily_production_interpretation import _option_c_enter
+
+    roots = vars(service)[
+        "_PolygonCompletedDailyProductionAssessmentApplicationService__consumption_roots"
+    ]
+    return (
+        service._committed,
+        roots[2]._committed,
+        roots,
+        roots[0]._lock,
+        roots[3]._lock,
+        _option_c_enter(stack, roots[2]),
+    )
+
+
+def test_prepared_inventory_private_exact_data_and_complete(consumption_case):
+    service, _, _, _, calls = consumption_case
+    with ExitStack() as stack:
+        service._lock_inputs(stack)
+        transaction = _prepared_transaction(service, stack)
+        prepared = service._prepare_assessment_inventory(transaction[-1])
+        assert type(prepared) is app._PreparedAssessmentInventory
+        assert is_dataclass(prepared) and not hasattr(prepared, "__dict__")
+        assert tuple(field.name for field in fields(prepared)) == (
+            "pairs",
+            "facts",
+            "selectors",
+            "interpretation_selectors",
+            "interpretations",
+        )
+        assert "_PreparedAssessmentInventory" not in app.__all__
+        assert tuple(fact[0] for fact in prepared.facts) == service._committed[1]
+        assert len(prepared.pairs) == 2 and len(calls) == 4
+        with pytest.raises(FrozenInstanceError):
+            prepared.pairs = ()
+
+        def data_only(value):
+            assert not callable(value)
+            assert value is not service and value is not service._history_owner
+            assert value is not service._interpretation_service
+            if is_dataclass(value):
+                for field in fields(value):
+                    data_only(getattr(value, field.name))
+            elif type(value) in (tuple, list):
+                for item in value:
+                    data_only(item)
+            elif type(value) is dict:
+                for key, item in value.items():
+                    data_only(key)
+                    data_only(item)
+            else:
+                assert type(value) in (
+                    str,
+                    bytes,
+                    int,
+                    float,
+                    bool,
+                    type(None),
+                    datetime,
+                )
+
+        data_only(prepared)
+        with pytest.raises(TypeError):
+            app._select_prepared_assessment(
+                prepared.pairs, _strategy_request(prepared.pairs[0].assessment)
+            )
+        service._seal_prepared_assessment_inventory(prepared, *transaction)
+        assert len(calls) == 6
+        service._authenticate_assessment_occurrence(
+            _strategy_request(prepared.pairs[0].assessment)
+        )
+        assert len(calls) == 10  # A later independent call reauthenticates everything.
+
+
+@pytest.mark.parametrize("committed", [False, True])
+@pytest.mark.parametrize(
+    "field",
+    [
+        "artifact_reference",
+        "assessment_history_namespace_id",
+        "assessment_history_sequence",
+        "assessment_execution_id",
+        "assessment_fingerprint",
+    ],
+)
+def test_prepared_local_five_selectors_and_stage(consumption_case, field, committed):
+    service, first, second, _, calls = consumption_case
+    with ExitStack() as stack:
+        service._lock_inputs(stack)
+        transaction = _prepared_transaction(service, stack)
+        prepared = service._prepare_assessment_inventory(transaction[-1])
+        before = len(calls)
+        request = _strategy_request(first)
+        assert (
+            app._select_prepared_assessment(prepared, request).assessment_fact
+            == (prepared.facts[0][0])
+        )
+        if field == "artifact_reference":
+            value = replace(request.artifact_reference, artifact_id="other:artifact")
+        elif field == "assessment_history_namespace_id":
+            value = "polygon_completed_daily_assessment_history:" + "f" * 32
+        else:
+            value = getattr(_strategy_request(second), field)
+        request = replace(request, **{field: value})
+        failure = (
+            app._AssessmentHistoryInvalid
+            if committed
+            else app._AssessmentOccurrenceUnavailable
+        )
+        with pytest.raises(failure):
+            app._select_prepared_assessment(prepared, request, committed=committed)
+        assert len(calls) == before
+
+
+@pytest.mark.parametrize("attack", ["pair", "fact", "selector", "binding"])
+def test_prepared_working_data_mutation_is_source_mismatch(consumption_case, attack):
+    service, first, _, _, _ = consumption_case
+    with ExitStack() as stack:
+        service._lock_inputs(stack)
+        transaction = _prepared_transaction(service, stack)
+        prepared = service._prepare_assessment_inventory(transaction[-1])
+        if attack == "pair":
+            object.__setattr__(prepared.pairs[0].assessment, "execution_id", "changed")
+        elif attack == "fact":
+            object.__setattr__(prepared.pairs[0], "assessment_fact", b"changed")
+        elif attack == "selector":
+            object.__setattr__(
+                prepared, "selectors", (b"changed", *prepared.selectors[1:])
+            )
+        else:
+            object.__setattr__(
+                prepared.interpretation_selectors[0], "interpretation_fingerprint", FP
+            )
+        # Invalid graph codecs are history invalid at the seal boundary; canonical
+        # fact/binding drift is source mismatch. Use coherent graph mutation below.
+        if attack == "pair":
+            object.__setattr__(
+                prepared.pairs[0].assessment,
+                "execution_id",
+                "polygon_completed_daily_assessment:" + "e" * 32,
+            )
+            object.__setattr__(
+                prepared.pairs[0].assessment,
+                "fingerprint",
+                canonical_fingerprint(prepared.pairs[0].assessment._payload()),
+            )
+        with pytest.raises(app._AssessmentSourceMismatch):
+            app._select_prepared_assessment(prepared, _strategy_request(first))
+        with pytest.raises(app._AssessmentSourceMismatch):
+            service._seal_prepared_assessment_inventory(prepared, *transaction)
+
+
+@pytest.mark.parametrize("target", ["assessment", "interpretation"])
+def test_prepared_seal_original_equal_commitments_not_adopted(consumption_case, target):
+    service, _, _, _, calls = consumption_case
+    with ExitStack() as stack:
+        service._lock_inputs(stack)
+        transaction = _prepared_transaction(service, stack)
+        prepared = service._prepare_assessment_inventory(transaction[-1])
+        publisher = (
+            service if target == "assessment" else service._interpretation_service
+        )
+        before = publisher._committed
+        replacement = tuple(list(before))
+        assert replacement == before and replacement is not before
+        publisher._committed = publisher._history_owner._state = replacement
+        count = len(calls)
+        with pytest.raises(app._AssessmentHistoryInvalid):
+            service._seal_prepared_assessment_inventory(prepared, *transaction)
+        assert len(calls) == count  # Continuity must precede fresh support.
+        assert publisher._committed is publisher._history_owner._state is replacement
+
+
+@pytest.mark.parametrize("lost", [0, 1])
+def test_prepared_seal_complete_fresh_support_and_loss(
+    consumption_case, monkeypatch, lost
+):
+    service, _, _, _, _ = consumption_case
+    publisher = service._interpretation_service
+    authenticate = publisher._authenticate_interpretation_support
+    with ExitStack() as stack:
+        service._lock_inputs(stack)
+        transaction = _prepared_transaction(service, stack)
+        prepared = service._prepare_assessment_inventory(transaction[-1])
+        visits = []
+
+        def support(item):
+            visits.append(item.history_sequence)
+            if len(visits) == lost + 1:
+                raise i._InterpretationOccurrenceUnavailable("lost original support")
+            return authenticate(item)
+
+        monkeypatch.setattr(publisher, "_authenticate_interpretation_support", support)
+        with pytest.raises(app._AssessmentHistoryInvalid):
+            service._seal_prepared_assessment_inventory(prepared, *transaction)
+        assert visits == list(range(1, lost + 2))
+
+
+def test_prepared_seal_no_local_work_after_fresh_support(consumption_case, monkeypatch):
+    service, _, _, _, _ = consumption_case
+    with ExitStack() as stack:
+        service._lock_inputs(stack)
+        transaction = _prepared_transaction(service, stack)
+        prepared = service._prepare_assessment_inventory(transaction[-1])
+        publisher = service._interpretation_service
+        support = publisher._confirm_interpretation_support
+        visits = []
+
+        def no_local_work(*args, **kwargs):
+            pytest.fail("local work after fresh support")
+
+        def fresh(inventory, trusted):
+            result = support(inventory, trusted)
+            visits.extend(item.history_sequence for item in inventory.items)
+            if visits == [1, 2]:
+                for name in (
+                    "_encode_result",
+                    "_canonical_bytes",
+                    "_graph_ids",
+                    "deepcopy",
+                    "_check_assessment_pair",
+                    "_check_prepared_assessment_inventory",
+                ):
+                    monkeypatch.setattr(app, name, no_local_work)
+                monkeypatch.setattr(i, "_encode_result", no_local_work)
+                monkeypatch.setattr(service, "_check_consumption_roots", no_local_work)
+            return result
+
+        monkeypatch.setattr(publisher, "_confirm_interpretation_support", fresh)
+        service._seal_prepared_assessment_inventory(prepared, *transaction)
+        assert visits == [1, 2]
+
+
+@pytest.mark.parametrize("field", ["assessment_fact", "interpretation_fact"])
+def test_prepared_rejects_mutable_fact_carriers(consumption_case, field):
+    service, first, _, _, _ = consumption_case
+    with ExitStack() as stack:
+        service._lock_inputs(stack)
+        transaction = _prepared_transaction(service, stack)
+        prepared = service._prepare_assessment_inventory(transaction[-1])
+        pair = prepared.pairs[0]
+        object.__setattr__(pair, field, bytearray(getattr(pair, field)))
+        with pytest.raises(app._AssessmentSourceMismatch):
+            app._select_prepared_assessment(prepared, _strategy_request(first))
+
+
+@pytest.mark.parametrize("index", [1, 2])
+@pytest.mark.parametrize(
+    "field", ["history_namespace_id", "history_sequence", "execution_id", "fingerprint"]
+)
+def test_prepared_final_seal_exact_fresh_occurrence(
+    consumption_case, monkeypatch, index, field
+):
+    service, _, _, _, _ = consumption_case
+    with ExitStack() as stack:
+        service._lock_inputs(stack)
+        transaction = _prepared_transaction(service, stack)
+        prepared = service._prepare_assessment_inventory(transaction[-1])
+        publisher = service._interpretation_service
+        support = publisher._seal_prepared_interpretation_inventory
+        visits = []
+
+        def changed(inventory, trusted):
+            support(inventory, trusted)
+            result = inventory.items[index - 1]
+            visits.append(index)
+            object.__setattr__(
+                result, field, 99 if field == "history_sequence" else "changed"
+            )
+
+        monkeypatch.setattr(
+            publisher, "_seal_prepared_interpretation_inventory", changed
+        )
+        with pytest.raises(app._AssessmentSourceMismatch):
+            service._seal_prepared_assessment_inventory(prepared, *transaction)
+        assert visits == [index]
+
+
+def test_prepared_seal_ast_support_loop_and_direct_tail_only():
+    tree = ast.parse(inspect.getsource(app))
+    method = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_seal_prepared_assessment_inventory"
+    )
+    body = method.body[1].body
+    index = next(
+        index
+        for index, node in enumerate(body)
+        if isinstance(node, ast.For)
+        and isinstance(node.iter, ast.Name)
+        and node.iter.id == "seal_expectations"
+    )
+    loop = body[index]
+    recheck = body[index - 2]
+    assert "_seal_prepared_interpretation_inventory" in ast.unparse(body[index - 1])
+    assert isinstance(recheck, ast.Try)
+    assert len(recheck.body) == 1
+    assert ast.unparse(recheck.body[0]) == "_check_prepared_assessment_facts(prepared)"
+    checker = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_check_prepared_assessment_facts"
+    )
+    assert "_check_assessment_pair" not in ast.unparse(checker)
+    assert "_authenticate_consumption_source" not in ast.unparse(checker)
+    assert [type(node) for node in loop.body] == [ast.If]
+    assert {
+        node.func.attr if isinstance(node.func, ast.Attribute) else node.func.id
+        for node in ast.walk(loop)
+        if isinstance(node, ast.Call)
+    } == {"type", "_AssessmentSourceMismatch"}
+    tail = body[index + 1 :]
+    assert len(tail) == 1 and isinstance(tail[0], ast.If)
+    assert {
+        node.func.id for node in ast.walk(tail[0]) if isinstance(node, ast.Call)
+    } == {"_AssessmentHistoryInvalid"}
+
+
+@pytest.mark.parametrize("target", ["assessment", "interpretation", "selector"])
+def test_prepared_final_recheck_classifies_late_codec_drift(
+    consumption_case, monkeypatch, target
+):
+    service, _, _, _, calls = consumption_case
+    with ExitStack() as stack:
+        service._lock_inputs(stack)
+        transaction = _prepared_transaction(service, stack)
+        prepared = service._prepare_assessment_inventory(transaction[-1])
+        check_pair = app._check_assessment_pair
+        mutations = []
+
+        def later_pair(item, interpretation_value):
+            check_pair(item, interpretation_value)
+            if item is prepared.pairs[1].assessment:
+                value = (
+                    prepared.interpretation_selectors[0]
+                    if target == "selector"
+                    else getattr(prepared.pairs[0], target)
+                )
+                field = (
+                    "interpretation_execution_id"
+                    if target == "selector"
+                    else "execution_id"
+                )
+                object.__setattr__(value, field, "invalid")
+                mutations.append((value, field))
+
+        monkeypatch.setattr(app, "_check_assessment_pair", later_pair)
+        before = len(calls)
+        with pytest.raises(app._AssessmentSourceMismatch):
+            service._seal_prepared_assessment_inventory(prepared, *transaction)
+        assert len(calls) == before  # Drift is rejected before fresh support.
+        assert len(mutations) == 1
+        value, field = mutations[0]
+        assert getattr(value, field) == "invalid"  # Never repair the working data.
+
+
+def test_option_c_complete_upstream_before_local_binding_and_one_final_seal(
+    consumption_case, monkeypatch
+):
+    service, _, _, _, calls = consumption_case
+    publisher = service._interpretation_service
+    select = i._select_prepared_interpretation
+    prepare = publisher._prepare_interpretation_inventory
+    seal = publisher._seal_prepared_interpretation_inventory
+    events = []
+    selected = []
+
+    def preparing(transaction):
+        result = prepare(transaction)
+        events.append("prepare")
+        return result
+
+    def selecting(inventory, selector, transaction):
+        assert events == ["prepare"]
+        assert len(calls) == 4
+        value = select(inventory, selector, transaction)
+        selected.append(value.history_sequence)
+        return value
+
+    def sealing(inventory, transaction):
+        assert selected == [1, 2, 1, 2]
+        events.append("seal")
+        return seal(inventory, transaction)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("standalone selector authentication returned to Option C")
+
+    monkeypatch.setattr(publisher, "_prepare_interpretation_inventory", preparing)
+    monkeypatch.setattr(publisher, "_seal_prepared_interpretation_inventory", sealing)
+    monkeypatch.setattr(publisher, "_authenticate_interpretation_occurrence", forbidden)
+    monkeypatch.setattr(i, "_select_prepared_interpretation", selecting)
+    with ExitStack() as stack:
+        service._lock_inputs(stack)
+        transaction = _prepared_transaction(service, stack)
+        prepared = service._prepare_assessment_inventory(transaction[-1])
+        assert selected == [1, 2]
+        service._seal_prepared_assessment_inventory(prepared, *transaction)
+        assert events == ["prepare", "seal"] and len(calls) == 6
+
+
+@pytest.mark.parametrize("change", ["missing", "lineage"])
+def test_option_c_committed_source_failure_classification(consumption_case, change):
+    service, first, _, _, calls = consumption_case
+    item = app._reconstruct_result(app._encode_result(first))
+    content = item.assessment
+    if change == "missing":
+        content = replace(
+            content,
+            source_interpretation_occurrence=replace(
+                content.source_interpretation_occurrence,
+                interpretation_history_sequence=99,
+            ),
+        )
+        expected = app._AssessmentHistoryInvalid
+    else:
+        content = replace(content, source_interpretation_content_fingerprint=FP)
+        expected = app._AssessmentSourceMismatch
+    object.__setattr__(item, "assessment", content)
+    object.__setattr__(item, "fingerprint", canonical_fingerprint(item._payload()))
+    service._committed = service._history_owner._state = (
+        3,
+        (app._encode_result(item), service._committed[1][1]),
+    )
+    with ExitStack() as stack:
+        service._lock_inputs(stack)
+        transaction = _prepared_transaction(service, stack)
+        with pytest.raises(expected):
+            service._prepare_assessment_inventory(transaction[-1])
+        assert len(calls) == 4

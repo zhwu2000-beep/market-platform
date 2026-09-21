@@ -358,6 +358,110 @@ class _AssessmentPair:
     interpretation_fact: bytes
 
 
+@dataclass(frozen=True, slots=True)
+class _PreparedAssessmentInventory:
+    """Transaction-local detached data; never authority for an independent call."""
+
+    pairs: tuple[_AssessmentPair, ...]
+    facts: tuple[tuple[bytes, bytes], ...]
+    selectors: tuple[bytes, ...]
+    interpretation_selectors: tuple[domain.PolygonCompletedDailyAssessmentRequest, ...]
+    interpretations: i._PreparedInterpretationInventory
+
+
+def _assessment_selector_fact(pair: _AssessmentPair) -> bytes:
+    item = pair.assessment
+    return _canonical_bytes(
+        {
+            "artifact_reference": (
+                item.assessment.source_interpretation_occurrence.artifact_reference.to_dict()
+            ),
+            "assessment_history_namespace_id": item.history_namespace_id,
+            "assessment_history_sequence": item.history_sequence,
+            "assessment_execution_id": item.execution_id,
+            "assessment_fingerprint": item.fingerprint,
+        }
+    )
+
+
+def _check_prepared_assessment_facts(
+    prepared: _PreparedAssessmentInventory,
+) -> None:
+    """Compare complete working data without running pair preparation."""
+    if type(prepared) is not _PreparedAssessmentInventory:
+        raise TypeError("exact private prepared Assessment inventory required")
+    if (
+        type(prepared.pairs) is not tuple
+        or type(prepared.facts) is not tuple
+        or type(prepared.selectors) is not tuple
+        or type(prepared.interpretation_selectors) is not tuple
+        or not (
+            len(prepared.pairs)
+            == len(prepared.facts)
+            == len(prepared.selectors)
+            == len(prepared.interpretation_selectors)
+        )
+    ):
+        raise _AssessmentSourceMismatch("prepared complete inventory changed")
+    for pair, facts, selector, source in zip(
+        prepared.pairs,
+        prepared.facts,
+        prepared.selectors,
+        prepared.interpretation_selectors,
+        strict=True,
+    ):
+        if (
+            type(pair) is not _AssessmentPair
+            or type(facts) is not tuple
+            or len(facts) != 2
+            or any(type(fact) is not bytes for fact in facts)
+            or type(pair.assessment_fact) is not bytes
+            or type(pair.interpretation_fact) is not bytes
+            or type(selector) is not bytes
+            or (pair.assessment_fact, pair.interpretation_fact) != facts
+            or _encode_result(pair.assessment) != facts[0]
+            or i._encode_result(pair.interpretation) != facts[1]
+            or _assessment_selector_fact(pair) != selector
+            or type(source) is not domain.PolygonCompletedDailyAssessmentRequest
+            or source.to_dict()
+            != pair.assessment.assessment.source_interpretation_occurrence.to_dict()
+        ):
+            raise _AssessmentSourceMismatch("prepared pair or selectors changed")
+
+
+def _check_prepared_assessment_inventory(
+    prepared: _PreparedAssessmentInventory,
+) -> None:
+    _check_prepared_assessment_facts(prepared)
+    for pair in prepared.pairs:
+        _check_assessment_pair(pair.assessment, pair.interpretation)
+
+
+def _select_prepared_assessment(
+    prepared: _PreparedAssessmentInventory,
+    request: _StrategyRequest,
+    *,
+    committed: bool = False,
+) -> _AssessmentPair:
+    """Exact local correspondence only; this performs no authentication."""
+    if type(request) is not _StrategyRequest:
+        raise TypeError("exact Strategy selector request required")
+    _check_prepared_assessment_inventory(prepared)
+    selector = _canonical_bytes(request.to_dict())
+    selected = tuple(
+        pair
+        for pair, expected in zip(prepared.pairs, prepared.selectors, strict=True)
+        if selector == expected
+    )
+    if len(selected) != 1:
+        if committed:
+            raise _AssessmentHistoryInvalid("committed Strategy source unavailable")
+        raise _AssessmentOccurrenceUnavailable(
+            "exact committed Assessment occurrence unavailable"
+        )
+    return selected[0]
+
+
 def _check_assessment_pair(
     item: PolygonCompletedDailyAssessmentResult,
     source: i.PolygonCompletedDailyInterpretationResult,
@@ -712,6 +816,202 @@ class PolygonCompletedDailyProductionAssessmentApplicationService:
         if type(expected) is not tuple:
             raise TypeError("exact complete Assessment pair tuple required")
         self._consume_assessments(None, expected)
+
+    def _prepare_assessment_inventory(
+        self,
+        transaction: i._InterpretationTransaction,
+    ) -> _PreparedAssessmentInventory:
+        """Prepare complete upstream inventory once before any local source binding."""
+        try:
+            owner, _, publisher, _, _ = self.__consumption_roots
+            state = self._committed
+            self._check_consumption_roots(state, transaction.state)
+            interpretations = publisher._prepare_interpretation_inventory(transaction)
+            owner._validate()
+            items = tuple(_reconstruct_result(fact) for fact in state[1])
+            pairs = []
+            for item, fact in zip(items, state[1], strict=True):
+                source = i._select_prepared_interpretation(
+                    interpretations,
+                    _canonical_bytes(
+                        item.assessment.source_interpretation_occurrence.to_dict()
+                    ),
+                    transaction,
+                )
+                source_fact = i._encode_result(source)
+                pairs.append(_AssessmentPair(item, deepcopy(source), fact, source_fact))
+            values = tuple(pairs)
+            prepared = _PreparedAssessmentInventory(
+                values,
+                tuple(
+                    (pair.assessment_fact, pair.interpretation_fact) for pair in values
+                ),
+                tuple(_assessment_selector_fact(pair) for pair in values),
+                tuple(
+                    deepcopy(
+                        pair.assessment.assessment.source_interpretation_occurrence
+                    )
+                    for pair in values
+                ),
+                interpretations,
+            )
+            _check_prepared_assessment_inventory(prepared)
+            _check_prepared_assessment_facts(prepared)
+            self._check_consumption_roots(state, transaction.state)
+            return prepared
+        except (
+            i._InterpretationOccurrenceUnavailable,
+            i._InterpretationHistoryInvalid,
+        ) as error:
+            raise _AssessmentHistoryInvalid(str(error)) from error
+        except i._InterpretationSourceMismatch as error:
+            raise _AssessmentSourceMismatch(str(error)) from error
+        except _AssessmentHistoryInvalid, _AssessmentSourceMismatch:
+            raise
+        except Exception as error:
+            raise _AssessmentHistoryInvalid(str(error)) from error
+
+    def _seal_prepared_assessment_inventory(
+        self,
+        prepared: _PreparedAssessmentInventory,
+        state: tuple[int, tuple[bytes, ...]],
+        interpretation_state: tuple[int, tuple[bytes, ...]],
+        roots: tuple[Any, ...],
+        assessment_lock: object,
+        interpretation_lock: object,
+        transaction: i._InterpretationTransaction,
+    ) -> None:
+        """Seal complete data against transaction-start commitments, without reuse.
+
+        Only Strategy's locked transaction supplies these original identities.
+        No standalone authentication capability accepts the prepared value.
+        """
+        try:
+            owner, namespace, publisher, source_owner, source_namespace = roots
+            locks = self.__consumption_locks
+            if transaction.state is not interpretation_state:
+                raise _AssessmentHistoryInvalid(
+                    "original Interpretation transaction changed"
+                )
+            if (
+                self.__consumption_roots is not roots
+                or owner._lock is not assessment_lock
+                or source_owner._lock is not interpretation_lock
+            ):
+                raise _AssessmentHistoryInvalid("original consumption roots changed")
+            self._check_consumption_roots(state, interpretation_state)
+            owner._validate()
+            _check_prepared_assessment_inventory(prepared)
+            if tuple(facts[0] for facts in prepared.facts) != state[1]:
+                raise _AssessmentHistoryInvalid("complete Assessment inventory changed")
+            # Prepare every binding, canonical membership and scalar before support.
+            expectations = []
+            for pair, facts, request in zip(
+                prepared.pairs,
+                prepared.facts,
+                prepared.interpretation_selectors,
+                strict=True,
+            ):
+                source = pair.interpretation
+                try:
+                    selected = i._select_prepared_interpretation(
+                        prepared.interpretations,
+                        _canonical_bytes(request.to_dict()),
+                        transaction,
+                    )
+                    if i._encode_result(selected) != facts[1]:
+                        raise ValueError("local Interpretation member changed")
+                except i._InterpretationHistoryInvalid:
+                    raise
+                except Exception as error:
+                    raise _AssessmentSourceMismatch(str(error)) from error
+                if (
+                    source.history_namespace_id != source_namespace
+                    or source.history_sequence > len(interpretation_state[1])
+                    or interpretation_state[1][source.history_sequence - 1] != facts[1]
+                ):
+                    raise _AssessmentSourceMismatch(
+                        "prepared Interpretation differs from exact committed member"
+                    )
+                expectations.append(
+                    (
+                        selected,
+                        source.history_namespace_id,
+                        source.history_sequence,
+                        source.execution_id,
+                        source.fingerprint,
+                    )
+                )
+            seal_expectations = tuple(expectations)
+            self._check_consumption_roots(state, interpretation_state)
+            # All pair preparation is complete. Recheck EVERY working graph now:
+            # later-pair work may have changed an earlier already-checked value.
+            # This pass must not run pair preparation again or authenticate support.
+            try:
+                _check_prepared_assessment_facts(prepared)
+            except _AssessmentSourceMismatch:
+                raise
+            except Exception as error:
+                raise _AssessmentSourceMismatch(str(error)) from error
+            publisher._seal_prepared_interpretation_inventory(
+                prepared.interpretations, transaction
+            )
+            for (
+                sealed,
+                source_namespace_id,
+                sequence,
+                execution,
+                fingerprint,
+            ) in seal_expectations:
+                # The complete private seal proves canonical byte equality with the
+                # exact committed member checked above, including the full artifact
+                # selector. Compare its occurrence identity directly; no new codec
+                # work may follow the last fresh complete support authentication.
+                if (
+                    type(sealed) is not i.PolygonCompletedDailyInterpretationResult
+                    or type(sealed.history_namespace_id) is not str
+                    or type(sealed.history_sequence) is not int
+                    or type(sealed.execution_id) is not str
+                    or type(sealed.fingerprint) is not str
+                    or sealed.history_namespace_id != source_namespace_id
+                    or sealed.history_sequence != sequence
+                    or sealed.execution_id != execution
+                    or sealed.fingerprint != fingerprint
+                ):
+                    raise _AssessmentSourceMismatch("sealed Interpretation changed")
+            # Direct identities only after the complete fresh Interpretation seal.
+            if (
+                self.__consumption_roots is not roots
+                or self.__consumption_locks is not locks
+                or self.__history_owner is not owner
+                or self.__namespace is not namespace
+                or owner._namespace_id is not namespace
+                or owner._lock is not assessment_lock
+                or self.__interpretation_service is not publisher
+                or self._committed is not state
+                or owner._state is not state
+                or owner._pending is not None
+                or publisher._history_owner is not source_owner
+                or publisher._history is not source_owner
+                or publisher._namespace is not source_namespace
+                or source_owner._namespace_id is not source_namespace
+                or source_owner._lock is not interpretation_lock
+                or publisher._committed is not interpretation_state
+                or source_owner._state is not interpretation_state
+                or source_owner._pending is not None
+            ):
+                raise _AssessmentHistoryInvalid("authority changed during final seal")
+        except (
+            i._InterpretationOccurrenceUnavailable,
+            i._InterpretationHistoryInvalid,
+        ) as error:
+            raise _AssessmentHistoryInvalid(str(error)) from error
+        except i._InterpretationSourceMismatch as error:
+            raise _AssessmentSourceMismatch(str(error)) from error
+        except _AssessmentHistoryInvalid, _AssessmentSourceMismatch:
+            raise
+        except Exception as error:
+            raise _AssessmentHistoryInvalid(str(error)) from error
 
     def _check_history(self) -> None:
         """Check structural authority under held locks, without adopting state."""
