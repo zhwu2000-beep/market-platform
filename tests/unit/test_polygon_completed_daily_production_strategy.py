@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta, timezone
 from enum import Enum, IntEnum, StrEnum
 from itertools import product
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from threading import Barrier, Event, Lock, local
 from types import SimpleNamespace
 
@@ -1131,24 +1132,190 @@ def test_constructor_and_lock_ast_are_foundation_only():
 
 def test_slice_file_scope():
     root = Path(__file__).resolve().parents[2]
-    allowed = {
+    _assert_slice_file_scope(root)
+
+
+def _assert_slice_file_scope(root):
+    original_scope = {
         "src/market_platform/application/polygon_completed_daily_production_strategy.py",
         "tests/unit/test_polygon_completed_daily_production_strategy.py",
     }
-    tracked = subprocess.check_output(
+    adr_scope = {
+        "docs/adr/0044_governed_daily_technical_strategy_interpretation_authentication_optimization.md",
+        "docs/adr/0045_historical_price_storage_continuity_for_governed_authentication.md",
+    }
+    performance_scope = original_scope | {
+        "src/market_platform/data/historical.py",
+        "src/market_platform/application/polygon_completed_daily_production_interpretation.py",
+        "src/market_platform/application/polygon_completed_daily_production_assessment.py",
+        "tests/unit/test_historical_prices.py",
+        "tests/unit/test_polygon_completed_daily_production_interpretation.py",
+        "tests/unit/test_polygon_completed_daily_production_assessment.py",
+    }
+    # Preserve the original application-slice boundary, after domain/consumption
+    # work, through the final pre-optimization Strategy seal correction.
+    slice_start = "3793ec32923ee872a4f619c48965bffdb56f68a9"
+    slice_end = "5b73620a532d1eec7767f82b460adb69a5873e43"
+    adrs_end = "97d42bea45cb191cc8bb72008342179852d9182a"
+    # ADR0044 extends Interpretation/Assessment scope while preserving existing
+    # Strategy A+B work; ADR0045 adds historical.py. Commit 6dba652 implements
+    # that correction in exactly the eight performance_scope files.
+    checkpoints = (
+        ("original slice", [slice_start, slice_end], original_scope),
+        ("accepted ADRs", [slice_end, adrs_end], adr_scope),
+        ("performance correction", [adrs_end, "HEAD"], performance_scope),
+    )
+    for label, revisions, allowed in checkpoints:
+        commands = [["git", "diff", "--name-only", "--no-renames", *revisions]]
+        if label == "performance correction":
+            commands.extend(
+                [
+                    ["git", "diff", "--cached", "--name-only", "--no-renames"],
+                    ["git", "diff", "--name-only", "--no-renames"],
+                    ["git", "ls-files", "--others", "--exclude-standard"],
+                ]
+            )
+        actual = set()
+        for command in commands:
+            actual.update(
+                subprocess.check_output(command, cwd=root, text=True).splitlines()
+            )
+        assert actual == allowed, (
+            f"{label}: unexpected={sorted(actual - allowed)!r}, "
+            f"missing={sorted(allowed - actual)!r}"
+        )
+
+
+@pytest.mark.parametrize("source", ["tracked", "untracked"])
+@pytest.mark.parametrize(
+    "path",
+    [
+        "src/market_platform/application/unauthorized.py",
+        "tests/unit/test_unauthorized.py",
+        "src/market_platform/__init__.py",
+        "src/market_platform/application/__init__.py",
+        "src/market_platform/cli/main.py",
+        "src/market_platform/ai/agents.py",
+        "src/market_platform/trading/signal.py",
+        "src/market_platform/application/polygon_completed_daily_production_governance.py",
+        "src/market_platform/research/daily_evidence.py",
+        "src/market_platform/application/polygon_completed_daily_production_technical.py",
+        "src/market_platform/application/polygon_completed_daily_production_bridge.py",
+        "src/market_platform/application/polygon_completed_daily_production_qualification.py",
+        "docs/adr/0044_governed_daily_technical_strategy_interpretation_authentication_optimization.md",
+        "docs/adr/0045_historical_price_storage_continuity_for_governed_authentication.md",
+    ],
+)
+def test_slice_file_scope_rejects_unauthorized_path(monkeypatch, source, path):
+    # A stale checkpoint must not make a negative control pass accidentally.
+    test_slice_file_scope()
+    check_output = subprocess.check_output
+    injected = []
+
+    def changed_paths(command, **kwargs):
+        output = check_output(command, **kwargs)
+        target = (
+            command == ["git", "diff", "--name-only", "--no-renames"]
+            if source == "tracked"
+            else command[1] == "ls-files"
+        )
+        if target:
+            injected.append(path)
+            return output + path + "\n"
+        return output
+
+    monkeypatch.setattr(subprocess, "check_output", changed_paths)
+    with pytest.raises(AssertionError) as failure:
+        test_slice_file_scope()
+    assert injected == [path]
+    assert str(failure.value).splitlines()[0] == (
+        f"performance correction: unexpected={[path]!r}, missing=[]"
+    )
+
+
+@pytest.fixture
+def scope_repository(tmp_path):
+    root = Path(__file__).resolve().parents[2]
+    # Isolate all index/worktree mutations; share only read-only source objects.
+    with TemporaryDirectory(dir=tmp_path) as directory:
+        subprocess.check_output(
+            ["git", "clone", "--quiet", "--shared", str(root), directory],
+            text=True,
+        )
+        yield Path(directory)
+
+
+def test_slice_file_scope_rejects_staged_cancelled_index(scope_repository):
+    root = scope_repository
+    _assert_slice_file_scope(root)
+    path = "src/market_platform/__init__.py"
+    target = root / path
+    original = target.read_bytes()
+    target.write_bytes(original + b"\n# Unauthorized staged edit.\n")
+    subprocess.check_output(["git", "add", "--", path], cwd=root)
+    target.write_bytes(original)
+
+    # The old checkpoint-to-worktree view hides the staged content entirely.
+    assert not subprocess.check_output(
         [
             "git",
             "diff",
             "--name-only",
-            "3793ec32923ee872a4f619c48965bffdb56f68a9",
+            "--no-renames",
+            "97d42bea45cb191cc8bb72008342179852d9182a",
+            "--",
+            path,
         ],
         cwd=root,
         text=True,
-    ).splitlines()
-    untracked = subprocess.check_output(
-        ["git", "ls-files", "--others", "--exclude-standard"], cwd=root, text=True
-    ).splitlines()
-    assert set(tracked + untracked) == allowed
+    )
+    assert subprocess.check_output(
+        ["git", "diff", "--cached", "--name-only", "--no-renames"],
+        cwd=root,
+        text=True,
+    ).splitlines() == [path]
+    with pytest.raises(AssertionError) as failure:
+        _assert_slice_file_scope(root)
+    assert str(failure.value).splitlines()[0] == (
+        f"performance correction: unexpected={[path]!r}, missing=[]"
+    )
+
+
+def test_slice_file_scope_rejects_unauthorized_rename_source(scope_repository):
+    root = scope_repository
+    _assert_slice_file_scope(root)
+    source = "src/market_platform/__init__.py"
+    destination = (
+        "src/market_platform/application/polygon_completed_daily_production_strategy.py"
+    )
+    (root / destination).write_bytes((root / source).read_bytes())
+    (root / source).unlink()
+    subprocess.check_output(["git", "add", "--", source, destination], cwd=root)
+    # Prove Git recognizes the rename and its destination-only view hides source.
+    assert subprocess.check_output(
+        [
+            "git",
+            "diff",
+            "--cached",
+            "--name-only",
+            "--break-rewrites",
+            "--find-renames",
+        ],
+        cwd=root,
+        text=True,
+    ).splitlines() == [destination]
+    assert set(
+        subprocess.check_output(
+            ["git", "diff", "--cached", "--name-only", "--no-renames"],
+            cwd=root,
+            text=True,
+        ).splitlines()
+    ) == {source, destination}
+    with pytest.raises(AssertionError) as failure:
+        _assert_slice_file_scope(root)
+    assert str(failure.value).splitlines()[0] == (
+        f"performance correction: unexpected={[source]!r}, missing=[]"
+    )
 
 
 @pytest.mark.parametrize(
