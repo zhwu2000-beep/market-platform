@@ -3777,19 +3777,53 @@ def test_history_execute_concurrency_complete_old_or_new_state(
     assert service._committed[0] == 3 and service._history_owner._pending is None
 
 
-def test_history_exact_original_eleven_lock_order_once(monkeypatch):
-    source, upstream = publisher()
-    interpretation_source = source._interpretation_service
-    technical = interpretation_source._technical_service
-    root = vars(technical)[
-        "_PolygonCompletedDailyProductionTechnicalApplicationService__committed"
+def test_history_exact_original_eleven_lock_order_once(
+    interpretation_authentic,  # noqa: F811
+    monkeypatch,
+):
+    # Option C authenticates retained owner state, even for empty downstream history.
+    technical = interpretation_authentic[0]
+    interpretation_source = (
+        interpretation.PolygonCompletedDailyProductionInterpretationApplicationService(
+            technical, execution_clock=forbidden
+        )
+    )
+    source = Publisher(interpretation_source, forbidden)
+    bridge = technical._bridge_service
+    qualified = bridge._qualification_service
+    validity = qualified._validity_service
+    admission = validity._admission_service
+    owners = [
+        admission._construction_service._history,
+        admission._validation_service._history,
+        admission._freshness_service._history,
+        admission._history,
+        validity._history,
+        qualified._history,
+        bridge._history,
+        technical._history,
+        interpretation_source._history_owner,
+        source._history_owner,
     ]
-    technical._history = root.owner
-    monkeypatch.setattr(interpretation_source, "_authentication_retention", lambda: ())
     prepare = source._prepare_assessment_inventory
+    final_seal = source._seal_prepared_assessment_inventory
     service = Service(source, forbidden)
-    expected = [*upstream, service._history_owner._lock]
+    owners.append(service._history_owner)
+    original = [
+        (owner, owner._state, owner._namespace_id, owner._lock) for owner in owners
+    ]
+    expected = [owner._lock for owner in owners]
     stacks, seals = [], []
+
+    def unchanged():
+        for owner, state, namespace, lock in original:
+            assert owner._state is state
+            assert owner._namespace_id is namespace
+            assert owner._lock is lock
+            assert owner._pending is None
+
+    # Fixture construction finishes before recording the single history transaction.
+    assert not any(lock.locked() for lock in expected)
 
     class Stack(RecordingStack):
         def __init__(self):
@@ -3798,20 +3832,31 @@ def test_history_exact_original_eleven_lock_order_once(monkeypatch):
 
     def inventory(transaction):
         assert stacks[0].locks == expected
+        unchanged()
+        assert transaction.state is interpretation_source._committed
+        for _, state, _, _ in original[:9]:
+            assert any(node[0] is state for node in transaction.native_support[0])
         return prepare(transaction)
 
     def seal(values, *transaction):
         assert values.pairs == ()
         assert stacks[0].locks == expected
         assert all(lock.locked() for lock in expected)
-        seals.append(True)
+        unchanged()
+        final_seal(values, *transaction)
+        assert transaction[-1].phase == "SEALED"
+        unchanged()
+        seals.append(transaction[-1])
 
     monkeypatch.setattr(app, "ExitStack", Stack)
     monkeypatch.setattr(source, "_prepare_assessment_inventory", inventory)
     monkeypatch.setattr(source, "_seal_prepared_assessment_inventory", seal)
     artifact = content().source_assessment_occurrence.artifact_reference
     assert history_read(service, artifact) == ()
-    assert len(stacks) == 1 and seals == [True]
+    assert len(stacks) == len(seals) == 1
+    assert seals[0].phase == "CLOSED" and not seals[0].active
+    assert seals[0].witness.closed
+    unchanged()
     assert len(expected) == len(set(expected)) == 11
     assert not any(lock.locked() for lock in expected)
 
