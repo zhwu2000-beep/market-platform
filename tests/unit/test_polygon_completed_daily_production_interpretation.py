@@ -2703,3 +2703,878 @@ def test_private_authentication_failure_types_remain_private_value_errors():
         assert category.__bases__ == (ValueError,)
         assert category.__name__.startswith("_")
         assert category.__name__ not in app.__all__
+
+
+@pytest.fixture
+def option_c_case(monkeypatch):
+    # Import lazily: Assessment's standalone fixtures import this test module.
+    from test_polygon_completed_daily_production_assessment import consumption_case
+
+    return consumption_case.__wrapped__(monkeypatch)
+
+
+def _option_c_enter(stack, service):
+    from market_platform.application import (
+        polygon_completed_daily_production_assessment as assessment,
+    )
+    from market_platform.application import (
+        polygon_completed_daily_production_strategy as strategy,
+    )
+
+    consumer = assessment.PolygonCompletedDailyProductionAssessmentApplicationService(
+        service
+    )
+    caller = strategy.PolygonCompletedDailyProductionStrategyApplicationService(
+        consumer
+    )
+    stack.enter_context(consumer._history_owner._lock)
+    stack.enter_context(caller._history_owner._lock)
+    witness = caller._interpretation_ownership()
+    return stack.enter_context(service._interpretation_transaction(witness))
+
+
+def test_option_c_private_complete_data_and_lifetime(option_c_case, monkeypatch):
+    import pickle
+    from contextlib import ExitStack
+    from dataclasses import FrozenInstanceError, is_dataclass
+
+    assessment, _, _, _, calls = option_c_case
+    service = assessment._interpretation_service
+    with ExitStack() as stack:
+        assessment._lock_inputs(stack)
+        transaction = _option_c_enter(stack, service)
+        with pytest.raises(TypeError):
+            app._InterpretationTransaction()
+        with pytest.raises(TypeError):
+            copy(transaction)
+        with pytest.raises(TypeError):
+            deepcopy(transaction)
+        prepared = service._prepare_interpretation_inventory(transaction)
+        assert type(prepared) is app._PreparedInterpretationInventory
+        assert not hasattr(prepared, "__dict__")
+        assert tuple(field.name for field in fields(prepared)) == (
+            "items",
+            "facts",
+            "selectors",
+            "technical_selectors",
+            "support_facts",
+        )
+        assert prepared.facts == service._committed[1]
+        assert len(prepared.items) == 2 and len(calls) == 4
+        assert "_PreparedInterpretationInventory" not in app.__all__
+
+        def data_only(value):
+            assert not callable(value)
+            if is_dataclass(value):
+                for field in fields(value):
+                    data_only(getattr(value, field.name))
+            elif type(value) in (tuple, list):
+                for item in value:
+                    data_only(item)
+            elif type(value) is dict:
+                for key, item in value.items():
+                    data_only(key)
+                    data_only(item)
+            else:
+                from datetime import datetime
+
+                assert type(value) in (
+                    str,
+                    bytes,
+                    int,
+                    float,
+                    bool,
+                    type(None),
+                    datetime,
+                )
+
+        data_only(prepared)
+        with pytest.raises(FrozenInstanceError):
+            prepared.items = ()
+        with pytest.raises(TypeError, match="serializable"):
+            pickle.dumps(prepared)
+        with pytest.raises(TypeError):
+            app._select_prepared_interpretation(
+                prepared.items, prepared.selectors[0], transaction
+            )
+        assert (
+            app._select_prepared_interpretation(
+                prepared, prepared.selectors[0], transaction
+            )
+            is prepared.items[0]
+        )
+        assert len(calls) == 4  # Local selection never authenticates support.
+        service._seal_prepared_interpretation_inventory(prepared, transaction)
+        assert len(calls) == 6
+    assert not transaction.active and transaction.prepared is None
+    with ExitStack() as stack:
+        assessment._lock_inputs(stack)
+        current = _option_c_enter(stack, service)
+        with pytest.raises(app._InterpretationHistoryInvalid):
+            service._seal_prepared_interpretation_inventory(prepared, transaction)
+        fresh = service._prepare_interpretation_inventory(current)
+        assert fresh is not prepared
+        assert len(calls) == 10
+        with pytest.raises(app._InterpretationHistoryInvalid):
+            service._seal_prepared_interpretation_inventory(prepared, current)
+        assert not current.active
+    with ExitStack() as stack:
+        assessment._lock_inputs(stack)
+        current = _option_c_enter(stack, service)
+        fresh = service._prepare_interpretation_inventory(current)
+        service._seal_prepared_interpretation_inventory(fresh, current)
+        assert len(calls) == 16
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "artifact_reference",
+        "interpretation_history_namespace_id",
+        "interpretation_history_sequence",
+        "interpretation_execution_id",
+        "interpretation_fingerprint",
+    ],
+)
+def test_option_c_exact_local_selector(option_c_case, field):
+    from contextlib import ExitStack
+
+    assessment, _, _, _, calls = option_c_case
+    service = assessment._interpretation_service
+    with ExitStack() as stack:
+        assessment._lock_inputs(stack)
+        transaction = _option_c_enter(stack, service)
+        prepared = service._prepare_interpretation_inventory(transaction)
+        selectors = _interpretation_selectors(prepared.items[0])
+        if field == "artifact_reference":
+            selectors[field] = replace(selectors[field], artifact_version="other")
+        elif field == "interpretation_history_sequence":
+            selectors[field] = 99
+        else:
+            selectors[field] = "changed"
+        selectors["artifact_reference"] = selectors["artifact_reference"].to_dict()
+        with pytest.raises(app._InterpretationOccurrenceUnavailable):
+            app._select_prepared_interpretation(
+                prepared, app._canonical_bytes(selectors), transaction
+            )
+        assert len(calls) == 4
+
+
+@pytest.mark.parametrize("phase", ["preparation", "seal"])
+def test_option_c_later_preparation_cannot_mutate_earlier_working_fact(
+    option_c_case, monkeypatch, phase
+):
+    from contextlib import ExitStack
+
+    assessment, _, _, _, calls = option_c_case
+    service = assessment._interpretation_service
+    check = app._check_copy
+    seen = []
+
+    def late(item, *args):
+        check(item, *args)
+        seen.append(item)
+        if len(seen) == 2:
+            earlier = seen[0]
+            object.__setattr__(earlier, "execution_id", app._PREFIX + ":" + "e" * 32)
+            _refingerprint(earlier)
+            assert app._encode_result(earlier) != service._committed[1][0]
+
+    with ExitStack() as stack:
+        assessment._lock_inputs(stack)
+        transaction = _option_c_enter(stack, service)
+        if phase == "seal":
+            prepared = service._prepare_interpretation_inventory(transaction)
+        before = len(calls)
+        monkeypatch.setattr(app, "_check_copy", late)
+        with pytest.raises(app._InterpretationSourceMismatch):
+            if phase == "preparation":
+                service._prepare_interpretation_inventory(transaction)
+            else:
+                service._seal_prepared_interpretation_inventory(prepared, transaction)
+        assert len(calls) == before + (2 if phase == "preparation" else 0)
+        assert len(seen) == 2
+        assert seen[0].execution_id.endswith("e" * 32)  # No repair.
+
+
+@pytest.mark.parametrize(
+    "attack",
+    [
+        "canonical",
+        "technical",
+        "membership",
+        "commitment",
+        "observed",
+        "retention",
+        "pending",
+        "lock",
+    ],
+)
+def test_option_c_original_correspondence_and_roots(option_c_case, monkeypatch, attack):
+    from contextlib import ExitStack
+
+    assessment, _, _, _, calls = option_c_case
+    service = assessment._interpretation_service
+    with ExitStack() as stack:
+        assessment._lock_inputs(stack)
+        transaction = _option_c_enter(stack, service)
+        prepared = service._prepare_interpretation_inventory(transaction)
+        before = len(calls)
+        expected = app._InterpretationHistoryInvalid
+        if attack == "canonical":
+            object.__setattr__(
+                prepared.items[0], "execution_id", app._PREFIX + ":" + "e" * 32
+            )
+            _refingerprint(prepared.items[0])
+            expected = app._InterpretationSourceMismatch
+        elif attack == "technical":
+            object.__setattr__(
+                prepared.items[0].source_technical_occurrence,
+                "technical_history_sequence",
+                99,
+            )
+            expected = app._InterpretationSourceMismatch
+        elif attack in ("membership", "commitment"):
+            state = (
+                (2, service._committed[1][:1])
+                if attack == "membership"
+                else tuple(list(service._committed))
+            )
+            monkeypatch.setattr(service, "_committed", state)
+            monkeypatch.setattr(service._history_owner, "_state", state)
+        elif attack in ("observed", "retention"):
+            monkeypatch.setattr(service, "_" + attack, ((),))
+        elif attack == "pending":
+            monkeypatch.setattr(service._history_owner, "_pending", prepared.items[0])
+        else:
+            from threading import Lock
+
+            monkeypatch.setattr(service._history_owner, "_lock", Lock())
+        with pytest.raises(expected):
+            service._seal_prepared_interpretation_inventory(prepared, transaction)
+        assert len(calls) == before
+
+
+@pytest.mark.parametrize("phase", ["preparation", "seal"])
+def test_option_c_later_support_cannot_hide_earlier_loss(
+    option_c_case, monkeypatch, phase
+):
+    from contextlib import ExitStack
+
+    assessment, _, _, _, calls = option_c_case
+    service = assessment._interpretation_service
+    original = service._authenticate_interpretation_support
+    retained = [b"earlier", b"later"]
+    monkeypatch.setattr(service, "_authentication_retention", lambda: tuple(retained))
+    with ExitStack() as stack:
+        assessment._lock_inputs(stack)
+        transaction = _option_c_enter(stack, service)
+        if phase == "seal":
+            prepared = service._prepare_interpretation_inventory(transaction)
+        before = len(calls)
+        target = 4 if phase == "preparation" else 2
+
+        def support(item):
+            result = original(item)
+            if len(calls) - before == target:
+                retained[0] = b"lost/replaced"
+            return result
+
+        monkeypatch.setattr(service, "_authenticate_interpretation_support", support)
+        with pytest.raises(app._InterpretationHistoryInvalid):
+            if phase == "preparation":
+                service._prepare_interpretation_inventory(transaction)
+            else:
+                service._seal_prepared_interpretation_inventory(prepared, transaction)
+        assert len(calls) - before == target
+        assert retained[0] == b"lost/replaced"
+
+
+def test_option_c_seal_direct_only_tail_and_phase_order():
+    import ast
+    import textwrap
+
+    method = ast.parse(
+        textwrap.dedent(
+            inspect.getsource(Service._seal_prepared_interpretation_inventory)
+        )
+    ).body[0]
+    body = method.body[1].body
+    calls = [
+        (
+            index,
+            node.value.func.attr
+            if isinstance(node.value.func, ast.Attribute)
+            else node.value.func.id,
+        )
+        for index, node in enumerate(body)
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+    ]
+    assert [name for _, name in calls] == [
+        "_check_interpretation_lifetime",
+        "_prepare_interpretation_correspondence",
+        "_check_prepared_interpretation_facts",
+        "_confirm_interpretation_support",
+    ]
+    tail = body[calls[-1][0] + 1 :]
+    assert [type(node) for node in tail] == [
+        ast.For,
+        ast.For,
+        ast.For,
+        ast.For,
+        ast.Assign,
+    ]
+    assert {
+        ast.unparse(node.func)
+        for statement in tail
+        for node in ast.walk(statement)
+        if isinstance(node, ast.Call)
+    } == {"object.__getattribute__", "_InterpretationHistoryInvalid"}
+
+
+def _check_option_c_executable_ast(tree):
+    import ast
+
+    path = (
+        "src/market_platform/application/"
+        "polygon_completed_daily_production_interpretation.py"
+    )
+    baseline = ast.parse(
+        subprocess.check_output(
+            ["git", "show", "97d42bea45cb191cc8bb72008342179852d9182a:" + path]
+        ).decode()
+    )
+    allowed_imports = {
+        ("_thread", "LockType", None),
+        ("collections.abc", "Iterator", None),
+        ("contextlib", "contextmanager", None),
+        ("datetime", "date", None),
+        ("decimal", "Decimal", None),
+        (
+            "market_platform.application",
+            "polygon_completed_daily_evidence_candidate",
+            "_support_candidate",
+        ),
+        (
+            "market_platform.application",
+            "polygon_completed_daily_production_bridge",
+            "_support_bridge",
+        ),
+        (
+            "market_platform.application",
+            "polygon_completed_daily_production_construction",
+            "_support_construction",
+        ),
+        (
+            "market_platform.application",
+            "polygon_completed_daily_production_freshness",
+            "_support_freshness",
+        ),
+        (
+            "market_platform.application",
+            "polygon_completed_daily_production_governance",
+            "_support_governance",
+        ),
+        (
+            "market_platform.application",
+            "polygon_completed_daily_production_qualification",
+            "_support_qualification",
+        ),
+        (
+            "market_platform.application",
+            "polygon_completed_daily_production_validation",
+            "_support_app_validation",
+        ),
+        (
+            "market_platform.application",
+            "polygon_completed_daily_production_validity",
+            "_support_app_validity",
+        ),
+        ("market_platform.data", "historical", "_historical"),
+        ("market_platform.evidence", "admission", "_support_admission"),
+        ("market_platform.evidence", "authorization", "_support_authorization"),
+        ("market_platform.evidence", "classification", "_support_classification"),
+        ("market_platform.evidence", "models", "_support_models"),
+        ("market_platform.evidence", "policy", "_support_policy"),
+        ("market_platform.evidence", "references", "_support_references"),
+        ("market_platform.evidence", "temporal", "_support_temporal"),
+        ("market_platform.evidence", "validation", "_support_validation"),
+        ("market_platform.evidence", "validity", "_support_validity"),
+        (
+            "market_platform.evidence_ingress",
+            "polygon_completed_daily_ohlcv",
+            "_support_ohlcv",
+        ),
+        ("market_platform.instruments", "identity", "_support_identity"),
+        ("market_platform.instruments", "mapping", "_support_mapping"),
+        ("market_platform.instruments", "resolver", "_support_resolver"),
+        ("market_platform.research", "daily_evidence", "_support_daily_evidence"),
+        (
+            "market_platform.research",
+            "interpretation",
+            "_support_research_interpretation",
+        ),
+        (
+            "market_platform.research",
+            "technical_analysis",
+            "_support_technical_analysis",
+        ),
+        ("threading", "get_ident", None),
+        ("types", "MemberDescriptorType", None),
+        ("types", "GetSetDescriptorType", None),
+    }
+    allowed_top = {
+        "_PreparedInterpretationInventory",
+        "_InterpretationTransaction",
+        "_InterpretationOwnership",
+        "_check_interpretation_lifetime",
+        "_capture_interpretation_native_support",
+        "_compare_interpretation_native_support",
+        "_interpretation_selector_fact",
+        "_check_prepared_interpretation_facts",
+        "_select_prepared_interpretation",
+        "_INTERPRETATION_SUPPORT_FIELDS",
+        "_INTERPRETATION_SUPPORT_ENUMS",
+    }
+    allowed_methods = {
+        "_interpretation_transaction",
+        "_prepare_interpretation_inventory",
+        "_prepare_interpretation_correspondence",
+        "_confirm_interpretation_support",
+        "_seal_prepared_interpretation_inventory",
+    }
+    stripped = deepcopy(tree)
+    removed = []
+    removed_imports = []
+    body = []
+    for node in stripped.body:
+        name = getattr(node, "name", None)
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            name = node.target.id
+        elif (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+        ):
+            name = node.targets[0].id
+        if name in allowed_top:
+            removed.append(name)
+            continue
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            module = node.module if isinstance(node, ast.ImportFrom) else None
+            retained_aliases = []
+            for alias in node.names:
+                key = (module, alias.name, alias.asname)
+                absolute = not isinstance(node, ast.ImportFrom) or node.level == 0
+                if absolute and key in allowed_imports:
+                    removed_imports.append(key)
+                else:
+                    retained_aliases.append(alias)
+            node.names = retained_aliases
+            if not node.names:
+                continue
+        if isinstance(node, ast.ClassDef) and node.name == Service.__name__:
+            methods = [
+                n.name
+                for n in node.body
+                if isinstance(n, ast.FunctionDef) and n.name in allowed_methods
+            ]
+            assert sorted(methods) == sorted(allowed_methods)
+            node.body = [
+                n
+                for n in node.body
+                if not (isinstance(n, ast.FunctionDef) and n.name in allowed_methods)
+            ]
+        body.append(node)
+    assert sorted(removed) == sorted(allowed_top)
+    assert sorted(removed_imports, key=str) == sorted(allowed_imports, key=str)
+    stripped.body = body
+    assert ast.dump(stripped) == ast.dump(baseline)
+
+
+def test_option_c_standalone_and_explicit_additions_checkpoint():
+    import ast
+
+    _check_option_c_executable_ast(ast.parse(inspect.getsource(app)))
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["operation", "exports", "assignment", "rebinding", "standalone", "import"],
+)
+def test_option_c_executable_ast_negative_controls(mutation):
+    import ast
+
+    tree = ast.parse(inspect.getsource(app))
+    _check_option_c_executable_ast(tree)
+    if mutation in ("operation", "exports"):
+        name = "_OPERATION" if mutation == "operation" else "__all__"
+        node = next(
+            n
+            for n in tree.body
+            if isinstance(n, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == name for t in n.targets)
+        )
+        if mutation == "operation":
+            node.value = ast.Constant("changed")
+        else:
+            node.value.elts.reverse()
+    elif mutation == "standalone":
+        cls = next(
+            n
+            for n in tree.body
+            if isinstance(n, ast.ClassDef) and n.name == Service.__name__
+        )
+        method = next(
+            n
+            for n in cls.body
+            if isinstance(n, ast.FunctionDef)
+            and n.name == "_authenticate_interpretation_occurrence"
+        )
+        method.body.append(ast.Pass())
+    else:
+        source = {
+            "assignment": "UNAUTHORIZED = 1",
+            "rebinding": Service.__name__
+            + "._authenticate_interpretation_occurrence = None",
+            "import": "import os",
+        }[mutation]
+        tree.body.extend(ast.parse(source).body)
+    with pytest.raises(AssertionError):
+        _check_option_c_executable_ast(tree)
+
+
+@pytest.mark.parametrize("stage", ["technical", "validation"])
+def test_option_c_real_original_support_loss_during_later_lineage(
+    authentication_publisher, monkeypatch, stage
+):
+    from contextlib import ExitStack
+
+    service, _, _ = authentication_publisher
+    technical = service._technical_service
+    validity = technical._bridge_service._qualification_service._validity_service
+    admission = validity._admission_service
+    owner = (
+        technical._history
+        if stage == "technical"
+        else admission._validation_service._history
+    )
+    original = service._authenticate_interpretation_support
+    with ExitStack() as stack:
+        service._lock_inputs(stack)
+        transaction = _option_c_enter(stack, service)
+        prepared = service._prepare_interpretation_inventory(transaction)
+        visits = []
+
+        def support(item):
+            result = original(item)
+            visits.append(item.history_sequence)
+            if len(visits) == 2:
+                monkeypatch.setattr(owner, "_state", (1, ()))
+            return result
+
+        monkeypatch.setattr(service, "_authenticate_interpretation_support", support)
+        with pytest.raises(app._InterpretationHistoryInvalid):
+            service._seal_prepared_interpretation_inventory(prepared, transaction)
+        assert visits == [1, 2]
+        assert owner._state == (1, ())
+
+
+@pytest.mark.parametrize("attack", ["none", "slot_property", "dictionary_property"])
+def test_option_c_native_slot_tail_never_dispatches_properties(
+    option_c_case, monkeypatch, attack
+):
+    from contextlib import ExitStack
+
+    assessment, _, _, _, _ = option_c_case
+    service = assessment._interpretation_service
+    qualification = service._technical_service._bridge_service._qualification_service
+    validity = qualification._validity_service
+    admission = validity._admission_service
+    construction = admission._construction_service
+
+    class Slotted:
+        __slots__ = ("_lock", "_state")
+
+        def _history(self):
+            pytest.fail("history method must not become an authority anchor")
+
+    owner = Slotted()
+    owner._lock = construction._history._lock
+    owner._state = (1, ())
+    monkeypatch.setattr(construction, "_history", owner)
+    with ExitStack() as stack:
+        assessment._lock_inputs(stack)
+        transaction = _option_c_enter(stack, service)
+        prepared = service._prepare_interpretation_inventory(transaction)
+        assert len(transaction.slot_anchors) == 2
+        assert all(name != "_history" for _, name, _ in transaction.slot_anchors)
+        confirm = service._confirm_interpretation_support
+
+        def forbidden(*args):
+            pytest.fail("post-support property dispatch")
+
+        def final(inventory, trusted):
+            confirm(inventory, trusted)
+            if attack == "slot_property":
+                monkeypatch.setattr(Slotted, "_state", property(forbidden))
+            elif attack == "dictionary_property":
+                monkeypatch.setattr(
+                    Service, "_observed", property(forbidden), raising=False
+                )
+
+        monkeypatch.setattr(service, "_confirm_interpretation_support", final)
+        if attack == "slot_property":
+            with pytest.raises(app._InterpretationHistoryInvalid):
+                service._seal_prepared_interpretation_inventory(prepared, transaction)
+        else:
+            service._seal_prepared_interpretation_inventory(prepared, transaction)
+
+
+def test_option_c_initial_support_expectation_drift_before_fresh_support(
+    option_c_case, monkeypatch
+):
+    from contextlib import ExitStack
+
+    assessment, _, _, _, calls = option_c_case
+    service = assessment._interpretation_service
+    original = service._prepare_interpretation_correspondence
+
+    def drift(prepared, transaction):
+        original(prepared, transaction)
+        object.__setattr__(
+            prepared, "support_facts", (b"changed", *prepared.support_facts[1:])
+        )
+
+    monkeypatch.setattr(service, "_prepare_interpretation_correspondence", drift)
+    with ExitStack() as stack:
+        assessment._lock_inputs(stack)
+        transaction = _option_c_enter(stack, service)
+        with pytest.raises(app._InterpretationSourceMismatch):
+            service._prepare_interpretation_inventory(transaction)
+        assert len(calls) == 2
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "outside",
+        "assessment_lock",
+        "strategy_lock",
+        "other_thread",
+        "nested",
+        "recursive_prepare",
+        "prepare_twice",
+        "seal_before_prepare",
+        "recursive_seal",
+        "seal_twice",
+        "post_close",
+        "prepare_exception",
+        "seal_exception",
+    ],
+)
+def test_option_c_transaction_ownership_negative_matrix(
+    option_c_case, monkeypatch, case
+):
+    from contextlib import ExitStack
+
+    from market_platform.application import (
+        polygon_completed_daily_production_strategy as strategy,
+    )
+
+    consumer = option_c_case[0]
+    service = consumer._interpretation_service
+    caller = strategy.PolygonCompletedDailyProductionStrategyApplicationService(
+        consumer
+    )
+    transaction = None
+    with ExitStack() as stack:
+        caller._lock_inputs(stack)
+        witness = caller._interpretation_ownership()
+        if case in ("outside", "assessment_lock", "strategy_lock"):
+            released = (
+                witness.locks
+                if case == "outside"
+                else (witness.locks[9 if case == "assessment_lock" else 10],)
+            )
+            for lock in reversed(released):
+                lock.release()
+            try:
+                with (
+                    pytest.raises(app._InterpretationHistoryInvalid),
+                    service._interpretation_transaction(witness),
+                ):
+                    pytest.fail("incomplete lock scope activated")
+            finally:
+                for lock in released:
+                    lock.acquire()
+            assert witness.closed
+            return
+        with service._interpretation_transaction(witness) as transaction:
+            if case == "other_thread":
+                with (
+                    ThreadPoolExecutor(max_workers=1) as pool,
+                    pytest.raises(app._InterpretationHistoryInvalid),
+                ):
+                    pool.submit(
+                        service._prepare_interpretation_inventory, transaction
+                    ).result()
+            elif case == "nested":
+                with (
+                    pytest.raises(app._InterpretationHistoryInvalid),
+                    service._interpretation_transaction(witness),
+                ):
+                    pytest.fail("nested activation succeeded")
+            elif case == "seal_before_prepare":
+                with pytest.raises(app._InterpretationHistoryInvalid):
+                    service._seal_prepared_interpretation_inventory(None, transaction)
+            elif case in ("recursive_prepare", "prepare_exception"):
+
+                def prepare(*args):
+                    if case == "recursive_prepare":
+                        service._prepare_interpretation_inventory(transaction)
+                    raise RuntimeError("preparation failure")
+
+                monkeypatch.setattr(
+                    service, "_prepare_interpretation_correspondence", prepare
+                )
+                with pytest.raises(app._InterpretationHistoryInvalid):
+                    service._prepare_interpretation_inventory(transaction)
+                assert not transaction.active
+            else:
+                prepared = service._prepare_interpretation_inventory(transaction)
+                if case == "prepare_twice":
+                    with pytest.raises(app._InterpretationHistoryInvalid):
+                        service._prepare_interpretation_inventory(transaction)
+                elif case in ("recursive_seal", "seal_exception"):
+
+                    def seal(*args):
+                        if case == "recursive_seal":
+                            service._seal_prepared_interpretation_inventory(
+                                prepared, transaction
+                            )
+                        raise RuntimeError("seal failure")
+
+                    monkeypatch.setattr(
+                        service, "_prepare_interpretation_correspondence", seal
+                    )
+                    with pytest.raises(app._InterpretationHistoryInvalid):
+                        service._seal_prepared_interpretation_inventory(
+                            prepared, transaction
+                        )
+                    assert not transaction.active
+                elif case == "seal_twice":
+                    service._seal_prepared_interpretation_inventory(
+                        prepared, transaction
+                    )
+                    with pytest.raises(app._InterpretationHistoryInvalid):
+                        service._seal_prepared_interpretation_inventory(
+                            prepared, transaction
+                        )
+        assert not transaction.active and transaction.phase == "CLOSED"
+        assert witness.closed and witness.activation is None
+        with pytest.raises(app._InterpretationHistoryInvalid):
+            service._prepare_interpretation_inventory(transaction)
+        with (
+            pytest.raises(app._InterpretationHistoryInvalid),
+            service._interpretation_transaction(witness),
+        ):
+            pytest.fail("expired witness revived")
+
+
+def test_option_c_native_support_inherited_dictionary_is_live(monkeypatch):
+    profile = app.a._PROFILE
+    expected = app._capture_interpretation_native_support((profile,))
+    app._compare_interpretation_native_support(expected)
+    monkeypatch.setitem(profile.__dict__, "continuity_probe", [])
+    with pytest.raises(app._InterpretationHistoryInvalid):
+        app._compare_interpretation_native_support(expected)
+
+
+def test_option_c_native_support_unknown_type_does_not_dispatch():
+    class UntrustedMeta(type):
+        def __eq__(self, other):
+            raise AssertionError("untrusted type equality")
+
+        def __hash__(self):
+            raise AssertionError("untrusted type hash")
+
+    class Untrusted(metaclass=UntrustedMeta):
+        def __getattribute__(self, name):
+            raise AssertionError("untrusted attribute access")
+
+    with pytest.raises(app._InterpretationHistoryInvalid):
+        app._capture_interpretation_native_support((Untrusted(),))
+
+
+@pytest.mark.parametrize("phase", ["active", "sealed", "closed", "other_thread"])
+def test_option_c_selection_requires_prepared_owner_lifetime(option_c_case, phase):
+    from contextlib import ExitStack
+
+    consumer = option_c_case[0]
+    service = consumer._interpretation_service
+    with ExitStack() as stack:
+        consumer._lock_inputs(stack)
+        transaction = _option_c_enter(stack, service)
+        if phase == "active":
+            inventory = app._PreparedInterpretationInventory((), (), (), (), ())
+        else:
+            inventory = service._prepare_interpretation_inventory(transaction)
+        if phase == "sealed":
+            service._seal_prepared_interpretation_inventory(inventory, transaction)
+        if phase == "closed":
+            stack.close()
+        if phase == "other_thread":
+            with (
+                ThreadPoolExecutor(max_workers=1) as pool,
+                pytest.raises(app._InterpretationHistoryInvalid),
+            ):
+                pool.submit(
+                    app._select_prepared_interpretation,
+                    inventory,
+                    b"selector",
+                    transaction,
+                ).result()
+        else:
+            with pytest.raises(app._InterpretationHistoryInvalid):
+                app._select_prepared_interpretation(inventory, b"selector", transaction)
+
+
+@pytest.mark.parametrize("operation", ["prepare", "seal"])
+def test_option_c_swallowed_recursive_failure_cannot_complete(
+    option_c_case, monkeypatch, operation
+):
+    from contextlib import ExitStack
+
+    consumer = option_c_case[0]
+    service = consumer._interpretation_service
+    with ExitStack() as stack:
+        consumer._lock_inputs(stack)
+        transaction = _option_c_enter(stack, service)
+        prepared = None
+        if operation == "seal":
+            prepared = service._prepare_interpretation_inventory(transaction)
+        original = service._prepare_interpretation_correspondence
+        rejected = []
+
+        def recursive(*args):
+            with pytest.raises(app._InterpretationHistoryInvalid):
+                if operation == "prepare":
+                    service._prepare_interpretation_inventory(transaction)
+                else:
+                    service._seal_prepared_interpretation_inventory(
+                        prepared, transaction
+                    )
+            rejected.append(True)
+            original(*args)
+
+        monkeypatch.setattr(
+            service, "_prepare_interpretation_correspondence", recursive
+        )
+        with pytest.raises(app._InterpretationHistoryInvalid):
+            if operation == "prepare":
+                service._prepare_interpretation_inventory(transaction)
+            else:
+                service._seal_prepared_interpretation_inventory(prepared, transaction)
+        assert rejected == [True]
+        assert not transaction.active and transaction.phase == "CLOSED"

@@ -900,23 +900,22 @@ def test_exact_exports_and_public_workflows():
 
 def test_frozen_checkpoint_files_unchanged():
     root = Path(__file__).resolve().parents[2]
-    # Compare every tracked file with the authorized checkpoint, including Slice 2.
-    changed = subprocess.check_output(
-        [
-            "git",
-            "diff",
-            "--name-only",
-            "4201d2d851b061808a1712aaa573f272632865c5",
-            "--",
-        ],
-        cwd=root,
-        text=True,
-    )
-    allowed = {
-        "src/market_platform/application/polygon_completed_daily_production_assessment.py",
-        "tests/unit/test_polygon_completed_daily_production_assessment.py",
-    }
-    assert set(changed.splitlines()) <= allowed
+    checkpoint = "4201d2d851b061808a1712aaa573f272632865c5"
+    # The original d3ada18 check was a per-slice changed-file restriction, not
+    # permanent ownership of the repository. ADR0042 explicitly preserves these
+    # three historical documents; public code is protected by contract/AST tests.
+    for path in (
+        "docs/adr/0040_governed_daily_technical_interpretation.md",
+        "docs/adr/0041_publication_time_technical_issuance_authority_and_governed_interpretation_value_isolation.md",
+        "docs/handoffs/v0.80.0-governed-daily-technical-interpretation-handoff.md",
+    ):
+        historical = subprocess.check_output(
+            ["git", "show", f"{checkpoint}:{path}"],
+            cwd=root,
+            text=True,
+            encoding="utf-8",
+        )
+        assert (root / path).read_text(encoding="utf-8") == historical
     assert (
         tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"]
         == "0.1.0"
@@ -3231,39 +3230,9 @@ def test_history_signature_and_slice_5_execute_ast_checkpoint():
         signature.return_annotation
         == "tuple[PolygonCompletedDailyAssessmentResult, ...]"
     )
-    root = Path(__file__).resolve().parents[2]
-    before = ast.parse(
-        subprocess.check_output(
-            [
-                "git",
-                "show",
-                "1e844440c95fbff8d910c24a50374393b7fec1b9:"
-                "src/market_platform/application/polygon_completed_daily_production_assessment.py",
-            ],
-            cwd=root,
-            text=True,
-        )
+    _assert_assessment_checkpoint(
+        _assessment_checkpoint(), ast.parse(inspect.getsource(app))
     )
-    after = ast.parse(inspect.getsource(app))
-    # Every existing definition, including execute and all its publication helpers,
-    # stays identical; only three new methods are authorized in the service.
-    for old, new in zip(before.body, after.body, strict=True):
-        if isinstance(old, ast.ClassDef) and old.name == Service.__name__:
-            old_members = {
-                node.name: node for node in old.body if hasattr(node, "name")
-            }
-            new_members = {
-                node.name: node for node in new.body if hasattr(node, "name")
-            }
-            assert new_members.keys() - old_members.keys() == {
-                "get_result_history_as_of",
-                "_authenticate_retained_source",
-                "_authenticate_history_locked",
-            }
-            for name in old_members:
-                assert ast.dump(old_members[name]) == ast.dump(new_members[name])
-        else:
-            assert ast.dump(old) == ast.dump(new)
 
 
 def test_history_empty_no_clock_id_stage_or_observation(
@@ -4176,3 +4145,1741 @@ def test_history_requires_exact_retained_source_availability(
     monkeypatch.setattr(service, "_committed", state)
     monkeypatch.setattr(service._history_owner, "_state", state)
     history_refusal(service, request, source.available_at, R.SOURCE_MISMATCH)
+
+
+# Exact additive allowances; all other released nodes remain AST-identical.
+_PRIVATE_TOP_LEVEL = {
+    "_AssessmentOccurrenceUnavailable",
+    "_AssessmentHistoryInvalid",
+    "_AssessmentSourceMismatch",
+    "_AssessmentPair",
+    "_check_assessment_pair",
+    "_PreparedAssessmentInventory",
+    "_assessment_selector_fact",
+    "_check_prepared_assessment_facts",
+    "_check_prepared_assessment_inventory",
+    "_select_prepared_assessment",
+}
+_PRIVATE_METHODS = {
+    "_check_consumption_roots",
+    "_authenticate_consumption_source",
+    "_consume_assessments",
+    "_authenticate_assessment_occurrence",
+    "_authenticate_assessment_inventory",
+    "_revalidate_assessment_inventory",
+    "_prepare_assessment_inventory",
+    "_seal_prepared_assessment_inventory",
+}
+_PRIVATE_IMPORT = (
+    "from market_platform.research.governed_daily_technical_strategy "
+    "import PolygonCompletedDailyStrategyRequest as _StrategyRequest"
+)
+_PRIVATE_INITIALIZATION = """
+self.__consumption_roots = (
+    self.__history_owner, self.__namespace, interpretation_service,
+    vars(interpretation_service).get("_history_owner"),
+    vars(interpretation_service).get("_namespace"),
+)
+self.__consumption_locks: tuple[object, ...] | None = None
+"""
+_PRIVATE_LOCK_CAPTURE = """
+consumption_locks = (
+    publisher, owner, vars(publisher).get("_history_owner"),
+)
+self.__consumption_locks = consumption_locks
+"""
+
+
+def _assessment_checkpoint():
+    return ast.parse(
+        subprocess.check_output(
+            [
+                "git",
+                "show",
+                "0f6d58f671e38e733332999de37323f1f98c38e9:"
+                "src/market_platform/application/polygon_completed_daily_production_assessment.py",
+            ],
+            cwd=Path(__file__).resolve().parents[2],
+            text=True,
+        )
+    )
+
+
+def _assert_assessment_checkpoint(before, after):
+    from copy import deepcopy
+
+    after = deepcopy(after)
+    extra_import = ast.dump(ast.parse(_PRIVATE_IMPORT).body[0])
+    baseline_names = {node.name for node in before.body if hasattr(node, "name")}
+    retained = []
+    added = set()
+    for node in after.body:
+        if ast.dump(node) == extra_import:
+            assert extra_import not in added
+            added.add(extra_import)
+        elif hasattr(node, "name") and node.name not in baseline_names:
+            assert node.name in _PRIVATE_TOP_LEVEL
+            assert node.name.startswith("_") and node.name not in added
+            added.add(node.name)
+        else:
+            retained.append(node)
+    after.body = retained
+    assert len(before.body) == len(after.body)
+    for old, new in zip(before.body, after.body, strict=True):
+        if isinstance(old, ast.ClassDef) and old.name == Service.__name__:
+            old_names = {node.name for node in old.body if hasattr(node, "name")}
+            members = []
+            added_methods = set()
+            for node in new.body:
+                if hasattr(node, "name") and node.name not in old_names:
+                    assert node.name in _PRIVATE_METHODS
+                    assert node.name.startswith("_") and node.name not in added_methods
+                    added_methods.add(node.name)
+                    continue
+                if isinstance(node, ast.FunctionDef):
+                    permitted = {
+                        "__init__": _PRIVATE_INITIALIZATION,
+                        "_lock_inputs": _PRIVATE_LOCK_CAPTURE,
+                    }.get(node.name)
+                    if permitted:
+                        original = next(
+                            n for n in old.body if getattr(n, "name", None) == node.name
+                        )
+                        augmented = deepcopy(original)
+                        additions = ast.parse(permitted).body
+                        if node.name == "__init__":
+                            augmented.body.extend(additions)
+                        else:
+                            augmented.body[2:2] = additions[:1]
+                            augmented.body[-1:-1] = additions[1:]
+                        assert ast.dump(node) in (
+                            ast.dump(original),
+                            ast.dump(augmented),
+                        )
+                        node = original
+                members.append(node)
+            new.body = members
+        assert ast.dump(old) == ast.dump(new)
+
+
+@pytest.mark.parametrize(
+    "attack",
+    [
+        "export",
+        "execute",
+        "history",
+        "result",
+        "refusal",
+        "constant",
+        "public",
+        "private",
+        "method",
+        "constructor",
+    ],
+)
+def test_slice2_checkpoint_rejects_unauthorized_changes(attack):
+    baseline = _assessment_checkpoint()
+    changed = ast.parse(inspect.getsource(app))
+    service = next(
+        n
+        for n in changed.body
+        if isinstance(n, ast.ClassDef) and n.name == Service.__name__
+    )
+    if attack == "export":
+        node = next(
+            n
+            for n in changed.body
+            if isinstance(n, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "__all__" for t in n.targets)
+        )
+        node.value.elts.append(ast.Constant("NewPublic"))
+    elif attack in ("execute", "history", "constructor"):
+        name = {
+            "execute": "execute",
+            "history": "get_result_history_as_of",
+            "constructor": "__init__",
+        }[attack]
+        node = next(
+            n for n in service.body if isinstance(n, ast.FunctionDef) and n.name == name
+        )
+        node.args.args.append(ast.arg(arg="new_parameter"))
+    elif attack in ("result", "refusal"):
+        name = Result.__name__ if attack == "result" else Refused.__name__
+        node = next(
+            n for n in changed.body if isinstance(n, ast.ClassDef) and n.name == name
+        )
+        node.body.append(ast.parse("new_field = 1").body[0])
+    elif attack == "constant":
+        node = next(
+            n
+            for n in changed.body
+            if isinstance(n, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "_SCHEMA" for t in n.targets)
+        )
+        node.value = ast.Constant("changed")
+    elif attack == "method":
+        service.body.append(ast.parse("def new_public(self): pass").body[0])
+    else:
+        changed.body.append(
+            ast.parse(
+                "class "
+                + ("NewPublic" if attack == "public" else "_UnapprovedPrivate")
+                + ": pass"
+            ).body[0]
+        )
+    with pytest.raises(AssertionError):
+        _assert_assessment_checkpoint(baseline, changed)
+
+
+def test_slice2_checkpoint_accepts_only_named_private_additions():
+    baseline = _assessment_checkpoint()
+    current = ast.parse(inspect.getsource(app))
+    _assert_assessment_checkpoint(baseline, current)
+    before = {n.name for n in baseline.body if hasattr(n, "name")}
+    after = {n.name for n in current.body if hasattr(n, "name")}
+    assert after - before == _PRIVATE_TOP_LEVEL
+    assert all(name.startswith("_") for name in _PRIVATE_TOP_LEVEL | _PRIVATE_METHODS)
+    assert set(app.__all__).isdisjoint(_PRIVATE_TOP_LEVEL | _PRIVATE_METHODS)
+
+
+def _strategy_request(value, **changes):
+    return app._StrategyRequest(
+        **(
+            dict(
+                artifact_reference=value.assessment.source_interpretation_occurrence.artifact_reference,
+                assessment_history_namespace_id=value.history_namespace_id,
+                assessment_history_sequence=value.history_sequence,
+                assessment_execution_id=value.execution_id,
+                assessment_fingerprint=value.fingerprint,
+            )
+            | changes
+        )
+    )
+
+
+@pytest.fixture
+def consumption_case(monkeypatch):
+    # Mock only the released Interpretation authentication/locking boundary.
+    # Assessment publications are issued through unchanged public execute.
+    from test_governed_daily_technical_assessment import source
+
+    publisher = object.__new__(Publisher)
+    owner = i._InterpretationHistory()
+    publisher._history_owner = publisher._history = owner
+    publisher._namespace = owner._namespace_id
+    values = []
+    content = source(
+        truths=("rsi_at_or_above_elevated",),
+        source_quality="degraded",
+        source_warnings=("insufficient_profile_history", "stale_evidence"),
+    )
+    for sequence in (1, 2):
+        value = object.__new__(i.PolygonCompletedDailyInterpretationResult)
+        for name, field_value in dict(
+            interpretation=replace(content),
+            technical_available_at=TIME,
+            execution_id="polygon_completed_daily_interpretation:" + f"{sequence:032x}",
+            history_namespace_id=owner._namespace_id,
+            history_sequence=sequence,
+            execution_started_at=TIME,
+            execution_completed_at=TIME,
+            available_at=TIME,
+        ).items():
+            object.__setattr__(value, name, field_value)
+        object.__setattr__(
+            value, "fingerprint", canonical_fingerprint(value._payload())
+        )
+        values.append(value)
+    owner._state = publisher._committed = (
+        3,
+        tuple(i._encode_result(v) for v in values),
+    )
+    locks = [*(Lock() for _ in range(8)), owner._lock]
+    calls = []
+
+    def lock_inputs(stack):
+        for lock in locks:
+            stack.enter_context(lock)
+
+    def authenticate(**selectors):
+        assert all(lock.locked() for lock in locks)
+        calls.append(selectors)
+        owner._validate()
+        if owner._state is not publisher._committed:
+            raise i._InterpretationHistoryInvalid("support")
+        for fact in publisher._committed[1]:
+            value = i._reconstruct_result(fact)
+            if selectors == _interpretation_selectors(value):
+                return value
+        raise i._InterpretationOccurrenceUnavailable("support")
+
+    monkeypatch.setattr(publisher, "_lock_inputs", lock_inputs)
+    monkeypatch.setattr(
+        publisher, "_authenticate_interpretation_occurrence", authenticate
+    )
+    service = Service(publisher, execution_clock=lambda: TIME)
+    first = service.execute(assessment_request(values[0]))
+    second = service.execute(assessment_request(values[1]))
+
+    # Real Option C batch/context; only original upstream support is mocked.
+    def upstream_store(index):
+        return SimpleNamespace(_lock=locks[index], _state=(1, ()))
+
+    admission = SimpleNamespace(
+        _construction_service=SimpleNamespace(_history=upstream_store(0)),
+        _validation_service=SimpleNamespace(_history=upstream_store(1)),
+        _freshness_service=SimpleNamespace(_history=upstream_store(2)),
+        _history=upstream_store(3),
+    )
+    validity = SimpleNamespace(_admission_service=admission, _history=upstream_store(4))
+    qualification = SimpleNamespace(
+        _validity_service=validity, _history=upstream_store(5)
+    )
+    bridge = SimpleNamespace(
+        _qualification_service=qualification, _history=upstream_store(6)
+    )
+    technical = SimpleNamespace(_bridge_service=bridge, _history=upstream_store(7))
+    publisher._technical_service = technical
+    publisher._technical_history = technical._history
+    publisher._observed = publisher._retention = ()
+    shared_technical = object()
+
+    def entry_support(item):
+        assert all(lock.locked() for lock in locks)
+        calls.append(_interpretation_selectors(item))
+        return shared_technical, None, {"shared": 1}
+
+    monkeypatch.setattr(publisher, "_authentication_retention", lambda: ())
+    monkeypatch.setattr(
+        publisher, "_authenticate_interpretation_support", entry_support
+    )
+    calls.clear()
+    return service, first, second, values, calls
+
+
+def _consume(service, value, **changes):
+    with ExitStack() as stack:
+        service._lock_inputs(stack)
+        return service._authenticate_assessment_occurrence(
+            _strategy_request(value, **changes)
+        )
+
+
+def _capture(service):
+    with ExitStack() as stack:
+        service._lock_inputs(stack)
+        return service._authenticate_assessment_inventory()
+
+
+def _recheck(service, expected):
+    with ExitStack() as stack:
+        service._lock_inputs(stack)
+        service._revalidate_assessment_inventory(expected)
+
+
+def _install_assessment_projection(service, index, projection):
+    # Deliberately corrupt BOTH commitments to reach deeper validation checks;
+    # ordinary single-root replacement tests below preserve the independent pin.
+    refingerprint(projection["assessment"])
+    refingerprint(projection)
+    facts = list(service._committed[1])
+    facts[index] = app._canonical_bytes(projection)
+    service._history_owner._state = service._committed = (len(facts) + 1, tuple(facts))
+
+
+def test_slice2_private_types_pair_and_exact_bound_source(consumption_case):
+    service, first, second, sources, calls = consumption_case
+    for name in (
+        "_AssessmentOccurrenceUnavailable",
+        "_AssessmentHistoryInvalid",
+        "_AssessmentSourceMismatch",
+    ):
+        assert issubclass(getattr(app, name), ValueError)
+        assert name not in app.__all__
+    before = service._committed
+    pair = _consume(service, first)
+    assert type(pair) is app._AssessmentPair
+    assert tuple(f.name for f in fields(pair)) == (
+        "assessment",
+        "interpretation",
+        "assessment_fact",
+        "interpretation_fact",
+    )
+    assert pair.assessment.to_dict() == first.to_dict()
+    assert pair.interpretation.to_dict() == sources[0].to_dict()
+    assert pair.interpretation.fingerprint != sources[1].fingerprint
+    assert type(pair.assessment_fact) is type(pair.interpretation_fact) is bytes
+    assert pair.assessment_fact == before[1][0]
+    assert pair.interpretation_fact == service._interpretation_service._committed[1][0]
+    assert calls == [_interpretation_selectors(source) for source in sources] * 2
+    other = _consume(service, second)
+    repeated = _consume(service, first)
+    assert not mutable_ids(pair) & (
+        mutable_ids(other) | mutable_ids(repeated) | mutable_ids(first)
+    )
+    assert not mutable_ids(pair.assessment) & mutable_ids(pair.interpretation)
+    assert all(not isinstance(v, Enum) for v in graph(pair))
+    assert service._committed is service._history_owner._state is before
+    with pytest.raises(TypeError):
+        service._authenticate_assessment_occurrence(
+            _strategy_request(first), interpretation=sources[1]
+        )
+    with pytest.raises(TypeError):
+        service._authenticate_assessment_occurrence(pair)
+    object.__setattr__(pair.assessment.assessment, "outcome", "mixed")
+    object.__setattr__(
+        pair.interpretation.interpretation.canonical_instrument_id,
+        "instrument_id",
+        "changed",
+    )
+    assert _consume(service, first).assessment.to_dict() == first.to_dict()
+
+
+@pytest.mark.parametrize("selector", [f.name for f in fields(app._StrategyRequest)])
+def test_slice2_all_five_selectors_and_envelope_required(consumption_case, selector):
+    service, first, _, sources, calls = consumption_case
+    request = _strategy_request(first)
+    value = getattr(request, selector)
+    if selector == "artifact_reference":
+        value = replace(value, authority="platform_origin")
+    elif selector == "assessment_history_sequence":
+        value += 1
+    elif selector == "assessment_fingerprint":
+        value = first.assessment.fingerprint
+    else:
+        value = value[:-32] + "f" * 32
+    with pytest.raises(app._AssessmentOccurrenceUnavailable):
+        _consume(service, first, **{selector: value})
+    assert calls == [_interpretation_selectors(source) for source in sources] * 2
+
+
+@pytest.mark.parametrize(
+    "failure,expected",
+    [
+        (i._InterpretationOccurrenceUnavailable, app._AssessmentHistoryInvalid),
+        (i._InterpretationHistoryInvalid, app._AssessmentHistoryInvalid),
+        (i._InterpretationSourceMismatch, app._AssessmentSourceMismatch),
+    ],
+)
+@pytest.mark.parametrize("phase", [1, 2, 3, 4])
+def test_slice2_structured_failures_without_message_parsing(
+    consumption_case, monkeypatch, failure, expected, phase
+):
+    service, first, _, _, _ = consumption_case
+    publisher = service._interpretation_service
+    authenticate = publisher._authenticate_interpretation_occurrence
+    count = 0
+
+    class OpaqueFailure(failure):
+        def __str__(self):
+            return "identical diagnostic for every category"
+
+    def failing(**selectors):
+        nonlocal count
+        count += 1
+        if count == phase:
+            raise OpaqueFailure()
+        return authenticate(**selectors)
+
+    monkeypatch.setattr(publisher, "_authenticate_interpretation_occurrence", failing)
+    with pytest.raises(expected) as caught:
+        _consume(service, first, assessment_history_sequence=99)
+    assert isinstance(caught.value.__cause__, OpaqueFailure)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "source_interpretation_content_fingerprint",
+        "canonical_instrument_id",
+        "source_trading_identity",
+        "analysis_as_of",
+        "source_quality",
+        "source_warnings",
+        "interpretation_available_at",
+        "findings",
+    ],
+)
+def test_slice2_nonsemantic_pair_correspondence(consumption_case, field):
+    service, first, _, _, _ = consumption_case
+    projection = app._decode_result(service._committed[1][1])
+    content = projection["assessment"]
+    replacements = {
+        "source_interpretation_content_fingerprint": FP,
+        "canonical_instrument_id": CanonicalInstrumentId("other").to_dict(),
+        "source_trading_identity": TradingInstrumentIdentity(
+            "MSFT", "NASDAQ"
+        ).to_dict(),
+        "analysis_as_of": (TIME - timedelta(days=1)).isoformat(),
+        "source_quality": "complete",
+        "source_warnings": ["stale_evidence"],
+        "findings": [
+            domain.GovernedDailyTechnicalAssessmentFinding(
+                "caution", "rsi_depressed", ("rsi_at_or_below_depressed",)
+            ).to_dict()
+        ],
+    }
+    if field == "interpretation_available_at":
+        projection[field] = (TIME - timedelta(seconds=1)).isoformat()
+    else:
+        content[field] = replacements[field]
+    _install_assessment_projection(service, 1, projection)
+    with pytest.raises(app._AssessmentSourceMismatch):
+        _consume(service, first)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "artifact_reference",
+        "interpretation_history_namespace_id",
+        "interpretation_history_sequence",
+        "interpretation_execution_id",
+        "interpretation_fingerprint",
+    ],
+)
+def test_slice2_authenticated_source_selectors_must_match(
+    consumption_case, monkeypatch, field
+):
+    service, first, _, sources, _ = consumption_case
+    source = i._reconstruct_result(i._encode_result(sources[0]))
+    item = app._reconstruct_result(app._encode_result(first))
+    request = item.assessment.source_interpretation_occurrence
+    value = getattr(request, field)
+    if field == "artifact_reference":
+        value = replace(value, artifact_version="other")
+    elif field == "interpretation_history_sequence":
+        value += 9
+    elif field == "interpretation_fingerprint":
+        value = FP
+    else:
+        value = value[:-32] + "f" * 32
+    changed = replace(
+        item.assessment,
+        source_interpretation_occurrence=replace(request, **{field: value}),
+    )
+    object.__setattr__(item, "assessment", changed)
+    object.__setattr__(item, "fingerprint", canonical_fingerprint(item._payload()))
+    with pytest.raises(app._AssessmentSourceMismatch):
+        app._check_assessment_pair(item, source)
+
+
+@pytest.mark.parametrize(
+    "attack",
+    [
+        "bytes",
+        "bytes_subclass",
+        "content_hash",
+        "envelope_hash",
+        "duplicate_id",
+        "sequence",
+        "reorder",
+        "count",
+        "warnings_order",
+        "finding_shape",
+        "policy",
+        "chronology",
+        "availability_order",
+    ],
+)
+def test_slice2_complete_inventory_before_selection(consumption_case, attack):
+    service, first, second, _, calls = consumption_case
+    facts = list(service._committed[1])
+    projection = app._decode_result(facts[1])
+    if attack == "bytes":
+        facts[1] = b"corrupt"
+    elif attack == "bytes_subclass":
+        facts[1] = Bytes(facts[1])
+    elif attack == "reorder":
+        facts.reverse()
+    elif attack == "count":
+        pass
+    else:
+        if attack == "content_hash":
+            projection["assessment"]["fingerprint"] = FP
+        elif attack == "envelope_hash":
+            projection["fingerprint"] = FP
+        elif attack == "duplicate_id":
+            projection["execution_id"] = first.execution_id
+        elif attack == "sequence":
+            projection["history_sequence"] = 9
+        elif attack == "warnings_order":
+            projection["assessment"]["source_warnings"].reverse()
+            refingerprint(projection["assessment"])
+        elif attack == "finding_shape":
+            projection["assessment"]["findings"].reverse()
+            refingerprint(projection["assessment"])
+        elif attack == "policy":
+            projection["assessment"]["assessment_policy_identity"]["policy_id"] = (
+                "changed"
+            )
+            refingerprint(projection["assessment"])
+        elif attack == "chronology":
+            projection["execution_started_at"] = (
+                TIME - timedelta(seconds=1)
+            ).isoformat()
+        elif attack == "availability_order":
+            previous = app._decode_result(facts[0])
+            previous["available_at"] = (TIME + timedelta(seconds=1)).isoformat()
+            refingerprint(previous)
+            facts[0] = app._canonical_bytes(previous)
+        if attack != "envelope_hash":
+            refingerprint(projection)
+        facts[1] = app._canonical_bytes(projection)
+    state = (4 if attack == "count" else 3, tuple(facts))
+    service._committed = service._history_owner._state = state
+    with pytest.raises(app._AssessmentHistoryInvalid):
+        _consume(service, first, assessment_history_sequence=99)
+    assert calls == []
+    assert service._committed is service._history_owner._state is state
+
+
+@pytest.mark.parametrize(
+    "attack",
+    [
+        "owner",
+        "state",
+        "rollback",
+        "truncation",
+        "reorder",
+        "namespace",
+        "namespace_equal",
+        "commitment",
+        "pending",
+        "publisher",
+        "interpretation_owner",
+        "interpretation_namespace",
+    ],
+)
+@pytest.mark.parametrize("empty", [False, True])
+def test_slice2_original_roots_even_when_empty(
+    consumption_case, monkeypatch, attack, empty
+):
+    service, first, _, _, _ = consumption_case
+    if empty:
+        service = Service(service._interpretation_service)
+    owner, state = service._history_owner, service._committed
+    prefix = "_PolygonCompletedDailyProductionAssessmentApplicationService__"
+    publisher = service._interpretation_service
+    if attack == "owner":
+        replacement = app._AssessmentHistory()
+        replacement._state = state
+        replacement._namespace_id = owner._namespace_id
+        monkeypatch.setattr(service, prefix + "history_owner", replacement)
+    elif attack == "state":
+        owner._state = tuple(list(state))
+    elif attack == "rollback":
+        owner._state = (1, ())
+    elif attack == "truncation":
+        owner._state = (state[0], state[1][:-1])
+    elif attack == "reorder":
+        owner._state = (state[0], tuple(reversed(state[1])))
+    elif attack == "namespace":
+        owner._namespace_id = NAMESPACE
+    elif attack == "namespace_equal":
+        owner._namespace_id = owner._namespace_id.encode().decode()
+    elif attack == "commitment":
+        service._committed = tuple(list(state))
+    elif attack == "pending":
+        owner._pending = first
+    elif attack == "publisher":
+        other = copy(publisher)
+        monkeypatch.setattr(service, prefix + "interpretation_service", other)
+    elif attack == "interpretation_owner":
+        other = copy(publisher._history_owner)
+        monkeypatch.setattr(publisher, "_history_owner", other)
+        monkeypatch.setattr(publisher, "_history", other)
+    else:
+        monkeypatch.setattr(
+            publisher, "_namespace", publisher._namespace.encode().decode()
+        )
+    with pytest.raises(app._AssessmentHistoryInvalid):
+        _consume(service, first)
+
+
+def test_slice2_valid_empty_inventory_and_revalidation(consumption_case):
+    service, first, _, _, _ = consumption_case
+    service = Service(service._interpretation_service)
+    state = service._committed
+    assert _capture(service) == ()
+    _recheck(service, ())
+    with pytest.raises(app._AssessmentOccurrenceUnavailable):
+        _consume(service, first)
+    assert service._committed is state
+
+
+def test_slice2_lock_selection_swap_back_rejected(consumption_case, monkeypatch):
+    service, first, _, _, _ = consumption_case
+    original = service._interpretation_service
+    replacement = copy(original)
+    name = (
+        "_PolygonCompletedDailyProductionAssessmentApplicationService"
+        "__interpretation_service"
+    )
+    with ExitStack() as stack:
+        monkeypatch.setattr(service, name, replacement)
+        service._lock_inputs(stack)
+        monkeypatch.setattr(service, name, original)
+        with pytest.raises(app._AssessmentHistoryInvalid):
+            service._authenticate_assessment_occurrence(_strategy_request(first))
+
+
+@pytest.mark.parametrize(
+    "change", ["pair", "fact", "inventory", "support", "root", "copy"]
+)
+def test_slice2_expected_inventory_is_not_authority(
+    consumption_case, monkeypatch, change
+):
+    from copy import deepcopy
+
+    service, first, _, _, _ = consumption_case
+    captured = _capture(service)
+    _recheck(service, captured)
+    expected = deepcopy(captured)
+    if change == "pair":
+        object.__setattr__(
+            expected[0].assessment, "execution_id", PREFIX + ":" + "f" * 32
+        )
+    elif change == "fact":
+        object.__setattr__(
+            expected[0], "interpretation_fact", expected[1].interpretation_fact
+        )
+    elif change == "inventory":
+        expected = expected[:1]
+    elif change in ("support", "copy"):
+        publisher = service._interpretation_service
+        monkeypatch.setattr(publisher, "_committed", (1, ()))
+        monkeypatch.setattr(publisher._history_owner, "_state", publisher._committed)
+    else:
+        monkeypatch.setattr(
+            service._history_owner, "_state", tuple(list(service._committed))
+        )
+    with pytest.raises((app._AssessmentHistoryInvalid, app._AssessmentSourceMismatch)):
+        _recheck(service, expected)
+    if change == "copy":
+        with pytest.raises(app._AssessmentHistoryInvalid):
+            _consume(service, first)
+
+
+def test_slice2_no_semantics_public_calls_or_recursive_locks(
+    consumption_case, monkeypatch
+):
+    service, first, _, _, _ = consumption_case
+    with ExitStack() as stack:
+        service._lock_inputs(stack)
+        for target, names in (
+            (
+                service,
+                (
+                    "execute",
+                    "get_result_history_as_of",
+                    "_lock_inputs",
+                    "_authenticate_history_locked",
+                    "_prepare_assessment_locked",
+                ),
+            ),
+            (
+                service._interpretation_service,
+                ("execute", "get_result_history_as_of", "_lock_inputs"),
+            ),
+            (
+                domain,
+                (
+                    "assess_governed_daily_technical_interpretation",
+                    "validate_governed_daily_technical_assessment",
+                    "_derive_assessment",
+                    "build_classic_assessment_findings",
+                    "classic_assessment_outcome",
+                ),
+            ),
+            (
+                domain.classic,
+                ("build_classic_assessment_findings", "classic_assessment_outcome"),
+            ),
+            (
+                i.domain,
+                (
+                    "interpret_governed_daily_technical_snapshot",
+                    "validate_governed_daily_technical_interpretation",
+                    "classic_states",
+                    "build_classic_comparison_evidence",
+                ),
+            ),
+            (i.domain.classic, ("classic_states", "build_classic_comparison_evidence")),
+        ):
+            for name in names:
+                monkeypatch.setattr(target, name, forbidden)
+        pair = service._authenticate_assessment_occurrence(_strategy_request(first))
+        captured = service._authenticate_assessment_inventory()
+        service._revalidate_assessment_inventory(captured)
+        assert pair.assessment.fingerprint == first.fingerprint
+
+
+def test_slice2_final_support_seal_after_all_local_work(consumption_case, monkeypatch):
+    service, first, _, sources, _ = consumption_case
+    events = []
+    final_events = [("support_return", _interpretation_selectors(s)) for s in sources]
+    publisher = service._interpretation_service
+    authenticate = publisher._authenticate_interpretation_occurrence
+    in_source = False
+
+    def authentication(**selectors):
+        nonlocal in_source
+        in_source = True
+        try:
+            value = authenticate(**selectors)
+        finally:
+            in_source = False
+        events.append(("support_return", selectors))
+        return value
+
+    monkeypatch.setattr(
+        publisher, "_authenticate_interpretation_occurrence", authentication
+    )
+    for target, name in (
+        (app, "_encode_result"),
+        (app, "_decode_result"),
+        (app, "_reconstruct_result"),
+        (app, "_graph_ids"),
+        (app, "_check_assessment_pair"),
+        (app, "deepcopy"),
+        (i, "_encode_result"),
+        (app._AssessmentHistory, "_validate"),
+        (Result, "to_dict"),
+        (i.PolygonCompletedDailyInterpretationResult, "to_dict"),
+        (domain.PolygonCompletedDailyAssessmentRequest, "to_dict"),
+        (app._StrategyRequest, "to_dict"),
+        (domain.GovernedDailyTechnicalAssessment, "_validate"),
+    ):
+        original = getattr(target, name)
+
+        def wrap(*args, _original=original, _name=name, **kwargs):
+            value = _original(*args, **kwargs)
+            if not in_source:
+                events.append(_name)
+            return value
+
+        monkeypatch.setattr(target, name, wrap)
+    _consume(service, first)
+    assert events[-2:] == final_events
+    events.clear()
+    captured = _capture(service)
+    assert events[-2:] == final_events
+    events.clear()
+    _recheck(service, captured)
+    assert events[-2:] == final_events
+
+
+@pytest.mark.parametrize(
+    "seam", ["_graph_ids", "_check_assessment_pair", "_encode_result"]
+)
+def test_slice2_late_support_loss_detected(consumption_case, monkeypatch, seam):
+    service, first, _, _, _ = consumption_case
+    publisher = service._interpretation_service
+    original = getattr(app, seam)
+
+    def remove(*args, **kwargs):
+        value = original(*args, **kwargs)
+        publisher._committed = publisher._history_owner._state = (1, ())
+        return value
+
+    monkeypatch.setattr(app, seam, remove)
+    with pytest.raises(app._AssessmentHistoryInvalid):
+        _consume(service, first)
+
+
+def test_slice2_authentic_preexisting_support_and_forbidden_execution(
+    preparation_publisher, monkeypatch
+):
+    publisher, source, other_source = preparation_publisher
+    service = execution_service(preparation_publisher)
+    first = service.execute(assessment_request(source))
+    service.execute(assessment_request(other_source))
+    technical = publisher._technical_service
+    bridge = technical._bridge_service
+    qualification = bridge._qualification_service
+    from market_platform.data.providers.polygon import PolygonProvider
+
+    for target, names in (
+        (service, ("execute", "get_result_history_as_of")),
+        (
+            publisher,
+            (
+                "execute",
+                "get_result_history_as_of",
+                "_check_history",
+                "_observe_technical_history",
+            ),
+        ),
+        (technical, ("execute", "get_result_history_as_of")),
+        (bridge, ("bridge", "get_bridge_history_as_of")),
+        (qualification, ("qualify",)),
+        (t.technical, ("analyze_daily_technical_snapshot",)),
+        (PolygonProvider, ("get_daily_prices", "get_completed_daily_acquisition")),
+    ):
+        for name in names:
+            monkeypatch.setattr(target, name, forbidden)
+    for target, names in (
+        (
+            domain,
+            (
+                "assess_governed_daily_technical_interpretation",
+                "validate_governed_daily_technical_assessment",
+                "_derive_assessment",
+            ),
+        ),
+        (
+            i.domain,
+            (
+                "interpret_governed_daily_technical_snapshot",
+                "validate_governed_daily_technical_interpretation",
+                "classic_states",
+                "build_classic_comparison_evidence",
+            ),
+        ),
+        (i.domain.classic, ("classic_states", "build_classic_comparison_evidence")),
+    ):
+        for name in names:
+            monkeypatch.setattr(target, name, forbidden)
+    pair = _consume(service, first)
+    assert pair.interpretation.to_dict() == source.to_dict()
+    expected = _capture(service)
+    _recheck(service, expected)
+    authenticate = publisher._authenticate_interpretation_occurrence
+    calls = []
+
+    def lose_support_after_first_final_check(**selectors):
+        calls.append(selectors)
+        value = authenticate(**selectors)
+        if len(calls) == 3:
+            # First final pair authenticated successfully. Only now remove its
+            # original technical support; the later trusted call must reject it.
+            monkeypatch.setattr(technical._history, "_state", (1, ()))
+        return value
+
+    monkeypatch.setattr(
+        publisher,
+        "_authenticate_interpretation_occurrence",
+        lose_support_after_first_final_check,
+    )
+    with pytest.raises(app._AssessmentHistoryInvalid):
+        _recheck(service, expected)
+    assert calls == [_interpretation_selectors(s) for s in (source, other_source)] * 2
+
+
+@pytest.mark.parametrize("mode", ["selection", "revalidation"])
+def test_slice2_final_check_covers_earlier_source_after_later_pair_work(
+    consumption_case, monkeypatch, mode
+):
+    service, first, _, sources, _ = consumption_case
+    expected = _capture(service)
+    publisher = service._interpretation_service
+    authenticate = publisher._authenticate_interpretation_occurrence
+    check_pair = app._check_assessment_pair
+    lost = False
+    calls = []
+
+    def support(**selectors):
+        calls.append(selectors)
+        # The released contract authenticates ALL support at each pair check.
+        if lost:
+            raise i._InterpretationHistoryInvalid("earlier source support lost")
+        return authenticate(**selectors)
+
+    def pair_work(item, source):
+        nonlocal lost
+        check_pair(item, source)
+        if item.history_sequence == 2:
+            lost = True
+
+    monkeypatch.setattr(publisher, "_authenticate_interpretation_occurrence", support)
+    monkeypatch.setattr(app, "_check_assessment_pair", pair_work)
+    with pytest.raises(app._AssessmentHistoryInvalid):
+        if mode == "selection":
+            _consume(service, first)
+        else:
+            _recheck(service, expected)
+    bound = [_interpretation_selectors(source) for source in sources]
+    assert calls == [*bound, bound[0]]
+
+
+def test_slice2_wrong_authenticated_bound_occurrence_is_source_mismatch(
+    consumption_case, monkeypatch
+):
+    service, first, _, sources, _ = consumption_case
+    publisher = service._interpretation_service
+    fact = i._encode_result(sources[1])
+    monkeypatch.setattr(
+        publisher,
+        "_authenticate_interpretation_occurrence",
+        lambda **kwargs: i._reconstruct_result(fact),
+    )
+    with pytest.raises(app._AssessmentSourceMismatch):
+        _consume(service, first)
+
+
+def test_slice2_availability_after_original_start_rejected(consumption_case):
+    service, first, _, sources, _ = consumption_case
+    item = app._reconstruct_result(app._encode_result(first))
+    source = i._reconstruct_result(i._encode_result(sources[0]))
+    object.__setattr__(source, "available_at", TIME + timedelta(seconds=1))
+    object.__setattr__(source, "fingerprint", canonical_fingerprint(source._payload()))
+    # Other retained correspondence is made exact, leaving source availability
+    # later than the original Assessment execution start.
+    content = replace(
+        item.assessment, source_interpretation_occurrence=assessment_request(source)
+    )
+    object.__setattr__(item, "assessment", content)
+    object.__setattr__(item, "fingerprint", canonical_fingerprint(item._payload()))
+    with pytest.raises(app._AssessmentSourceMismatch):
+        app._check_assessment_pair(item, source)
+
+
+@pytest.mark.parametrize(
+    "attack", ["satisfied", "operator", "operand", "order", "policy"]
+)
+def test_slice2_interpretation_structural_facts_rejected(
+    consumption_case, monkeypatch, attack
+):
+    service, first, _, sources, _ = consumption_case
+    publisher = service._interpretation_service
+    projection = sources[0].to_dict()
+    comparison = projection["interpretation"]["comparison_evidence"][0]
+    if attack == "satisfied":
+        comparison["satisfied"] = not comparison["satisfied"]
+    elif attack == "operator":
+        comparison["operator"] = "unknown"
+    elif attack == "operand":
+        comparison["left_operand"]["value"] = True
+    elif attack == "order":
+        projection["interpretation"]["comparison_evidence"].append(comparison.copy())
+    else:
+        projection["interpretation"]["interpretation_policy_identity"]["policy_id"] = (
+            "changed"
+        )
+    refingerprint(projection)
+    state = (3, (i._canonical_bytes(projection), publisher._committed[1][1]))
+    monkeypatch.setattr(publisher, "_committed", state)
+    monkeypatch.setattr(publisher._history_owner, "_state", state)
+    with pytest.raises(app._AssessmentHistoryInvalid):
+        _consume(service, first)
+
+
+def test_slice2_semantic_decision_lookup_does_not_rederive(consumption_case):
+    service, first, _, _, _ = consumption_case
+    projection = first.to_dict()
+    projection["assessment"]["outcome"] = "aligned"
+    _install_assessment_projection(service, 0, projection)
+    altered = app._reconstruct_result(service._committed[1][0])
+    # Deliberately coherent, structurally valid retained semantics. Private lookup
+    # authenticates membership/correspondence; public history still revalidates it.
+    assert _consume(service, altered).assessment.assessment.outcome == "aligned"
+    with pytest.raises(Refused) as caught:
+        read_history(service, assessment_request(consumption_case[3][0]), TIME)
+    assert caught.value.reason == R.HISTORY_INVALID
+
+
+def test_slice2_private_seam_call_inventory_has_no_execution_or_locking():
+    tree = ast.parse(inspect.getsource(app))
+    nodes = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name in _PRIVATE_METHODS | {"_check_assessment_pair"}
+    ]
+    called = {
+        node.func.attr if isinstance(node.func, ast.Attribute) else node.func.id
+        for definition in nodes
+        for node in ast.walk(definition)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, (ast.Name, ast.Attribute))
+    }
+    assert not called & {
+        "execute",
+        "get_result_history_as_of",
+        "_lock_inputs",
+        "enter_context",
+        "acquire",
+        "Lock",
+        "_derive_assessment",
+        "assess_governed_daily_technical_interpretation",
+        "validate_governed_daily_technical_assessment",
+        "interpret_governed_daily_technical_snapshot",
+        "validate_governed_daily_technical_interpretation",
+        "classic_states",
+        "build_classic_comparison_evidence",
+        "_semantic_view",
+    }
+    assert not any(
+        "StrategyResult" in node.name or "StrategyApplication" in node.name
+        for node in tree.body
+        if hasattr(node, "name")
+    )
+
+
+def test_slice2_waiting_reader_does_not_replace_held_lock_capture(
+    consumption_case, monkeypatch
+):
+    service, first, _, _, _ = consumption_case
+    publisher = service._interpretation_service
+    locking = publisher._lock_inputs
+    waiting = Event()
+
+    def signal_then_lock(stack):
+        waiting.set()
+        locking(stack)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with ExitStack() as stack:
+            service._lock_inputs(stack)
+            captured = service._authenticate_assessment_inventory()
+            monkeypatch.setattr(publisher, "_lock_inputs", signal_then_lock)
+            future = pool.submit(_capture, service)
+            assert waiting.wait(5)
+            assert not future.done()
+            service._revalidate_assessment_inventory(captured)
+        assert future.result(timeout=10)[0].assessment.fingerprint == first.fingerprint
+
+
+def test_slice2_interpretation_lock_replacement_swap_back_rejected(
+    consumption_case, monkeypatch
+):
+    service, first, _, _, _ = consumption_case
+    publisher = service._interpretation_service
+    original_owner = publisher._history_owner
+    replacement = i._InterpretationHistory()
+    replacement._state = original_owner._state
+    replacement._namespace_id = original_owner._namespace_id
+    lock_inputs = publisher._lock_inputs
+
+    def substitute_lock(stack):
+        class SubstituteStack:
+            def enter_context(self, lock):
+                return stack.enter_context(
+                    replacement._lock if lock is original_owner._lock else lock
+                )
+
+        monkeypatch.setattr(publisher, "_history_owner", replacement)
+        lock_inputs(SubstituteStack())
+        monkeypatch.setattr(publisher, "_history_owner", original_owner)
+
+    monkeypatch.setattr(publisher, "_lock_inputs", substitute_lock)
+    with pytest.raises(app._AssessmentHistoryInvalid):
+        _consume(service, first)
+
+
+@pytest.mark.parametrize("expected", [None, [], object()])
+def test_slice2_revalidation_requires_explicit_complete_expectations(
+    consumption_case, expected
+):
+    service, _, _, _, calls = consumption_case
+    with pytest.raises(TypeError):
+        _recheck(service, expected)
+    assert calls == []
+
+
+@pytest.mark.parametrize("mode", ["selection", "revalidation"])
+def test_slice2_final_seal_later_pair_detects_earlier_support_loss(
+    consumption_case, monkeypatch, mode
+):
+    service, first, _, sources, _ = consumption_case
+    expected = _capture(service)
+    bound = [_interpretation_selectors(source) for source in sources]
+    publisher = service._interpretation_service
+    authenticate = publisher._authenticate_interpretation_occurrence
+    support = {1, 2}
+    calls = []
+
+    def complete_support(**selectors):
+        calls.append(selectors)
+        # Model the released complete-support contract, not selected support.
+        if support != {1, 2}:
+            assert selectors == bound[1]
+            assert selectors["interpretation_history_sequence"] in support
+            raise i._InterpretationHistoryInvalid("earlier required support lost")
+        value = authenticate(**selectors)
+        if len(calls) == 3:
+            assert selectors == bound[0]
+            support.remove(1)
+        return value
+
+    monkeypatch.setattr(
+        publisher, "_authenticate_interpretation_occurrence", complete_support
+    )
+    with pytest.raises(app._AssessmentHistoryInvalid):
+        if mode == "selection":
+            _consume(service, first)
+        else:
+            _recheck(service, expected)
+    assert calls == bound * 2
+
+
+@pytest.mark.parametrize("phase", [3, 4])
+@pytest.mark.parametrize(
+    "field", ["history_namespace_id", "history_sequence", "execution_id", "fingerprint"]
+)
+def test_slice2_final_seal_checks_each_bound_occurrence(
+    consumption_case, monkeypatch, phase, field
+):
+    service, _, second, sources, _ = consumption_case
+    bound = [_interpretation_selectors(source) for source in sources] * 2
+    publisher = service._interpretation_service
+    authenticate = publisher._authenticate_interpretation_occurrence
+    calls = []
+
+    def changed(**selectors):
+        calls.append(selectors)
+        value = authenticate(**selectors)
+        if len(calls) == phase:
+            object.__setattr__(
+                value, field, 99 if field == "history_sequence" else "changed"
+            )
+        return value
+
+    monkeypatch.setattr(publisher, "_authenticate_interpretation_occurrence", changed)
+    with pytest.raises(app._AssessmentSourceMismatch):
+        _consume(service, second)
+    assert calls == bound[:phase]
+
+
+def test_slice2_final_seal_has_only_authentication_and_direct_checks():
+    tree = ast.parse(inspect.getsource(app))
+    method = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_consume_assessments"
+    )
+    body = method.body[1].body
+    seal_index = next(
+        index
+        for index, node in enumerate(body)
+        if isinstance(node, ast.For)
+        and isinstance(node.iter, ast.Name)
+        and node.iter.id == "seal_expectations"
+    )
+    seal = body[seal_index]
+    assert [type(node) for node in seal.body] == [ast.Assign, ast.If]
+    assert {
+        node.func.attr if isinstance(node.func, ast.Attribute) else node.func.id
+        for node in ast.walk(seal)
+        if isinstance(node, ast.Call)
+    } == {"_authenticate_consumption_source", "type", "_AssessmentSourceMismatch"}
+    tail = body[seal_index + 1 :]
+    assert [type(node) for node in tail] == [ast.If, ast.If, ast.Return]
+    for statement in tail:
+        for node in ast.walk(statement):
+            if isinstance(node, ast.Call):
+                assert isinstance(node.func, ast.Name)
+                assert node.func.id in {
+                    "_AssessmentHistoryInvalid",
+                    "_AssessmentOccurrenceUnavailable",
+                }
+            assert not isinstance(
+                node,
+                (
+                    ast.List,
+                    ast.Dict,
+                    ast.Set,
+                    ast.Tuple,
+                    ast.ListComp,
+                    ast.SetComp,
+                    ast.DictComp,
+                    ast.GeneratorExp,
+                ),
+            )
+
+
+@pytest.mark.parametrize(
+    "path,owned",
+    [
+        ("docs/adr/0040_governed_daily_technical_interpretation.md", True),
+        (
+            "docs/adr/0041_publication_time_technical_issuance_authority_and_governed_interpretation_value_isolation.md",
+            True,
+        ),
+        (
+            "docs/handoffs/v0.80.0-governed-daily-technical-interpretation-handoff.md",
+            True,
+        ),
+        ("README.md", False),
+    ],
+)
+def test_slice2_historical_checkpoint_has_explicit_owned_scope(
+    monkeypatch, path, owned
+):
+    root = Path(__file__).resolve().parents[2]
+    checkpoint = "4201d2d851b061808a1712aaa573f272632865c5"
+    # The unrelated control really existed at the historical checkpoint.
+    subprocess.check_output(["git", "cat-file", "-e", f"{checkpoint}:{path}"], cwd=root)
+    read = Path.read_text
+    run = subprocess.check_output
+    commands = []
+
+    def changed(file, *args, **kwargs):
+        value = read(file, *args, **kwargs)
+        return value + "\nchanged\n" if file == root / path else value
+
+    def bounded(command, **kwargs):
+        commands.append(command)
+        assert command[:2] == ["git", "show"]
+        assert len(command) == 3
+        assert command[2] in {
+            checkpoint + ":docs/adr/0040_governed_daily_technical_interpretation.md",
+            checkpoint
+            + (
+                ":docs/adr/0041_publication_time_technical_issuance_"
+                "authority_and_governed_interpretation_value_isolation.md"
+            ),
+            checkpoint
+            + (
+                ":docs/handoffs/v0.80.0-governed-daily-technical-"
+                "interpretation-handoff.md"
+            ),
+        }
+        return run(command, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", changed)
+    monkeypatch.setattr(subprocess, "check_output", bounded)
+    if owned:
+        with pytest.raises(AssertionError):
+            test_frozen_checkpoint_files_unchanged()
+    else:
+        test_frozen_checkpoint_files_unchanged()
+        assert len(commands) == 3
+    assert commands
+
+
+# Prepared transactions retain data only; standalone consumption stays fresh.
+def _prepared_transaction(service, stack):
+    from test_polygon_completed_daily_production_interpretation import _option_c_enter
+
+    roots = vars(service)[
+        "_PolygonCompletedDailyProductionAssessmentApplicationService__consumption_roots"
+    ]
+    return (
+        service._committed,
+        roots[2]._committed,
+        roots,
+        roots[0]._lock,
+        roots[3]._lock,
+        _option_c_enter(stack, roots[2]),
+    )
+
+
+def test_prepared_inventory_private_exact_data_and_complete(consumption_case):
+    service, _, _, _, calls = consumption_case
+    with ExitStack() as stack:
+        service._lock_inputs(stack)
+        transaction = _prepared_transaction(service, stack)
+        prepared = service._prepare_assessment_inventory(transaction[-1])
+        assert type(prepared) is app._PreparedAssessmentInventory
+        assert is_dataclass(prepared) and not hasattr(prepared, "__dict__")
+        assert tuple(field.name for field in fields(prepared)) == (
+            "pairs",
+            "facts",
+            "selectors",
+            "interpretation_selectors",
+            "interpretations",
+        )
+        assert "_PreparedAssessmentInventory" not in app.__all__
+        assert tuple(fact[0] for fact in prepared.facts) == service._committed[1]
+        assert len(prepared.pairs) == 2 and len(calls) == 4
+        with pytest.raises(FrozenInstanceError):
+            prepared.pairs = ()
+
+        def data_only(value):
+            assert not callable(value)
+            assert value is not service and value is not service._history_owner
+            assert value is not service._interpretation_service
+            if is_dataclass(value):
+                for field in fields(value):
+                    data_only(getattr(value, field.name))
+            elif type(value) in (tuple, list):
+                for item in value:
+                    data_only(item)
+            elif type(value) is dict:
+                for key, item in value.items():
+                    data_only(key)
+                    data_only(item)
+            else:
+                assert type(value) in (
+                    str,
+                    bytes,
+                    int,
+                    float,
+                    bool,
+                    type(None),
+                    datetime,
+                )
+
+        data_only(prepared)
+        with pytest.raises(TypeError):
+            app._select_prepared_assessment(
+                prepared.pairs, _strategy_request(prepared.pairs[0].assessment)
+            )
+        service._seal_prepared_assessment_inventory(prepared, *transaction)
+        assert len(calls) == 6
+        service._authenticate_assessment_occurrence(
+            _strategy_request(prepared.pairs[0].assessment)
+        )
+        assert len(calls) == 10  # A later independent call reauthenticates everything.
+
+
+@pytest.mark.parametrize("committed", [False, True])
+@pytest.mark.parametrize(
+    "field",
+    [
+        "artifact_reference",
+        "assessment_history_namespace_id",
+        "assessment_history_sequence",
+        "assessment_execution_id",
+        "assessment_fingerprint",
+    ],
+)
+def test_prepared_local_five_selectors_and_stage(consumption_case, field, committed):
+    service, first, second, _, calls = consumption_case
+    with ExitStack() as stack:
+        service._lock_inputs(stack)
+        transaction = _prepared_transaction(service, stack)
+        prepared = service._prepare_assessment_inventory(transaction[-1])
+        before = len(calls)
+        request = _strategy_request(first)
+        assert (
+            app._select_prepared_assessment(prepared, request).assessment_fact
+            == (prepared.facts[0][0])
+        )
+        if field == "artifact_reference":
+            value = replace(request.artifact_reference, artifact_id="other:artifact")
+        elif field == "assessment_history_namespace_id":
+            value = "polygon_completed_daily_assessment_history:" + "f" * 32
+        else:
+            value = getattr(_strategy_request(second), field)
+        request = replace(request, **{field: value})
+        failure = (
+            app._AssessmentHistoryInvalid
+            if committed
+            else app._AssessmentOccurrenceUnavailable
+        )
+        with pytest.raises(failure):
+            app._select_prepared_assessment(prepared, request, committed=committed)
+        assert len(calls) == before
+
+
+@pytest.mark.parametrize("attack", ["pair", "fact", "selector", "binding"])
+def test_prepared_working_data_mutation_is_source_mismatch(consumption_case, attack):
+    service, first, _, _, _ = consumption_case
+    with ExitStack() as stack:
+        service._lock_inputs(stack)
+        transaction = _prepared_transaction(service, stack)
+        prepared = service._prepare_assessment_inventory(transaction[-1])
+        if attack == "pair":
+            object.__setattr__(prepared.pairs[0].assessment, "execution_id", "changed")
+        elif attack == "fact":
+            object.__setattr__(prepared.pairs[0], "assessment_fact", b"changed")
+        elif attack == "selector":
+            object.__setattr__(
+                prepared, "selectors", (b"changed", *prepared.selectors[1:])
+            )
+        else:
+            object.__setattr__(
+                prepared.interpretation_selectors[0], "interpretation_fingerprint", FP
+            )
+        # Invalid graph codecs are history invalid at the seal boundary; canonical
+        # fact/binding drift is source mismatch. Use coherent graph mutation below.
+        if attack == "pair":
+            object.__setattr__(
+                prepared.pairs[0].assessment,
+                "execution_id",
+                "polygon_completed_daily_assessment:" + "e" * 32,
+            )
+            object.__setattr__(
+                prepared.pairs[0].assessment,
+                "fingerprint",
+                canonical_fingerprint(prepared.pairs[0].assessment._payload()),
+            )
+        with pytest.raises(app._AssessmentSourceMismatch):
+            app._select_prepared_assessment(prepared, _strategy_request(first))
+        with pytest.raises(app._AssessmentSourceMismatch):
+            service._seal_prepared_assessment_inventory(prepared, *transaction)
+
+
+@pytest.mark.parametrize("target", ["assessment", "interpretation"])
+def test_prepared_seal_original_equal_commitments_not_adopted(consumption_case, target):
+    service, _, _, _, calls = consumption_case
+    with ExitStack() as stack:
+        service._lock_inputs(stack)
+        transaction = _prepared_transaction(service, stack)
+        prepared = service._prepare_assessment_inventory(transaction[-1])
+        publisher = (
+            service if target == "assessment" else service._interpretation_service
+        )
+        before = publisher._committed
+        replacement = tuple(list(before))
+        assert replacement == before and replacement is not before
+        publisher._committed = publisher._history_owner._state = replacement
+        count = len(calls)
+        with pytest.raises(app._AssessmentHistoryInvalid):
+            service._seal_prepared_assessment_inventory(prepared, *transaction)
+        assert len(calls) == count  # Continuity must precede fresh support.
+        assert publisher._committed is publisher._history_owner._state is replacement
+
+
+@pytest.mark.parametrize("lost", [0, 1])
+def test_prepared_seal_complete_fresh_support_and_loss(
+    consumption_case, monkeypatch, lost
+):
+    service, _, _, _, _ = consumption_case
+    publisher = service._interpretation_service
+    authenticate = publisher._authenticate_interpretation_support
+    with ExitStack() as stack:
+        service._lock_inputs(stack)
+        transaction = _prepared_transaction(service, stack)
+        prepared = service._prepare_assessment_inventory(transaction[-1])
+        visits = []
+
+        def support(item):
+            visits.append(item.history_sequence)
+            if len(visits) == lost + 1:
+                raise i._InterpretationOccurrenceUnavailable("lost original support")
+            return authenticate(item)
+
+        monkeypatch.setattr(publisher, "_authenticate_interpretation_support", support)
+        with pytest.raises(app._AssessmentHistoryInvalid):
+            service._seal_prepared_assessment_inventory(prepared, *transaction)
+        assert visits == list(range(1, lost + 2))
+
+
+def test_prepared_seal_no_local_work_after_fresh_support(consumption_case, monkeypatch):
+    service, _, _, _, _ = consumption_case
+    with ExitStack() as stack:
+        service._lock_inputs(stack)
+        transaction = _prepared_transaction(service, stack)
+        prepared = service._prepare_assessment_inventory(transaction[-1])
+        publisher = service._interpretation_service
+        support = publisher._confirm_interpretation_support
+        visits = []
+
+        def no_local_work(*args, **kwargs):
+            pytest.fail("local work after fresh support")
+
+        def fresh(inventory, trusted):
+            result = support(inventory, trusted)
+            visits.extend(item.history_sequence for item in inventory.items)
+            if visits == [1, 2]:
+                for name in (
+                    "_encode_result",
+                    "_canonical_bytes",
+                    "_graph_ids",
+                    "deepcopy",
+                    "_check_assessment_pair",
+                    "_check_prepared_assessment_inventory",
+                ):
+                    monkeypatch.setattr(app, name, no_local_work)
+                monkeypatch.setattr(i, "_encode_result", no_local_work)
+                monkeypatch.setattr(service, "_check_consumption_roots", no_local_work)
+            return result
+
+        monkeypatch.setattr(publisher, "_confirm_interpretation_support", fresh)
+        service._seal_prepared_assessment_inventory(prepared, *transaction)
+        assert visits == [1, 2]
+
+
+@pytest.mark.parametrize("field", ["assessment_fact", "interpretation_fact"])
+def test_prepared_rejects_mutable_fact_carriers(consumption_case, field):
+    service, first, _, _, _ = consumption_case
+    with ExitStack() as stack:
+        service._lock_inputs(stack)
+        transaction = _prepared_transaction(service, stack)
+        prepared = service._prepare_assessment_inventory(transaction[-1])
+        pair = prepared.pairs[0]
+        object.__setattr__(pair, field, bytearray(getattr(pair, field)))
+        with pytest.raises(app._AssessmentSourceMismatch):
+            app._select_prepared_assessment(prepared, _strategy_request(first))
+
+
+@pytest.mark.parametrize("index", [1, 2])
+@pytest.mark.parametrize(
+    "field", ["history_namespace_id", "history_sequence", "execution_id", "fingerprint"]
+)
+def test_prepared_final_seal_exact_fresh_occurrence(
+    consumption_case, monkeypatch, index, field
+):
+    service, _, _, _, _ = consumption_case
+    with ExitStack() as stack:
+        service._lock_inputs(stack)
+        transaction = _prepared_transaction(service, stack)
+        prepared = service._prepare_assessment_inventory(transaction[-1])
+        publisher = service._interpretation_service
+        support = publisher._seal_prepared_interpretation_inventory
+        visits = []
+
+        def changed(inventory, trusted):
+            support(inventory, trusted)
+            result = inventory.items[index - 1]
+            visits.append(index)
+            object.__setattr__(
+                result, field, 99 if field == "history_sequence" else "changed"
+            )
+
+        monkeypatch.setattr(
+            publisher, "_seal_prepared_interpretation_inventory", changed
+        )
+        with pytest.raises(app._AssessmentSourceMismatch):
+            service._seal_prepared_assessment_inventory(prepared, *transaction)
+        assert visits == [index]
+
+
+def test_prepared_seal_ast_support_loop_and_direct_tail_only():
+    tree = ast.parse(inspect.getsource(app))
+    method = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_seal_prepared_assessment_inventory"
+    )
+    body = method.body[1].body
+    index = next(
+        index
+        for index, node in enumerate(body)
+        if isinstance(node, ast.For)
+        and isinstance(node.iter, ast.Name)
+        and node.iter.id == "seal_expectations"
+    )
+    loop = body[index]
+    recheck = body[index - 2]
+    assert "_seal_prepared_interpretation_inventory" in ast.unparse(body[index - 1])
+    assert isinstance(recheck, ast.Try)
+    assert len(recheck.body) == 1
+    assert ast.unparse(recheck.body[0]) == "_check_prepared_assessment_facts(prepared)"
+    checker = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_check_prepared_assessment_facts"
+    )
+    assert "_check_assessment_pair" not in ast.unparse(checker)
+    assert "_authenticate_consumption_source" not in ast.unparse(checker)
+    assert [type(node) for node in loop.body] == [ast.If]
+    assert {
+        node.func.attr if isinstance(node.func, ast.Attribute) else node.func.id
+        for node in ast.walk(loop)
+        if isinstance(node, ast.Call)
+    } == {"type", "_AssessmentSourceMismatch"}
+    tail = body[index + 1 :]
+    assert len(tail) == 1 and isinstance(tail[0], ast.If)
+    assert {
+        node.func.id for node in ast.walk(tail[0]) if isinstance(node, ast.Call)
+    } == {"_AssessmentHistoryInvalid"}
+
+
+@pytest.mark.parametrize("target", ["assessment", "interpretation", "selector"])
+def test_prepared_final_recheck_classifies_late_codec_drift(
+    consumption_case, monkeypatch, target
+):
+    service, _, _, _, calls = consumption_case
+    with ExitStack() as stack:
+        service._lock_inputs(stack)
+        transaction = _prepared_transaction(service, stack)
+        prepared = service._prepare_assessment_inventory(transaction[-1])
+        check_pair = app._check_assessment_pair
+        mutations = []
+
+        def later_pair(item, interpretation_value):
+            check_pair(item, interpretation_value)
+            if item is prepared.pairs[1].assessment:
+                value = (
+                    prepared.interpretation_selectors[0]
+                    if target == "selector"
+                    else getattr(prepared.pairs[0], target)
+                )
+                field = (
+                    "interpretation_execution_id"
+                    if target == "selector"
+                    else "execution_id"
+                )
+                object.__setattr__(value, field, "invalid")
+                mutations.append((value, field))
+
+        monkeypatch.setattr(app, "_check_assessment_pair", later_pair)
+        before = len(calls)
+        with pytest.raises(app._AssessmentSourceMismatch):
+            service._seal_prepared_assessment_inventory(prepared, *transaction)
+        assert len(calls) == before  # Drift is rejected before fresh support.
+        assert len(mutations) == 1
+        value, field = mutations[0]
+        assert getattr(value, field) == "invalid"  # Never repair the working data.
+
+
+def test_option_c_complete_upstream_before_local_binding_and_one_final_seal(
+    consumption_case, monkeypatch
+):
+    service, _, _, _, calls = consumption_case
+    publisher = service._interpretation_service
+    select = i._select_prepared_interpretation
+    prepare = publisher._prepare_interpretation_inventory
+    seal = publisher._seal_prepared_interpretation_inventory
+    events = []
+    selected = []
+
+    def preparing(transaction):
+        result = prepare(transaction)
+        events.append("prepare")
+        return result
+
+    def selecting(inventory, selector, transaction):
+        assert events == ["prepare"]
+        assert len(calls) == 4
+        value = select(inventory, selector, transaction)
+        selected.append(value.history_sequence)
+        return value
+
+    def sealing(inventory, transaction):
+        assert selected == [1, 2, 1, 2]
+        events.append("seal")
+        return seal(inventory, transaction)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("standalone selector authentication returned to Option C")
+
+    monkeypatch.setattr(publisher, "_prepare_interpretation_inventory", preparing)
+    monkeypatch.setattr(publisher, "_seal_prepared_interpretation_inventory", sealing)
+    monkeypatch.setattr(publisher, "_authenticate_interpretation_occurrence", forbidden)
+    monkeypatch.setattr(i, "_select_prepared_interpretation", selecting)
+    with ExitStack() as stack:
+        service._lock_inputs(stack)
+        transaction = _prepared_transaction(service, stack)
+        prepared = service._prepare_assessment_inventory(transaction[-1])
+        assert selected == [1, 2]
+        service._seal_prepared_assessment_inventory(prepared, *transaction)
+        assert events == ["prepare", "seal"] and len(calls) == 6
+
+
+@pytest.mark.parametrize("change", ["missing", "lineage"])
+def test_option_c_committed_source_failure_classification(consumption_case, change):
+    service, first, _, _, calls = consumption_case
+    item = app._reconstruct_result(app._encode_result(first))
+    content = item.assessment
+    if change == "missing":
+        content = replace(
+            content,
+            source_interpretation_occurrence=replace(
+                content.source_interpretation_occurrence,
+                interpretation_history_sequence=99,
+            ),
+        )
+        expected = app._AssessmentHistoryInvalid
+    else:
+        content = replace(content, source_interpretation_content_fingerprint=FP)
+        expected = app._AssessmentSourceMismatch
+    object.__setattr__(item, "assessment", content)
+    object.__setattr__(item, "fingerprint", canonical_fingerprint(item._payload()))
+    service._committed = service._history_owner._state = (
+        3,
+        (app._encode_result(item), service._committed[1][1]),
+    )
+    with ExitStack() as stack:
+        service._lock_inputs(stack)
+        transaction = _prepared_transaction(service, stack)
+        with pytest.raises(expected):
+            service._prepare_assessment_inventory(transaction[-1])
+        assert len(calls) == 4
