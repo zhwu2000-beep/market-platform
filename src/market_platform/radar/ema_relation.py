@@ -1,11 +1,5 @@
 """Profile-specific acceptance of the latest EMA8/EMA20 relationship."""
 
-from collections.abc import Sequence
-from enum import StrEnum
-from numbers import Real
-from typing import cast
-
-from market_platform.indicators.trend import calculate_ema
 from market_platform.radar.context import RadarEvaluationContext
 from market_platform.radar.core import (
     RadarGateDisposition,
@@ -17,17 +11,17 @@ from market_platform.radar.current_content import (
     COMPLETED_DAILY_HISTORY_LOOKUP,
     RadarCompletedDailyHistoryLookupStatus,
 )
+from market_platform.radar.lightweight_observation import (
+    RadarEmaRelation as RadarEmaRelation,
+)
+from market_platform.radar.lightweight_observation import (
+    calculate_ema8_ema20_relation,
+)
 from market_platform.radar.resolver import RadarGateImplementationKey
 
 EMA8_EMA20_RELATION_KEY = RadarGateImplementationKey(
     "ema8_ema20_relation", "1", "ema8_ema20_relation/v1"
 )
-
-
-class RadarEmaRelation(StrEnum):
-    ABOVE = "ABOVE"
-    EQUAL = "EQUAL"
-    BELOW = "BELOW"
 
 
 class RadarEma8Ema20RelationGate:
@@ -77,18 +71,7 @@ class RadarEma8Ema20RelationGate:
             raise ValueError("PRESENT completed daily history requires history")
         if history.instrument != context.instrument:
             raise ValueError("Completed daily history instrument must match context")
-        # Public row order: symbol, timestamp, open, high, low, close, volume, provider.
-        closes = tuple(row[5] for row in history.series.full_prefix().iter_rows())
-        ema8 = calculate_ema(cast(Sequence[Real], closes), period=8)
-        ema20 = calculate_ema(cast(Sequence[Real], closes), period=20)
-        if not ema8 or not ema20 or ema8[-1] is None or ema20[-1] is None:
-            raise ValueError("Completed daily history must yield latest EMA8 and EMA20")
-        if ema8[-1] > ema20[-1]:
-            relation = RadarEmaRelation.ABOVE
-        elif ema8[-1] == ema20[-1]:
-            relation = RadarEmaRelation.EQUAL
-        else:
-            relation = RadarEmaRelation.BELOW
+        relation = calculate_ema8_ema20_relation(history)
         disposition = (
             RadarGateDisposition.PASS
             if relation in self._accepted_relations

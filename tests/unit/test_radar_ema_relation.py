@@ -22,7 +22,7 @@ from market_platform.instruments.identity import (
     InstrumentMappingSourceIdentity,
 )
 from market_platform.instruments.mapping import InstrumentMapping
-from market_platform.radar import ema_relation
+from market_platform.radar import lightweight_observation
 from market_platform.radar.application import (
     RadarApplicationService,
     RadarCheckpointAdvancement,
@@ -309,7 +309,7 @@ def test_relations_reuse_full_history_without_mutation(
     materialize = Mock(side_effect=AssertionError("No DataFrame materialization"))
     monkeypatch.setattr(HistoricalPriceSeries, "to_dataframe", materialize)
     calculator = Mock(wraps=calculate_ema)
-    monkeypatch.setattr(ema_relation, "calculate_ema", calculator)
+    monkeypatch.setattr(lightweight_observation, "calculate_ema", calculator)
     accepted = [relation] if accept else ["EQUAL" if relation != "EQUAL" else "BELOW"]
     item = occurrence({"accepted_relations": accepted})
     result = RadarEma8Ema20RelationGate(item).evaluate(ctx)
@@ -334,7 +334,7 @@ def test_relations_reuse_full_history_without_mutation(
 
 def test_unavailable_does_not_calculate(monkeypatch):
     calculator = Mock(side_effect=AssertionError("Must not calculate"))
-    monkeypatch.setattr(ema_relation, "calculate_ema", calculator)
+    monkeypatch.setattr(lightweight_observation, "calculate_ema", calculator)
     item = occurrence({"accepted_relations": ["BELOW"]})
     result = RadarEma8Ema20RelationGate(item).evaluate(
         context({COMPLETED_DAILY_HISTORY_LOOKUP: lambda: UNAVAILABLE})
@@ -381,7 +381,7 @@ def test_history_instrument_mismatch_fails_before_calculation(runtime, monkeypat
     calculator = Mock(
         side_effect=AssertionError("Must not calculate mismatched history")
     )
-    monkeypatch.setattr(ema_relation, "calculate_ema", calculator)
+    monkeypatch.setattr(lightweight_observation, "calculate_ema", calculator)
     item = occurrence({"accepted_relations": ["ABOVE"]})
     with pytest.raises(
         ValueError, match="^Completed daily history instrument must match context$"
@@ -409,7 +409,7 @@ def test_calculation_invariant_failure_escapes(runtime, monkeypatch, period, bad
         return calculate_ema(values, period=period)
 
     failing_period = period
-    monkeypatch.setattr(ema_relation, "calculate_ema", calculate)
+    monkeypatch.setattr(lightweight_observation, "calculate_ema", calculate)
     ctx = context({COMPLETED_DAILY_HISTORY_LOOKUP: lambda: retained})
     item = occurrence({"accepted_relations": ["ABOVE"]})
     with pytest.raises((ValueError, RuntimeError)):
@@ -422,7 +422,7 @@ def test_calculation_invariant_failure_escapes(runtime, monkeypatch, period, bad
 
 def test_resolution_is_lazy(runtime, monkeypatch):
     calculator = Mock(side_effect=AssertionError("No construction calculation"))
-    monkeypatch.setattr(ema_relation, "calculate_ema", calculator)
+    monkeypatch.setattr(lightweight_observation, "calculate_ema", calculator)
     loaders = bind(runtime)
     history = Mock(wraps=loaders[COMPLETED_DAILY_HISTORY_LOOKUP])
     loaders[COMPLETED_DAILY_HISTORY_LOOKUP] = history
@@ -477,7 +477,7 @@ def test_trigger_order_and_one_acquisition(runtime, monkeypatch, mode):
     history_loader = Mock(wraps=loaders[COMPLETED_DAILY_HISTORY_LOOKUP])
     loaders[COMPLETED_DAILY_HISTORY_LOOKUP] = history_loader
     calculator = Mock(wraps=calculate_ema)
-    monkeypatch.setattr(ema_relation, "calculate_ema", calculator)
+    monkeypatch.setattr(lightweight_observation, "calculate_ema", calculator)
     evaluate = Mock(wraps=RadarEma8Ema20RelationGate.evaluate)
     monkeypatch.setattr(
         RadarEma8Ema20RelationGate, "evaluate", lambda self, ctx: evaluate(self, ctx)
@@ -519,7 +519,9 @@ def test_application_checkpoint_after_technical_gate(
         loaders[COMPLETED_DAILY_HISTORY_LOOKUP] = lambda: UNAVAILABLE
     if mode == "failure":
         monkeypatch.setattr(
-            ema_relation, "calculate_ema", Mock(side_effect=RuntimeError("EMA failed"))
+            lightweight_observation,
+            "calculate_ema",
+            Mock(side_effect=RuntimeError("EMA failed")),
         )
     store = RadarCheckpointFileStore(tmp_path)
     save = Mock(wraps=store.save)
