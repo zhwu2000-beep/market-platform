@@ -18,10 +18,17 @@ from pathlib import Path
 
 from market_platform.instruments.identity import CanonicalInstrumentId
 from market_platform.radar.observation import (
+    RADAR_OBSERVATION_CHECKPOINT_SCHEMA,
     RadarObservationCheckpoint,
     RadarObservationLookupResult,
     RadarObservationLookupStatus,
     RadarObservationStateError,
+)
+from market_platform.radar.observation_state import (
+    RADAR_OBSERVATION_STATE_SCHEMA,
+    RadarObservationState,
+    RadarObservationStateLookupResult,
+    RadarObservationStateLookupStatus,
 )
 
 _REPARSE_POINT = 0x400
@@ -83,38 +90,55 @@ class RadarCheckpointFileStore:
             pass
 
     def lookup(self, instrument: CanonicalInstrumentId) -> RadarObservationLookupResult:
-        target = self._root / _filename(instrument)
+        result = self.lookup_state(instrument)
+        if result.checkpoint is not None:
+            return RadarObservationLookupResult(
+                RadarObservationLookupStatus.PRESENT, result.checkpoint
+            )
+        return RadarObservationLookupResult(
+            RadarObservationLookupStatus(result.status.value)
+        )
+
+    def lookup_state(
+        self, instrument: CanonicalInstrumentId
+    ) -> RadarObservationStateLookupResult:
+        """Read once; malformed state is never absence, unavailability or legacy."""
         try:
-            try:
-                self._check_root()
-            except FileNotFoundError, NotADirectoryError:
-                return RadarObservationLookupResult(
-                    RadarObservationLookupStatus.UNAVAILABLE
-                )
-            try:
-                info = target.lstat()
-            except FileNotFoundError:
-                # A root removed since the initial check is not successful absence.
-                try:
-                    self._check_root()
-                except FileNotFoundError, NotADirectoryError:
-                    return RadarObservationLookupResult(
-                        RadarObservationLookupStatus.UNAVAILABLE
-                    )
-                return RadarObservationLookupResult(RadarObservationLookupStatus.ABSENT)
-            _regular_file(info)
-            with target.open("rb") as stream:
-                _regular_file(os.fstat(stream.fileno()))
-                raw = stream.read()
+            return self._lookup_state(instrument, unavailable_root=True)
         except OSError as exc:
             if (
                 exc.errno in _UNAVAILABLE_ERRNOS
                 or getattr(exc, "winerror", None) in _UNAVAILABLE_WINERRORS
             ):
-                return RadarObservationLookupResult(
-                    RadarObservationLookupStatus.UNAVAILABLE
+                return RadarObservationStateLookupResult(
+                    RadarObservationStateLookupStatus.UNAVAILABLE
                 )
             raise
+
+    def _lookup_state(
+        self, instrument: CanonicalInstrumentId, *, unavailable_root: bool = False
+    ) -> RadarObservationStateLookupResult:
+        # Keep operational errors intact for write callers, which must fail closed.
+        target = self._root / _filename(instrument)
+        try:
+            self._check_root()
+            try:
+                info = target.lstat()
+            except FileNotFoundError:
+                self._check_root()
+                return RadarObservationStateLookupResult(
+                    RadarObservationStateLookupStatus.ABSENT
+                )
+        except FileNotFoundError, NotADirectoryError:
+            if not unavailable_root:
+                raise
+            return RadarObservationStateLookupResult(
+                RadarObservationStateLookupStatus.UNAVAILABLE
+            )
+        _regular_file(info)
+        with target.open("rb") as stream:
+            _regular_file(os.fstat(stream.fileno()))
+            raw = stream.read()
         try:
             text = raw.decode("utf-8")
         except UnicodeDecodeError as exc:
@@ -125,19 +149,60 @@ class RadarCheckpointFileStore:
             )
         except json.JSONDecodeError as exc:
             raise RadarObservationStateError("Checkpoint is not valid JSON") from exc
-        checkpoint = RadarObservationCheckpoint.from_dict(payload)
+        if type(payload) is not dict:
+            raise RadarObservationStateError("Expected a checkpoint/state object")
+        schema = payload.get("schema_version")
+        if schema == RADAR_OBSERVATION_CHECKPOINT_SCHEMA:
+            checkpoint = RadarObservationCheckpoint.from_dict(payload)
+            result = RadarObservationStateLookupResult(
+                RadarObservationStateLookupStatus.LEGACY_CONTENT_ONLY,
+                legacy_checkpoint=checkpoint,
+            )
+        elif schema == RADAR_OBSERVATION_STATE_SCHEMA:
+            state = RadarObservationState.from_dict(payload)
+            checkpoint = state.market_observation
+            result = RadarObservationStateLookupResult(
+                RadarObservationStateLookupStatus.PRESENT_COMPLETE_STATE, state=state
+            )
+        else:
+            raise RadarObservationStateError("Unsupported checkpoint/state schema")
         if checkpoint.instrument != instrument:
             raise RadarObservationStateError("Checkpoint instrument mismatch")
-        return RadarObservationLookupResult(
-            RadarObservationLookupStatus.PRESENT, checkpoint
-        )
+        return result
 
     def save(self, checkpoint: RadarObservationCheckpoint) -> None:
+        """Write legacy content, rejecting corrupt targets and state downgrade."""
         if type(checkpoint) is not RadarObservationCheckpoint:
             raise TypeError("checkpoint must be a RadarObservationCheckpoint")
+        existing = self._lookup_state(checkpoint.instrument)
+        if existing.status is RadarObservationStateLookupStatus.PRESENT_COMPLETE_STATE:
+            raise RadarCheckpointStoreError(
+                "Cannot downgrade complete observation state"
+            )
+        self._publish(checkpoint.instrument, checkpoint.to_dict())
+
+    def save_state(self, state: RadarObservationState) -> None:
+        """Publish one complete record; no application eligibility is inferred."""
+        if type(state) is not RadarObservationState:
+            raise TypeError("state must be a RadarObservationState")
+        payload = state.to_dict()
+        RadarObservationState.from_dict(payload)
+        # Fail closed on invalid prior state under the single-owner contract.
+        # This preflight does not protect against concurrent target mutation.
+        self._lookup_state(state.market_observation.instrument)
+        self._publish(state.market_observation.instrument, payload)
+
+    def _publish(
+        self, instrument: CanonicalInstrumentId, document: dict[str, object]
+    ) -> None:
+        """Replace is the process-visible commit point; prior failures preserve bytes.
+
+        The file is flushed, fsynced and closed before publication. The directory
+        is not fsynced, so this does not promise universal power-loss durability.
+        """
         payload = (
             json.dumps(
-                checkpoint.to_dict(),
+                document,
                 ensure_ascii=False,
                 allow_nan=False,
                 sort_keys=True,
@@ -146,7 +211,7 @@ class RadarCheckpointFileStore:
             + b"\n"
         )
         self._check_root()
-        target = self._root / _filename(checkpoint.instrument)
+        target = self._root / _filename(instrument)
         try:
             info = target.lstat()
         except FileNotFoundError:
