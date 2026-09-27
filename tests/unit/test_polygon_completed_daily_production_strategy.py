@@ -1130,12 +1130,15 @@ def test_constructor_and_lock_ast_are_foundation_only():
     }
 
 
+_V082_FEATURE_CHECKPOINT = "e18fc05cea137be041bbf3e2ba0a2698935de455"
+
+
 def test_slice_file_scope():
     root = Path(__file__).resolve().parents[2]
     _assert_slice_file_scope(root)
 
 
-def _assert_slice_file_scope(root):
+def _assert_slice_file_scope(root, *, include_live_changes=False):
     original_scope = {
         "src/market_platform/application/polygon_completed_daily_production_strategy.py",
         "tests/unit/test_polygon_completed_daily_production_strategy.py",
@@ -1163,11 +1166,17 @@ def _assert_slice_file_scope(root):
     checkpoints = (
         ("original slice", [slice_start, slice_end], original_scope),
         ("accepted ADRs", [slice_end, adrs_end], adr_scope),
-        ("performance correction", [adrs_end, "HEAD"], performance_scope),
+        (
+            "performance correction",
+            [adrs_end, _V082_FEATURE_CHECKPOINT],
+            performance_scope,
+        ),
     )
     for label, revisions, allowed in checkpoints:
         commands = [["git", "diff", "--name-only", "--no-renames", *revisions]]
-        if label == "performance correction":
+        # Completed v0.82 audits do not own later repository changes. Only the
+        # isolated historical fixture exercises the former live-slice guard.
+        if label == "performance correction" and include_live_changes:
             commands.extend(
                 [
                     ["git", "diff", "--cached", "--name-only", "--no-renames"],
@@ -1206,9 +1215,12 @@ def _assert_slice_file_scope(root):
         "docs/adr/0045_historical_price_storage_continuity_for_governed_authentication.md",
     ],
 )
-def test_slice_file_scope_rejects_unauthorized_path(monkeypatch, source, path):
+def test_slice_file_scope_rejects_unauthorized_path(
+    scope_repository, monkeypatch, source, path
+):
+    root = scope_repository
     # A stale checkpoint must not make a negative control pass accidentally.
-    test_slice_file_scope()
+    _assert_slice_file_scope(root, include_live_changes=True)
     check_output = subprocess.check_output
     injected = []
 
@@ -1226,7 +1238,7 @@ def test_slice_file_scope_rejects_unauthorized_path(monkeypatch, source, path):
 
     monkeypatch.setattr(subprocess, "check_output", changed_paths)
     with pytest.raises(AssertionError) as failure:
-        test_slice_file_scope()
+        _assert_slice_file_scope(root, include_live_changes=True)
     assert injected == [path]
     assert str(failure.value).splitlines()[0] == (
         f"performance correction: unexpected={[path]!r}, missing=[]"
@@ -1239,15 +1251,52 @@ def scope_repository(tmp_path):
     # Isolate all index/worktree mutations; share only read-only source objects.
     with TemporaryDirectory(dir=tmp_path) as directory:
         subprocess.check_output(
-            ["git", "clone", "--quiet", "--shared", str(root), directory],
+            [
+                "git",
+                "clone",
+                "--quiet",
+                "--shared",
+                "--no-checkout",
+                str(root),
+                directory,
+            ],
             text=True,
+        )
+        subprocess.check_output(
+            ["git", "checkout", "--quiet", "--detach", _V082_FEATURE_CHECKPOINT],
+            cwd=directory,
+        )
+        assert (
+            subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=directory, text=True
+            ).strip()
+            == _V082_FEATURE_CHECKPOINT
         )
         yield Path(directory)
 
 
+def test_slice_file_scope_historical_audit_ignores_live_changes(scope_repository):
+    root = scope_repository
+    path = "src/market_platform/__init__.py"
+    target = root / path
+    original = target.read_bytes()
+    target.write_bytes(original + b"\n# Staged change outside the historical slice.\n")
+    subprocess.check_output(["git", "add", "--", path], cwd=root)
+    target.write_bytes(
+        original + b"\n# Unstaged change outside the historical slice.\n"
+    )
+    (root / "untracked.txt").write_text(
+        "outside the historical slice", encoding="utf-8"
+    )
+
+    _assert_slice_file_scope(root)
+    with pytest.raises(AssertionError, match="performance correction: unexpected="):
+        _assert_slice_file_scope(root, include_live_changes=True)
+
+
 def test_slice_file_scope_rejects_staged_cancelled_index(scope_repository):
     root = scope_repository
-    _assert_slice_file_scope(root)
+    _assert_slice_file_scope(root, include_live_changes=True)
     path = "src/market_platform/__init__.py"
     target = root / path
     original = target.read_bytes()
@@ -1275,7 +1324,7 @@ def test_slice_file_scope_rejects_staged_cancelled_index(scope_repository):
         text=True,
     ).splitlines() == [path]
     with pytest.raises(AssertionError) as failure:
-        _assert_slice_file_scope(root)
+        _assert_slice_file_scope(root, include_live_changes=True)
     assert str(failure.value).splitlines()[0] == (
         f"performance correction: unexpected={[path]!r}, missing=[]"
     )
@@ -1283,7 +1332,7 @@ def test_slice_file_scope_rejects_staged_cancelled_index(scope_repository):
 
 def test_slice_file_scope_rejects_unauthorized_rename_source(scope_repository):
     root = scope_repository
-    _assert_slice_file_scope(root)
+    _assert_slice_file_scope(root, include_live_changes=True)
     source = "src/market_platform/__init__.py"
     destination = (
         "src/market_platform/application/polygon_completed_daily_production_strategy.py"
@@ -1312,7 +1361,7 @@ def test_slice_file_scope_rejects_unauthorized_rename_source(scope_repository):
         ).splitlines()
     ) == {source, destination}
     with pytest.raises(AssertionError) as failure:
-        _assert_slice_file_scope(root)
+        _assert_slice_file_scope(root, include_live_changes=True)
     assert str(failure.value).splitlines()[0] == (
         f"performance correction: unexpected={[source]!r}, missing=[]"
     )
