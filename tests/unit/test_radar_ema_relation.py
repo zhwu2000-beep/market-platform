@@ -42,7 +42,6 @@ from market_platform.radar.core import (
 )
 from market_platform.radar.current_content import (
     COMPLETED_DAILY_HISTORY_LOOKUP,
-    RadarCompletedDailyHistoryLookupResult,
     RadarCompletedDailyHistoryLookupStatus,
     bind_completed_daily_current_content,
 )
@@ -50,6 +49,13 @@ from market_platform.radar.ema_relation import (
     EMA8_EMA20_RELATION_KEY,
     RadarEma8Ema20RelationGate,
     RadarEmaRelation,
+)
+from market_platform.radar.lightweight_observation import (
+    EMA8_EMA20_OBSERVATION_LOOKUP,
+    RadarLightweightObservationLookupResult,
+    RadarLightweightObservationLookupStatus,
+    bind_ema8_ema20_observation,
+    observe_ema8_ema20,
 )
 from market_platform.radar.observation import (
     RadarObservationCheckpoint,
@@ -88,8 +94,8 @@ MAPPING = InstrumentMapping(
     InstrumentMappingSourceIdentity("registry", "1"),
     datetime(2000, 1, 1, tzinfo=UTC),
 )
-UNAVAILABLE = RadarCompletedDailyHistoryLookupResult(
-    RadarCompletedDailyHistoryLookupStatus.UNAVAILABLE
+UNAVAILABLE = RadarLightweightObservationLookupResult(
+    RadarLightweightObservationLookupStatus.UNAVAILABLE
 )
 
 
@@ -124,6 +130,13 @@ def resolver(calendar=None):
 
 
 def context(loaders):
+    loaders = dict(loaders)
+    if COMPLETED_DAILY_HISTORY_LOOKUP in loaders:
+        loaders[EMA8_EMA20_OBSERVATION_LOOKUP] = bind_ema8_ema20_observation(
+            instrument=INSTRUMENT,
+            as_of=AS_OF,
+            history_loader=loaders[COMPLETED_DAILY_HISTORY_LOOKUP],
+        )
     return RadarEvaluationContext(INSTRUMENT, AS_OF, loaders)
 
 
@@ -242,7 +255,7 @@ def test_canonical_configuration_and_occurrence(accepted):
     gate = RadarEma8Ema20RelationGate(item)
     assert gate.identity is item.gate_identity
     result = gate.evaluate(
-        context({COMPLETED_DAILY_HISTORY_LOOKUP: lambda: UNAVAILABLE})
+        context({EMA8_EMA20_OBSERVATION_LOOKUP: lambda: UNAVAILABLE})
     )
     assert result.occurrence is item
     assert item.gate_identity.configuration["accepted_relations"] == accepted
@@ -319,7 +332,7 @@ def test_relations_reuse_full_history_without_mutation(
     assert result.reason_code == f"EMA8_{relation}_EMA20"
     assert result.detail is None
     assert result.occurrence is item
-    get_fact.assert_called_once_with(COMPLETED_DAILY_HISTORY_LOOKUP)
+    get_fact.assert_called_once_with(EMA8_EMA20_OBSERVATION_LOOKUP)
     loader.assert_called_once_with()
     assert calculator.call_args_list == [
         call(closes, period=8),
@@ -337,7 +350,7 @@ def test_unavailable_does_not_calculate(monkeypatch):
     monkeypatch.setattr(lightweight_observation, "calculate_ema", calculator)
     item = occurrence({"accepted_relations": ["BELOW"]})
     result = RadarEma8Ema20RelationGate(item).evaluate(
-        context({COMPLETED_DAILY_HISTORY_LOOKUP: lambda: UNAVAILABLE})
+        context({EMA8_EMA20_OBSERVATION_LOOKUP: lambda: UNAVAILABLE})
     )
     assert result.disposition is RadarGateDisposition.ATTENTION
     assert result.reason_code == "HISTORY_UNAVAILABLE"
@@ -355,11 +368,11 @@ def test_fact_errors_escape_and_fail_pipeline(kind):
         loader.side_effect = RuntimeError("loader failed")
         error = RuntimeError
     if kind == "malformed":
-        loader.side_effect = lambda: RadarCompletedDailyHistoryLookupResult(
-            RadarCompletedDailyHistoryLookupStatus.PRESENT
+        loader.side_effect = lambda: RadarLightweightObservationLookupResult(
+            RadarLightweightObservationLookupStatus.PRESENT
         )
         error = ValueError
-    ctx = context({} if kind == "missing" else {COMPLETED_DAILY_HISTORY_LOOKUP: loader})
+    ctx = context({} if kind == "missing" else {EMA8_EMA20_OBSERVATION_LOOKUP: loader})
     item = occurrence({"accepted_relations": ["ABOVE"]})
     with pytest.raises(error):
         RadarEma8Ema20RelationGate(item).evaluate(ctx)
@@ -369,14 +382,22 @@ def test_fact_errors_escape_and_fail_pipeline(kind):
     assert result.failure.category is RadarPipelineFailureCategory.GATE_EXCEPTION
 
 
-def test_history_instrument_mismatch_fails_before_calculation(runtime, monkeypatch):
+def test_observation_instrument_mismatch_fails_before_calculation(runtime, monkeypatch):
     retained = context(bind(runtime)).get_fact(COMPLETED_DAILY_HISTORY_LOOKUP)
     assert retained.status is RadarCompletedDailyHistoryLookupStatus.PRESENT
     assert retained.history.instrument == INSTRUMENT
+    observed = observe_ema8_ema20(retained.history, as_of=AS_OF)
     ctx = RadarEvaluationContext(
         CanonicalInstrumentId("registry_other"),
         AS_OF,
-        {COMPLETED_DAILY_HISTORY_LOOKUP: lambda: retained},
+        {
+            EMA8_EMA20_OBSERVATION_LOOKUP: lambda: (
+                RadarLightweightObservationLookupResult(
+                    RadarLightweightObservationLookupStatus.PRESENT,
+                    observed,
+                )
+            )
+        },
     )
     calculator = Mock(
         side_effect=AssertionError("Must not calculate mismatched history")
@@ -384,7 +405,7 @@ def test_history_instrument_mismatch_fails_before_calculation(runtime, monkeypat
     monkeypatch.setattr(lightweight_observation, "calculate_ema", calculator)
     item = occurrence({"accepted_relations": ["ABOVE"]})
     with pytest.raises(
-        ValueError, match="^Completed daily history instrument must match context$"
+        ValueError, match="^Lightweight observation instrument must match context$"
     ):
         RadarEma8Ema20RelationGate(item).evaluate(ctx)
     calculator.assert_not_called()
@@ -516,16 +537,34 @@ def test_application_checkpoint_after_technical_gate(
 ):
     loaders = bind(runtime)
     if mode == "attention":
-        loaders[COMPLETED_DAILY_HISTORY_LOOKUP] = lambda: UNAVAILABLE
+        loaders[EMA8_EMA20_OBSERVATION_LOOKUP] = lambda: UNAVAILABLE
     if mode == "failure":
         monkeypatch.setattr(
             lightweight_observation,
             "calculate_ema",
             Mock(side_effect=RuntimeError("EMA failed")),
         )
+    if mode != "attention":
+        loaders[EMA8_EMA20_OBSERVATION_LOOKUP] = bind_ema8_ema20_observation(
+            instrument=INSTRUMENT,
+            as_of=AS_OF,
+            history_loader=loaders[COMPLETED_DAILY_HISTORY_LOOKUP],
+        )
+    observation_loader = Mock(wraps=loaders[EMA8_EMA20_OBSERVATION_LOOKUP])
+    loaders[EMA8_EMA20_OBSERVATION_LOOKUP] = observation_loader
+    observation_facts = []
+    original_get_fact = RadarEvaluationContext.get_fact
+
+    def get_fact(context, key):
+        fact = original_get_fact(context, key)
+        if key == EMA8_EMA20_OBSERVATION_LOOKUP:
+            observation_facts.append(fact)
+        return fact
+
+    monkeypatch.setattr(RadarEvaluationContext, "get_fact", get_fact)
     store = RadarCheckpointFileStore(tmp_path)
-    save = Mock(wraps=store.save)
-    monkeypatch.setattr(store, "save", save)
+    save = Mock(wraps=store.save_state)
+    monkeypatch.setattr(store, "save_state", save)
     trigger = occurrence({}, SESSION_CONTENT_TRIGGER_KEY, "trigger")
     item = occurrence({"accepted_relations": ["BELOW"]})
     service = RadarApplicationService(resolver(runtime[0]), store, lambda: AS_OF)
@@ -545,7 +584,14 @@ def test_application_checkpoint_after_technical_gate(
     )
     if mode == "drop":
         assert result.advancement is RadarCheckpointAdvancement.SAVED
-        save.assert_called_once_with(result.saved_checkpoint)
+        save.assert_called_once_with(result.saved_state)
+        observation_loader.assert_called_once_with()
+        assert len(observation_facts) == 2  # Independent Gate and Application access.
+        assert observation_facts[0] is observation_facts[1]
+        assert (
+            result.saved_state.lightweight_observation
+            is observation_facts[0].observation
+        )
         assert store.lookup(INSTRUMENT).checkpoint == result.saved_checkpoint
         assert (
             result.pipeline_result.executed_results[1].reason_code == "EMA8_ABOVE_EMA20"

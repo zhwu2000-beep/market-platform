@@ -12,7 +12,12 @@ from market_platform.data.historical import HistoricalPriceSeries
 from market_platform.data.models import PRICE_COLUMNS
 from market_platform.instruments.identity import CanonicalInstrumentId
 from market_platform.radar import lightweight_observation as subject
-from market_platform.radar.current_content import RadarCompletedDailyHistory
+from market_platform.radar.context import RadarEvaluationContext, RadarFactKey
+from market_platform.radar.current_content import (
+    RadarCompletedDailyHistory,
+    RadarCompletedDailyHistoryLookupResult,
+    RadarCompletedDailyHistoryLookupStatus,
+)
 from market_platform.radar.ema_relation import EMA8_EMA20_RELATION_KEY, RadarEmaRelation
 from market_platform.radar.lightweight_observation import RadarLightweightObservation
 from market_platform.radar.observation import RadarMarketContentScope
@@ -227,3 +232,139 @@ def test_exact_latest_comparison(monkeypatch, latest, expected):
         lambda values, *, period: (latest if period == 8 else 1.0,),
     )
     assert subject.calculate_ema8_ema20_relation(history) is expected
+
+
+@pytest.fixture
+def retained_history():
+    start = datetime(2025, 1, 1, tzinfo=UTC)
+    rows = [
+        ("TEST", start + timedelta(days=i), 1, 1, 1, 1, 1, "fixture")
+        for i in range(250)
+    ]
+    end = rows[-1][1].date()
+    return RadarCompletedDailyHistory(
+        observation().instrument,
+        end,
+        RadarMarketContentScope(start.date(), end),
+        HistoricalPriceSeries(pd.DataFrame(rows, columns=PRICE_COLUMNS)),
+    )
+
+
+def test_observation_fact_key_has_explicit_definition_and_type():
+    key = subject.EMA8_EMA20_OBSERVATION_LOOKUP
+    assert key == RadarFactKey(
+        "radar.ema8_ema20_relation_observation/revision-1/lookup/v1",
+        subject.RadarLightweightObservationLookupResult,
+    )
+    assert subject.EMA8_EMA20_OBSERVATION_DEFINITION_ID in key.fact_id
+
+
+def test_observation_binding_is_lazy_and_context_memoizes_retained_history(
+    retained_history, monkeypatch
+):
+    lookup = RadarCompletedDailyHistoryLookupResult(
+        RadarCompletedDailyHistoryLookupStatus.PRESENT, retained_history
+    )
+    history_loader = Mock(return_value=lookup)
+    expected = subject.observe_ema8_ema20(retained_history, as_of=observation().as_of)
+    observe = Mock(wraps=subject.observe_ema8_ema20)
+    monkeypatch.setattr(subject, "observe_ema8_ema20", observe)
+    provider = Mock(
+        side_effect=AssertionError("Observation must not acquire provider data")
+    )
+    monkeypatch.setattr(
+        "market_platform.data.providers.polygon.PolygonProvider.get_completed_daily_acquisition",
+        provider,
+    )
+    loader = subject.bind_ema8_ema20_observation(
+        instrument=retained_history.instrument,
+        as_of=observation().as_of,
+        history_loader=history_loader,
+    )
+    history_loader.assert_not_called()
+    observe.assert_not_called()
+    context = RadarEvaluationContext(
+        retained_history.instrument,
+        observation().as_of,
+        {subject.EMA8_EMA20_OBSERVATION_LOOKUP: loader},
+    )
+    current = context.get_fact(subject.EMA8_EMA20_OBSERVATION_LOOKUP)
+    assert current.status is subject.RadarLightweightObservationLookupStatus.PRESENT
+    assert current.observation == expected
+    assert context.get_fact(subject.EMA8_EMA20_OBSERVATION_LOOKUP) is current
+    history_loader.assert_called_once_with()
+    observe.assert_called_once_with(retained_history, as_of=observation().as_of)
+    provider.assert_not_called()
+    assert not hasattr(current, "__dict__")
+    with pytest.raises(FrozenInstanceError):
+        current.observation = None
+
+
+def test_unavailable_history_produces_typed_unavailable_without_calculation(
+    monkeypatch,
+):
+    calculate = Mock(side_effect=AssertionError("Unavailable must not calculate"))
+    monkeypatch.setattr(subject, "observe_ema8_ema20", calculate)
+    history_loader = Mock(
+        return_value=RadarCompletedDailyHistoryLookupResult(
+            RadarCompletedDailyHistoryLookupStatus.UNAVAILABLE
+        )
+    )
+    loader = subject.bind_ema8_ema20_observation(
+        instrument=observation().instrument,
+        as_of=observation().as_of,
+        history_loader=history_loader,
+    )
+    assert loader() == subject.RadarLightweightObservationLookupResult(
+        subject.RadarLightweightObservationLookupStatus.UNAVAILABLE
+    )
+    history_loader.assert_called_once_with()
+    calculate.assert_not_called()
+
+
+def test_binding_rejects_wrong_history_instrument_before_calculation(
+    retained_history, monkeypatch
+):
+    calculate = Mock(
+        side_effect=AssertionError("Mismatched history must not calculate")
+    )
+    monkeypatch.setattr(subject, "observe_ema8_ema20", calculate)
+    loader = subject.bind_ema8_ema20_observation(
+        instrument=CanonicalInstrumentId("other"),
+        as_of=observation().as_of,
+        history_loader=lambda: RadarCompletedDailyHistoryLookupResult(
+            RadarCompletedDailyHistoryLookupStatus.PRESENT, retained_history
+        ),
+    )
+    with pytest.raises(ValueError, match="instrument must match binding"):
+        loader()
+    calculate.assert_not_called()
+
+
+@pytest.mark.parametrize("lookup", [None, object(), {"status": "PRESENT"}])
+def test_binding_requires_actual_typed_history_lookup(lookup):
+    loader = subject.bind_ema8_ema20_observation(
+        instrument=observation().instrument,
+        as_of=observation().as_of,
+        history_loader=lambda: lookup,
+    )
+    with pytest.raises(TypeError):
+        loader()
+
+
+@pytest.mark.parametrize(
+    "status,value",
+    [
+        ("PRESENT", observation()),
+        (subject.RadarLightweightObservationLookupStatus.PRESENT, None),
+        (subject.RadarLightweightObservationLookupStatus.PRESENT, object()),
+        (subject.RadarLightweightObservationLookupStatus.UNAVAILABLE, observation()),
+        (
+            subject.RadarLightweightObservationLookupStatus.PRESENT,
+            replace(observation(), calculation_revision="2"),
+        ),
+    ],
+)
+def test_lookup_payload_is_strict(status, value):
+    with pytest.raises((TypeError, ValueError)):
+        subject.RadarLightweightObservationLookupResult(status, value)

@@ -26,7 +26,11 @@ from market_platform.data.providers.polygon import (
     PolygonCompletedDailyAggregate,
 )
 from market_platform.instruments.identity import CanonicalInstrumentId
-from market_platform.radar.application import RadarCheckpointAdvancementError
+from market_platform.radar import lightweight_observation
+from market_platform.radar.application import (
+    RadarCheckpointAdvancementError,
+    RadarObservationPreparationError,
+)
 from market_platform.radar.calendar import CalendarCoverageError
 from market_platform.radar.checkpoint_store import RadarCheckpointStoreError
 from market_platform.radar.core import (
@@ -34,6 +38,7 @@ from market_platform.radar.core import (
     RadarGateOccurrence,
     RadarProfile,
 )
+from market_platform.radar.pipeline import RadarPipeline
 from market_platform.radar.resolver import RadarResolutionError
 
 AS_OF = datetime(2026, 9, 24, tzinfo=UTC)
@@ -185,7 +190,17 @@ def run(runtime, **changes):
     return subject.run_single_symbol_radar(**(runtime.kwargs | changes))
 
 
-def test_acceptance_repeat_and_projection(runtime):
+def test_acceptance_repeat_and_projection(runtime, monkeypatch):
+    observe = Mock(wraps=lightweight_observation.observe_ema8_ema20)
+    monkeypatch.setattr(lightweight_observation, "observe_ema8_ema20", observe)
+    original_save = subject.RadarCheckpointFileStore.save_state
+    calls = []
+
+    def save_state(store, state):
+        calls.append(state)
+        return original_save(store, state)
+
+    monkeypatch.setattr(subject.RadarCheckpointFileStore, "save_state", save_state)
     first = run(runtime, as_of=AS_OF.astimezone(timezone(timedelta(hours=8))))
     app = first.application
     assert app.pipeline_result.profile is runtime.kwargs["profile"]
@@ -224,7 +239,34 @@ def test_acceptance_repeat_and_projection(runtime):
     assert projection["application"]["pipeline"]["terminating_occurrence"] is None
     with pytest.raises(FrozenInstanceError):
         first.application = None
+    assert app.meaningful_change_decision.reason == "BASELINE_INITIALIZED"
+    assert not app.meaningful_change_decision.meaningful_change
+    assert (
+        projection["application"]["meaningful_change_decision"]
+        == app.meaningful_change_decision.to_dict()
+    )
+    assert projection["application"]["saved_state"] == app.saved_state.to_dict()
+    assert calls == [app.saved_state]
+    observe.assert_called_once()
+    saved_path = next(runtime.kwargs["checkpoint_root"].glob("*.json"))
+    before = saved_path.read_bytes()
+    assert (
+        subject.RadarCheckpointFileStore(runtime.kwargs["checkpoint_root"])
+        .lookup_state(app.pipeline_result.instrument)
+        .state
+        == app.saved_state
+    )
     second = run(runtime)
+    assert saved_path.read_bytes() == before
+    assert calls == [app.saved_state]
+    observe.assert_called_once()
+    assert (
+        second.application.saved_state
+        is second.application.meaningful_change_decision
+        is None
+    )
+    assert second.to_dict()["application"]["saved_state"] is None
+    assert second.to_dict()["application"]["meaningful_change_decision"] is None
     pipeline = second.to_dict()["application"]["pipeline"]
     assert pipeline["outcome"] == "FILTERED"
     assert len(pipeline["executed_results"]) == 1
@@ -272,11 +314,8 @@ def test_response_rejects_checkpoint_identity_mismatch_before_projection(runtime
         response.application.saved_checkpoint,
         instrument=CanonicalInstrumentId("security.other"),
     )
-    application = replace(response.application, saved_checkpoint=checkpoint)
-    with pytest.raises(ValueError, match="saved checkpoint instrument must match"):
-        subject.RadarSingleSymbolResponse(
-            response.canonical_instrument, application
-        ).to_dict()
+    with pytest.raises(ValueError, match="Saved state must correspond"):
+        replace(response.application, saved_checkpoint=checkpoint)
 
 
 def test_active_loop_rejected_first(runtime, monkeypatch, recwarn):
@@ -502,7 +541,9 @@ def test_unavailable_root_is_lazy_and_not_created(runtime):
 
 def test_save_failure_retains_completed_result(runtime, monkeypatch):
     monkeypatch.setattr(
-        subject.RadarCheckpointFileStore, "save", Mock(side_effect=OSError("save"))
+        subject.RadarCheckpointFileStore,
+        "save_state",
+        Mock(side_effect=OSError("save")),
     )
     with pytest.raises(RadarCheckpointAdvancementError) as exc:
         run(runtime)
@@ -602,6 +643,8 @@ def test_composition_does_not_acquire_and_passes_exact_loader_bundle(
 ):
     original = subject.RadarApplicationService
     binder = Mock(wraps=subject.bind_completed_daily_current_content)
+    observation_binder = Mock(wraps=subject.bind_ema8_ema20_observation)
+    monkeypatch.setattr(subject, "bind_ema8_ema20_observation", observation_binder)
     bundles = []
 
     def bind(**kwargs):
@@ -616,7 +659,14 @@ def test_composition_does_not_acquire_and_passes_exact_loader_bundle(
 
         def evaluate(profile, instrument, as_of, loaders):
             assert loaders is bundles[-1]
-            assert len(loaders) == 2  # Prior observation remains Application-owned.
+            assert len(loaders) == 3  # Prior observation remains Application-owned.
+            assert observation_binder.call_count == len(bundles)
+            assert (
+                observation_binder.call_args.kwargs["history_loader"]
+                is loaders[subject.COMPLETED_DAILY_HISTORY_LOOKUP]
+            )
+            assert observation_binder.call_args.kwargs["instrument"] == instrument
+            assert observation_binder.call_args.kwargs["as_of"] == as_of
             runtime.provider.get_completed_daily_acquisition.assert_not_called()
             return real.evaluate(profile, instrument, as_of, loaders)
 
@@ -658,3 +708,73 @@ def test_production_completion_clock_is_utc_wall_time():
     after = datetime.now(UTC)
     assert observed.tzinfo is UTC
     assert before <= observed <= after
+
+
+def seed_legacy(runtime):
+    first = run(runtime)
+    path = next(runtime.kwargs["checkpoint_root"].glob("*.json"))
+    # Simulate an actual pre-activation file, without using the downgrade-rejecting API.
+    path.write_text(
+        json.dumps(first.application.saved_checkpoint.to_dict()), encoding="utf-8"
+    )
+    runtime.provider.get_completed_daily_acquisition.reset_mock()
+    runtime.client.close.reset_mock()
+    return path
+
+
+def test_legacy_unchanged_bootstrap_uses_one_fresh_acquisition(runtime, monkeypatch):
+    path = seed_legacy(runtime)
+    completed = []
+    original = RadarPipeline.evaluate
+
+    def evaluate(pipeline, context):
+        value = original(pipeline, context)
+        completed.append(value)
+        return value
+
+    monkeypatch.setattr(RadarPipeline, "evaluate", evaluate)
+    ema = Mock(side_effect=AssertionError("EMA skipped"))
+    monkeypatch.setattr(subject.RadarEma8Ema20RelationGate, "evaluate", ema)
+    original_observe = lightweight_observation.observe_ema8_ema20
+
+    def observe(history, *, as_of):
+        assert len(completed) == 1
+        return original_observe(history, as_of=as_of)
+
+    calculate = Mock(side_effect=observe)
+    monkeypatch.setattr(lightweight_observation, "observe_ema8_ema20", calculate)
+    response = run(runtime)
+    app = response.application
+    assert app.pipeline_result is completed[0]
+    assert app.pipeline_result.outcome == "FILTERED"
+    assert len(app.pipeline_result.executed_results) == 1
+    assert app.pipeline_result.executed_results[0].reason_code == "UNCHANGED"
+    assert app.pipeline_result.executed_results[0].disposition == "DROP"
+    assert app.meaningful_change_decision.reason == "BASELINE_INITIALIZED"
+    assert not app.meaningful_change_decision.meaningful_change
+    assert app.advancement == "SAVED"
+    assert json.loads(path.read_text()) == app.saved_state.to_dict()
+    calculate.assert_called_once()
+    ema.assert_not_called()
+    runtime.provider.get_completed_daily_acquisition.assert_awaited_once()
+    runtime.client.close.assert_called_once()
+
+
+def test_bootstrap_preparation_error_keeps_legacy_bytes_and_closes_http(
+    runtime, monkeypatch
+):
+    path = seed_legacy(runtime)
+    before = path.read_bytes()
+    error = ValueError("secret provider detail")
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            lightweight_observation, "observe_ema8_ema20", Mock(side_effect=error)
+        )
+        with pytest.raises(RadarObservationPreparationError) as caught:
+            run(runtime)
+    assert caught.value.__cause__ is error
+    assert caught.value.pipeline_result.outcome == "FILTERED"
+    assert path.read_bytes() == before
+    runtime.client.close.assert_called_once()
+    runtime.provider.get_completed_daily_acquisition.assert_awaited_once()
+    assert run(runtime).application.advancement == "SAVED"

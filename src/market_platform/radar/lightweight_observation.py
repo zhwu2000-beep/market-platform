@@ -8,7 +8,7 @@ values do not establish those facts, persist state, or create Candidates.
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from enum import StrEnum
@@ -17,7 +17,12 @@ from typing import cast
 
 from market_platform.indicators.trend import calculate_ema
 from market_platform.instruments.identity import CanonicalInstrumentId
-from market_platform.radar.current_content import RadarCompletedDailyHistory
+from market_platform.radar.context import RadarFactKey
+from market_platform.radar.current_content import (
+    RadarCompletedDailyHistory,
+    RadarCompletedDailyHistoryLookupResult,
+    RadarCompletedDailyHistoryLookupStatus,
+)
 from market_platform.radar.observation import RadarMarketContentScope
 
 EMA8_EMA20_OBSERVATION_DEFINITION_ID = "ema8_ema20_relation_observation"
@@ -188,3 +193,73 @@ def observe_ema8_ema20(
         relation,
         as_of,
     )
+
+
+class RadarLightweightObservationLookupStatus(StrEnum):
+    PRESENT = "PRESENT"
+    UNAVAILABLE = "UNAVAILABLE"
+
+
+@dataclass(frozen=True, slots=True)
+class RadarLightweightObservationLookupResult:
+    status: RadarLightweightObservationLookupStatus
+    observation: RadarLightweightObservation | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.status) is not RadarLightweightObservationLookupStatus:
+            raise TypeError("status must be RadarLightweightObservationLookupStatus")
+        if self.status is RadarLightweightObservationLookupStatus.PRESENT:
+            if type(self.observation) is not RadarLightweightObservation:
+                raise ValueError("PRESENT requires an observation")
+            replace(self.observation)
+            if (
+                self.observation.definition_id != EMA8_EMA20_OBSERVATION_DEFINITION_ID
+                or self.observation.calculation_revision
+                != EMA8_EMA20_CALCULATION_REVISION
+                or self.observation.observation_schema != EMA8_EMA20_OBSERVATION_SCHEMA
+            ):
+                raise ValueError(
+                    "Observation must use the current EMA8/EMA20 definition"
+                )
+        elif self.observation is not None:
+            raise ValueError("UNAVAILABLE forbids an observation")
+
+
+EMA8_EMA20_OBSERVATION_LOOKUP = RadarFactKey(
+    "radar.ema8_ema20_relation_observation/revision-1/lookup/v1",
+    RadarLightweightObservationLookupResult,
+)
+
+
+def bind_ema8_ema20_observation(
+    *,
+    instrument: CanonicalInstrumentId,
+    as_of: datetime,
+    history_loader: Callable[[], object],
+) -> Callable[[], RadarLightweightObservationLookupResult]:
+    """Derive one Context fact from the existing execution's retained producer.
+
+    This binding owns no acquisition or cache. Context memoizes the observation;
+    the supplied completed-daily history loader retains acquisition and failures.
+    """
+
+    def load() -> RadarLightweightObservationLookupResult:
+        lookup = history_loader()
+        if type(lookup) is not RadarCompletedDailyHistoryLookupResult:
+            raise TypeError("history loader must return a completed-daily lookup")
+        replace(lookup)
+        if lookup.status is RadarCompletedDailyHistoryLookupStatus.UNAVAILABLE:
+            return RadarLightweightObservationLookupResult(
+                RadarLightweightObservationLookupStatus.UNAVAILABLE
+            )
+        history = lookup.history
+        if history is None:
+            raise ValueError("PRESENT completed daily history requires history")
+        if history.instrument != instrument:
+            raise ValueError("Completed daily history instrument must match binding")
+        return RadarLightweightObservationLookupResult(
+            RadarLightweightObservationLookupStatus.PRESENT,
+            observe_ema8_ema20(history, as_of=as_of),
+        )
+
+    return load

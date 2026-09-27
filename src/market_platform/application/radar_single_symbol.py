@@ -23,10 +23,17 @@ from market_platform.radar.application import (
 from market_platform.radar.calendar import ExchangeCalendarsSessionCalendar
 from market_platform.radar.checkpoint_store import RadarCheckpointFileStore
 from market_platform.radar.core import RadarProfile
-from market_platform.radar.current_content import bind_completed_daily_current_content
+from market_platform.radar.current_content import (
+    COMPLETED_DAILY_HISTORY_LOOKUP,
+    bind_completed_daily_current_content,
+)
 from market_platform.radar.ema_relation import (
     EMA8_EMA20_RELATION_KEY,
     RadarEma8Ema20RelationGate,
+)
+from market_platform.radar.lightweight_observation import (
+    EMA8_EMA20_OBSERVATION_LOOKUP,
+    bind_ema8_ema20_observation,
 )
 from market_platform.radar.resolver import RadarGateFactoryBinding, RadarGateResolver
 from market_platform.radar.trigger import (
@@ -65,6 +72,8 @@ class RadarSingleSymbolResponse:
         terminating = pipeline.terminating_occurrence
         failure = pipeline.failure
         checkpoint = self.application.saved_checkpoint
+        decision = self.application.meaningful_change_decision
+        state = self.application.saved_state
         return {
             "canonical_instrument": self.canonical_instrument.to_dict(),
             "application": {
@@ -95,6 +104,10 @@ class RadarSingleSymbolResponse:
                 "saved_checkpoint": None
                 if checkpoint is None
                 else checkpoint.to_dict(),
+                "meaningful_change_decision": None
+                if decision is None
+                else decision.to_dict(),
+                "saved_state": None if state is None else state.to_dict(),
             },
         }
 
@@ -184,6 +197,11 @@ def run_single_symbol_radar(
             external_identity=external_identity,
             mappings=mappings,
             acquire_completed_daily=acquire,
+        )
+        loaders[EMA8_EMA20_OBSERVATION_LOOKUP] = bind_ema8_ema20_observation(
+            instrument=instrument.instrument_id,
+            as_of=as_of,
+            history_loader=loaders[COMPLETED_DAILY_HISTORY_LOOKUP],
         )
         service = RadarApplicationService(resolver, checkpoint_store, _completion_clock)
         result = service.evaluate(profile, instrument.instrument_id, as_of, loaders)

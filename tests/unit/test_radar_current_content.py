@@ -59,6 +59,10 @@ from market_platform.radar.current_content import (
 from market_platform.radar.current_content import (
     RadarCompletedDailyHistoryLookupStatus as Status,
 )
+from market_platform.radar.lightweight_observation import (
+    EMA8_EMA20_OBSERVATION_LOOKUP,
+    bind_ema8_ema20_observation,
+)
 from market_platform.radar.observation import RadarMarketContentScope
 from market_platform.radar.resolver import RadarGateFactoryBinding, RadarGateResolver
 from market_platform.radar.trigger import (
@@ -502,6 +506,9 @@ def test_real_trigger_application_and_durable_checkpoint(runtime, tmp_path):
     store = RadarCheckpointFileStore(tmp_path)
     service = RadarApplicationService(resolver, store, lambda: AS_OF)
     loaders = bind(runtime)
+    loaders[EMA8_EMA20_OBSERVATION_LOOKUP] = bind_ema8_ema20_observation(
+        instrument=INSTRUMENT, as_of=AS_OF, history_loader=loaders[HISTORY]
+    )
     result = service.evaluate(profile, INSTRUMENT, AS_OF, loaders)
     assert result.advancement is RadarCheckpointAdvancement.SAVED
     assert result.pipeline_result.executed_results[0].reason_code == "BASELINE_REQUIRED"

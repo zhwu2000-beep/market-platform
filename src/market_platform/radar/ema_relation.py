@@ -7,15 +7,12 @@ from market_platform.radar.core import (
     RadarGateOccurrence,
     RadarGateResult,
 )
-from market_platform.radar.current_content import (
-    COMPLETED_DAILY_HISTORY_LOOKUP,
-    RadarCompletedDailyHistoryLookupStatus,
+from market_platform.radar.lightweight_observation import (
+    EMA8_EMA20_OBSERVATION_LOOKUP,
+    RadarLightweightObservationLookupStatus,
 )
 from market_platform.radar.lightweight_observation import (
     RadarEmaRelation as RadarEmaRelation,
-)
-from market_platform.radar.lightweight_observation import (
-    calculate_ema8_ema20_relation,
 )
 from market_platform.radar.resolver import RadarGateImplementationKey
 
@@ -61,17 +58,17 @@ class RadarEma8Ema20RelationGate:
         return self._occurrence.gate_identity
 
     def evaluate(self, context: RadarEvaluationContext) -> RadarGateResult:
-        lookup = context.get_fact(COMPLETED_DAILY_HISTORY_LOOKUP)
-        if lookup.status is RadarCompletedDailyHistoryLookupStatus.UNAVAILABLE:
+        lookup = context.get_fact(EMA8_EMA20_OBSERVATION_LOOKUP)
+        if lookup.status is RadarLightweightObservationLookupStatus.UNAVAILABLE:
             return RadarGateResult(
                 self._occurrence, RadarGateDisposition.ATTENTION, "HISTORY_UNAVAILABLE"
             )
-        history = lookup.history
-        if history is None:
-            raise ValueError("PRESENT completed daily history requires history")
-        if history.instrument != context.instrument:
-            raise ValueError("Completed daily history instrument must match context")
-        relation = calculate_ema8_ema20_relation(history)
+        observation = lookup.observation
+        if observation is None:
+            raise ValueError("PRESENT requires an observation")
+        if observation.instrument != context.instrument:
+            raise ValueError("Lightweight observation instrument must match context")
+        relation = observation.relation
         disposition = (
             RadarGateDisposition.PASS
             if relation in self._accepted_relations

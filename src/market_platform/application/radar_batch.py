@@ -10,7 +10,10 @@ from market_platform.application.radar_single_symbol import (
     RadarSingleSymbolResponse,
     run_single_symbol_radar,
 )
-from market_platform.radar.application import RadarCheckpointAdvancementError
+from market_platform.radar.application import (
+    RadarCheckpointAdvancementError,
+    RadarObservationPreparationError,
+)
 from market_platform.radar.core import RadarProfile
 from market_platform.radar.pipeline import RadarPipelineResult
 from market_platform.trading import TradingInstrumentIdentity
@@ -43,6 +46,7 @@ def _symbol(value: str) -> str:
 class RadarBatchFailureCategory(StrEnum):
     EXECUTION_ERROR = "EXECUTION_ERROR"
     CHECKPOINT_SAVE_FAILED = "CHECKPOINT_SAVE_FAILED"
+    OBSERVATION_PREPARATION_FAILED = "OBSERVATION_PREPARATION_FAILED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,7 +66,7 @@ class RadarBatchFailure:
             if self.pipeline_result is not None:
                 raise ValueError("EXECUTION_ERROR forbids a Pipeline result")
         elif self.pipeline_result is None:
-            raise ValueError("CHECKPOINT_SAVE_FAILED requires a Pipeline result")
+            raise ValueError("Post-Pipeline failure requires a Pipeline result")
 
     def to_dict(self) -> dict[str, object]:
         result: dict[str, object] = {"category": self.category.value}
@@ -219,6 +223,14 @@ def run_radar_batch(
                 profile=profile,
                 instrument_mappings_path=instrument_mappings_path,
                 checkpoint_root=checkpoint_root,
+            )
+        except RadarObservationPreparationError as error:
+            item = RadarBatchItemResult(
+                symbol,
+                failure=RadarBatchFailure(
+                    RadarBatchFailureCategory.OBSERVATION_PREPARATION_FAILED,
+                    error.pipeline_result,
+                ),
             )
         except RadarCheckpointAdvancementError as error:
             item = RadarBatchItemResult(

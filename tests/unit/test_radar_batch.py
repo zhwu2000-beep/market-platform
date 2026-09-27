@@ -26,6 +26,7 @@ from market_platform.radar.application import (
     RadarApplicationResult,
     RadarCheckpointAdvancement,
     RadarCheckpointAdvancementError,
+    RadarObservationPreparationError,
 )
 from market_platform.radar.checkpoint_store import RadarCheckpointFileStore
 from market_platform.radar.core import (
@@ -307,6 +308,16 @@ def execution_failure():
         ),
         (subject.RadarBatchFailureCategory.CHECKPOINT_SAVE_FAILED, None, ValueError),
         (subject.RadarBatchFailureCategory.CHECKPOINT_SAVE_FAILED, object(), TypeError),
+        (
+            subject.RadarBatchFailureCategory.OBSERVATION_PREPARATION_FAILED,
+            None,
+            ValueError,
+        ),
+        (
+            subject.RadarBatchFailureCategory.OBSERVATION_PREPARATION_FAILED,
+            object(),
+            TypeError,
+        ),
     ],
 )
 def test_failure_invariants(category, payload, error):
@@ -331,7 +342,7 @@ def test_item_invariants(symbol, normal, failure, error):
         subject.RadarBatchItemResult(symbol, normal, failure)
 
 
-@pytest.mark.parametrize("kind", ["normal", "checkpoint"])
+@pytest.mark.parametrize("kind", ["normal", "checkpoint", "preparation"])
 @pytest.mark.parametrize("field", ["profile", "as_of"])
 def test_batch_correspondence(kind, field):
     actual = response()
@@ -341,7 +352,9 @@ def test_batch_correspondence(kind, field):
         item = subject.RadarBatchItemResult(
             "NVDA",
             failure=subject.RadarBatchFailure(
-                subject.RadarBatchFailureCategory.CHECKPOINT_SAVE_FAILED,
+                subject.RadarBatchFailureCategory.CHECKPOINT_SAVE_FAILED
+                if kind == "checkpoint"
+                else subject.RadarBatchFailureCategory.OBSERVATION_PREPARATION_FAILED,
                 actual.application.pipeline_result,
             ),
         )
@@ -560,6 +573,23 @@ def test_two_symbol_production_checkpoint_isolation(tmp_path, monkeypatch):
     assert [item.response.application.advancement for item in first.items] == [
         "SAVED"
     ] * 2
+    for item in first.items:
+        app = item.response.application
+        assert app.meaningful_change_decision.reason == "BASELINE_INITIALIZED"
+        assert not app.meaningful_change_decision.meaningful_change
+        projection = item.to_dict()["response"]["application"]
+        assert (
+            projection["meaningful_change_decision"]
+            == app.meaningful_change_decision.to_dict()
+        )
+        assert projection["saved_state"] == app.saved_state.to_dict()
+        assert set(projection) == {
+            "pipeline",
+            "checkpoint_advancement",
+            "saved_checkpoint",
+            "meaningful_change_decision",
+            "saved_state",
+        }
     store = RadarCheckpointFileStore(root)
     checkpoints = [
         store.lookup(CanonicalInstrumentId(f"security.{symbol}")).checkpoint
@@ -589,3 +619,47 @@ def test_two_symbol_production_checkpoint_isolation(tmp_path, monkeypatch):
     for client in clients:
         client.close.assert_called_once_with()
     assert "fake-secret" not in json.dumps(first.to_dict())
+
+
+@pytest.mark.parametrize(
+    "error_type,category",
+    [
+        (
+            RadarObservationPreparationError,
+            subject.RadarBatchFailureCategory.OBSERVATION_PREPARATION_FAILED,
+        ),
+        (
+            RadarCheckpointAdvancementError,
+            subject.RadarBatchFailureCategory.CHECKPOINT_SAVE_FAILED,
+        ),
+    ],
+)
+def test_middle_post_pipeline_failure_is_bounded_and_later_symbol_runs(
+    runtime, error_type, category
+):
+    first, middle, last = response("NVDA"), response("MSFT"), response("MU")
+    original = middle.application.pipeline_result
+    pipeline = replace(
+        original,
+        executed_results=tuple(
+            replace(result, detail="secret-provider-payload")
+            for result in original.executed_results
+        ),
+    )
+    error = error_type(pipeline)
+    error.args = ("secret-error-text",)
+    error.__cause__ = ValueError("secret-api-key")
+    runtime.runner.side_effect = [first, error, last]
+    result = run(runtime, symbols=("NVDA", "MSFT", "MU"))
+    assert tuple(item.symbol for item in result.items) == ("NVDA", "MSFT", "MU")
+    assert result.items[0].response is first
+    assert result.items[2].response is last
+    assert result.items[1].failure.category is category
+    assert result.items[1].failure.pipeline_result is pipeline
+    assert runtime.runner.call_count == 3
+    projection = result.to_dict()["items"][1]["failure"]
+    assert projection == {
+        "category": category.value,
+        "pipeline": middle.to_dict()["application"]["pipeline"],
+    }
+    assert "secret" not in json.dumps(result.to_dict())
