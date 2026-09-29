@@ -574,7 +574,7 @@ def test_trigger_reason_must_match_available_comparison_provenance(reason):
 @pytest.mark.parametrize(
     "reason", ["NEW_COMPLETED_SESSION", "MARKET_CONTENT_CHANGED", "BASELINE_REQUIRED"]
 )
-def test_ordinary_saved_without_prior_requires_baseline_trigger(reason):
+def test_ordinary_saved_without_technical_prior_allows_qualifying_pass(reason):
     value = saved(
         baseline=True,
         result=pipeline(
@@ -583,11 +583,88 @@ def test_ordinary_saved_without_prior_requires_baseline_trigger(reason):
     )
     assert value.meaningful_change_decision.prior is None
     assert value.meaningful_change_decision.reason.value == "BASELINE_INITIALIZED"
-    if reason == "BASELINE_REQUIRED":
-        assert_reason(value, Reason.NO_MEANINGFUL_TRANSITION)
-    else:
-        with pytest.raises(ValueError, match="Missing prior observation"):
-            evaluate(value)
+    assert not value.meaningful_change_decision.meaningful_change
+    assert_reason(value, Reason.NO_MEANINGFUL_TRANSITION)
+    with pytest.raises(ValueError, match="SELECTED meaningful STATE_TRANSITION"):
+        RadarCandidate(value.saved_state, Policy())
+
+
+@pytest.mark.parametrize("reason", ["NEW_COMPLETED_SESSION", "MARKET_CONTENT_CHANGED"])
+def test_actual_application_legacy_qualifying_pass_initializes_baseline(
+    tmp_path, reason
+):
+    current = observation()
+    prior_session = (
+        current.completed_session - timedelta(days=1)
+        if reason == "NEW_COMPLETED_SESSION"
+        else current.completed_session
+    )
+    predecessor = RadarObservationCheckpoint(
+        current.instrument,
+        prior_session,
+        "sha256:" + "a" * 64,
+        current.as_of - timedelta(days=1),
+        replace(current.content_scope, history_end=prior_session),
+    )
+    store = RadarCheckpointFileStore(tmp_path)
+    store.save(predecessor)
+    retained = store.lookup_state(current.instrument)
+    assert retained.status is RadarObservationStateLookupStatus.LEGACY_CONTENT_ONLY
+    assert retained.legacy_checkpoint == predecessor
+    assert retained.state is None
+    calendar = Mock(spec=ExchangeSessionCalendar)
+    calendar.latest_completed_session.return_value = current.completed_session
+    calendar.is_session.return_value = True
+    resolver = RadarGateResolver(
+        [
+            RadarGateFactoryBinding(
+                SESSION_CONTENT_TRIGGER_KEY,
+                lambda occurrence: RadarSessionContentTriggerGate(occurrence, calendar),
+            )
+        ]
+    )
+    service = RadarApplicationService(resolver, store, lambda: current.as_of)
+    content = RadarCurrentMarketContent(
+        current.instrument,
+        current.completed_session,
+        current.normalized_market_content_identity,
+        current.content_scope,
+    )
+    value = service.evaluate(
+        pipeline().profile,
+        current.instrument,
+        current.as_of,
+        {
+            CURRENT_MARKET_CONTENT_LOOKUP: lambda: (
+                RadarCurrentMarketContentLookupResult(
+                    RadarCurrentMarketContentLookupStatus.PRESENT, content
+                )
+            ),
+            EMA8_EMA20_OBSERVATION_LOOKUP: lambda: (
+                RadarLightweightObservationLookupResult(
+                    RadarLightweightObservationLookupStatus.PRESENT, current
+                )
+            ),
+        },
+    )
+    assert value.advancement is Advancement.SAVED
+    assert value.pipeline_result.outcome is Outcome.SELECTED
+    actual = value.pipeline_result.executed_results[0]
+    assert actual.occurrence == trigger()
+    assert actual.disposition is Disposition.PASS
+    assert actual.reason_code == reason
+    assert (
+        value.meaningful_change_decision.classification.value == "BASELINE_INITIALIZED"
+    )
+    assert value.meaningful_change_decision.prior is None
+    assert not value.meaningful_change_decision.meaningful_change
+    assert (
+        RadarCheckpointFileStore(tmp_path).lookup_state(current.instrument).state
+        == value.saved_state
+    )
+    assert_reason(value, Reason.NO_MEANINGFUL_TRANSITION)
+    with pytest.raises(ValueError, match="SELECTED meaningful STATE_TRANSITION"):
+        RadarCandidate(value.saved_state, Policy())
 
 
 @pytest.mark.parametrize(

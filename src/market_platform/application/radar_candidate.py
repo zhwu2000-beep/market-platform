@@ -252,10 +252,9 @@ def _validate_saved_source(
         }
     ):
         raise ValueError("SAVED requires a qualifying Trigger PASS")
-    if prior is None:
-        if trigger.reason_code != "BASELINE_REQUIRED":
-            raise ValueError("Missing prior observation requires BASELINE_REQUIRED")
-    else:
+    # No technical prior does not imply no market predecessor: legacy checkpoints
+    # retain market content only. The trusted application's Trigger is provenance.
+    if prior is not None:
         if trigger.reason_code == "BASELINE_REQUIRED":
             raise ValueError("BASELINE_REQUIRED contradicts retained prior observation")
         # Even incompatible prior semantics retain market comparison provenance.
