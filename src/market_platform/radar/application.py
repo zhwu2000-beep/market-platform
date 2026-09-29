@@ -4,6 +4,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
+from typing import Protocol
 
 from market_platform.instruments.identity import CanonicalInstrumentId
 from market_platform.radar.checkpoint_store import RadarCheckpointFileStore
@@ -125,6 +126,25 @@ class RadarApplicationResult:
             raise ValueError("NOT_ADVANCED forbids checkpoint, decision and state")
 
 
+class RadarObservationPublicationCoordinator(Protocol):
+    """Opt-in single-owner recovery and observation publication boundary."""
+
+    def recover(
+        self,
+        instrument: CanonicalInstrumentId,
+        checkpoint_store: RadarCheckpointFileStore,
+    ) -> None: ...
+
+    def publish(
+        self,
+        instrument: CanonicalInstrumentId,
+        pipeline: RadarPipelineResult,
+        state: RadarObservationState,
+        predecessor: RadarObservationStateLookupResult,
+        checkpoint_store: RadarCheckpointFileStore,
+    ) -> None: ...
+
+
 class RadarApplicationService:
     """Compose one execution; the caller must prevent overlapping instrument runs."""
 
@@ -133,10 +153,13 @@ class RadarApplicationService:
         resolver: RadarGateResolver,
         checkpoint_store: RadarCheckpointFileStore,
         completion_clock: Callable[[], datetime],
+        *,
+        coordinator: RadarObservationPublicationCoordinator | None = None,
     ) -> None:
         self._resolver = resolver
         self._checkpoint_store = checkpoint_store
         self._completion_clock = completion_clock
+        self._coordinator = coordinator
 
     def evaluate(
         self,
@@ -170,6 +193,8 @@ class RadarApplicationService:
             raise RadarApplicationConfigurationError(
                 "Prior observation fact is reserved"
             )
+        if self._coordinator is not None:
+            self._coordinator.recover(instrument, self._checkpoint_store)
         prior: RadarObservationStateLookupResult | None = None
 
         def prior_state() -> RadarObservationStateLookupResult:
@@ -251,10 +276,15 @@ class RadarApplicationService:
             )
         except Exception as exc:
             raise RadarObservationPreparationError(result) from exc
-        try:
-            self._checkpoint_store.save_state(state)
-        except Exception as exc:
-            raise RadarCheckpointAdvancementError(result, state) from exc
+        if self._coordinator is not None:
+            self._coordinator.publish(
+                instrument, result, state, retained, self._checkpoint_store
+            )
+        else:
+            try:
+                self._checkpoint_store.save_state(state)
+            except Exception as exc:
+                raise RadarCheckpointAdvancementError(result, state) from exc
         return application_result
 
     def _prepare_state(

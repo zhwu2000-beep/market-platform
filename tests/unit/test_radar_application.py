@@ -955,3 +955,134 @@ def test_filtered_transition_preserves_selection_and_records_only_observation(
     assert result.meaningful_change_decision.meaningful_change
     assert result.saved_state.pipeline_outcome is Outcome.FILTERED
     runtime[3].assert_called_once_with(result.saved_state)
+
+
+def test_coordinator_recovery_precedes_lookup_facts_and_pipeline(runtime):
+    coordinator = Mock()
+    runtime[0]._coordinator = coordinator
+
+    def recover(instrument, store):
+        assert instrument == INSTRUMENT
+        assert store is runtime[1]
+        runtime[2].assert_not_called()
+        runtime[4].assert_not_called()
+        runtime[5].assert_not_called()
+        runtime[8].assert_not_called()
+        raise RuntimeError("interlock")
+
+    coordinator.recover.side_effect = recover
+    with pytest.raises(RuntimeError, match="interlock"):
+        run(runtime)
+    coordinator.publish.assert_not_called()
+    runtime[3].assert_not_called()
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_coordinator_receives_exact_validated_source_and_owns_only_save(
+    runtime, tmp_path, monkeypatch, legacy
+):
+    if legacy:
+        RadarCheckpointFileStore(tmp_path).save(CHECKPOINT)
+    expected_prior = runtime[1].lookup_state(INSTRUMENT)
+    runtime[2].reset_mock()
+    completed = []
+    evaluate = RadarPipeline.evaluate
+
+    def execute(pipeline, context):
+        result = evaluate(pipeline, context)
+        completed.append(result)
+        return result
+
+    monkeypatch.setattr(RadarPipeline, "evaluate", execute)
+    validated = []
+    validate = RadarApplicationResult.__post_init__
+
+    def validation(result):
+        validate(result)
+        validated.append(result)
+
+    monkeypatch.setattr(RadarApplicationResult, "__post_init__", validation)
+    coordinator = Mock()
+    runtime[0]._coordinator = coordinator
+
+    def publish(instrument, pipeline, state, retained, store):
+        assert instrument == INSTRUMENT
+        assert pipeline is completed[0]
+        assert state is validated[0].saved_state
+        assert retained == expected_prior
+        assert retained is runtime[0]._retained_for_test
+        assert store is runtime[1]
+        runtime[3].assert_not_called()
+        store.save_state(state)
+
+    prepare = runtime[0]._prepare_state
+
+    def prepare_state(context, pipeline, retained, reason):
+        runtime[0]._retained_for_test = retained
+        return prepare(context, pipeline, retained, reason)
+
+    monkeypatch.setattr(runtime[0], "_prepare_state", prepare_state)
+    coordinator.publish.side_effect = publish
+    result = run(runtime)
+    assert type(result) is RadarApplicationResult
+    assert result.advancement is RadarCheckpointAdvancement.SAVED
+    assert result is validated[0]
+    runtime[3].assert_called_once_with(result.saved_state)
+    coordinator.recover.assert_called_once_with(INSTRUMENT, runtime[1])
+    coordinator.publish.assert_called_once()
+
+
+def test_nonadvancing_coordinated_evaluation_only_runs_interlock(runtime):
+    coordinator = Mock()
+    runtime[0]._coordinator = coordinator
+    result = run(runtime, profile(OTHER))
+    assert result.advancement is RadarCheckpointAdvancement.NOT_ADVANCED
+    coordinator.recover.assert_called_once_with(INSTRUMENT, runtime[1])
+    coordinator.publish.assert_not_called()
+    runtime[3].assert_not_called()
+
+
+@pytest.mark.parametrize("after_checkpoint", [False, True])
+def test_coordinator_failure_propagates_without_fallback_save(
+    runtime, after_checkpoint
+):
+    coordinator = Mock()
+    runtime[0]._coordinator = coordinator
+    failure = RuntimeError("coordinated publication unresolved")
+
+    def publish(instrument, pipeline, state, retained, store):
+        if after_checkpoint:
+            store.save_state(state)
+        raise failure
+
+    coordinator.publish.side_effect = publish
+    with pytest.raises(RuntimeError) as caught:
+        run(runtime)
+    assert caught.value is failure
+    assert runtime[3].call_count == (1 if after_checkpoint else 0)
+
+
+def test_provisional_validation_failure_never_reaches_coordinator(runtime, monkeypatch):
+    coordinator = Mock()
+    runtime[0]._coordinator = coordinator
+    monkeypatch.setattr(
+        RadarApplicationResult,
+        "__post_init__",
+        Mock(side_effect=ValueError("invalid correspondence")),
+    )
+    with pytest.raises(RadarObservationPreparationError):
+        run(runtime)
+    coordinator.recover.assert_called_once()
+    coordinator.publish.assert_not_called()
+    runtime[3].assert_not_called()
+
+
+def test_explicit_no_coordinator_preserves_default_path(runtime):
+    service = RadarApplicationService(
+        runtime[0]._resolver, runtime[1], runtime[4], coordinator=None
+    )
+    result = service.evaluate(profile(), INSTRUMENT, AS_OF, runtime[6])
+    assert result.advancement is RadarCheckpointAdvancement.SAVED
+    runtime[2].assert_called_once_with(INSTRUMENT)
+    runtime[3].assert_called_once_with(result.saved_state)
+    runtime[4].assert_called_once_with()
