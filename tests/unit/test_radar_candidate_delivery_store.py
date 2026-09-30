@@ -25,6 +25,7 @@ from market_platform.application.radar_candidate_delivery import (
 )
 from market_platform.application.radar_candidate_delivery_store import (
     RadarCandidateDeliveryFileStore,
+    RadarCandidateDeliveryUnavailableError,
 )
 from market_platform.instruments.identity import CanonicalInstrumentId
 
@@ -452,3 +453,56 @@ def test_native_symlink_checkpoint_blocks_recovery(tmp_path, monkeypatch, dangli
     assert retained.read_bytes() == original
     if dangling:
         assert not target.exists()
+
+
+def test_resolve_pending_authenticates_inventory_and_preserves_retained_bytes(tmp_path):
+    h = Harness(tmp_path)
+    source, _, _, pending = completed(h)
+    before = {p.name: p.read_bytes() for p in h.records.iterdir()}
+    fresh = RadarCandidateDeliveryFileStore(h.records)
+    assert (
+        fresh.resolve_pending(pending.candidate_fingerprint, source.identity) == pending
+    )
+    assert fresh.resolve_pending("sha256:" + "f" * 64, source.identity) is None
+    assert before == {p.name: p.read_bytes() for p in h.records.iterdir()}
+
+
+def test_resolution_preserves_corruption_precedence_over_missing_pending(tmp_path):
+    h = Harness(tmp_path)
+    source, accepted, _, _ = completed(h)
+    (h.records / storage._filename(accepted)).unlink()
+    with pytest.raises(RadarCandidateDeliveryError) as caught:
+        h.store.resolve_pending("sha256:" + "f" * 64, source.identity)
+    assert caught.value.failure is DeliveryFailure.INVARIANT
+
+
+def test_resolution_distinguishes_missing_root_from_corrupt_root(tmp_path):
+    identity = SourceRecoveryIdentity("sha256:" + "a" * 64)
+    missing = tmp_path / "missing-root"
+    with pytest.raises(RadarCandidateDeliveryUnavailableError):
+        RadarCandidateDeliveryFileStore(missing).resolve_pending(
+            "sha256:" + "b" * 64, identity
+        )
+    assert not missing.exists()
+    corrupt = tmp_path / "root-file"
+    corrupt.write_bytes(b"not a directory")
+    with pytest.raises(RadarCandidateDeliveryError) as caught:
+        RadarCandidateDeliveryFileStore(corrupt).resolve_pending(
+            "sha256:" + "b" * 64, identity
+        )
+    assert caught.value.failure is DeliveryFailure.INVARIANT
+
+
+def test_resolution_rejects_mocked_reparse_root_without_native_privileges(
+    tmp_path,
+    monkeypatch,
+):
+    store = RadarCandidateDeliveryFileStore(tmp_path)
+    info = tmp_path.stat()
+    unsafe = Mock(st_mode=info.st_mode, st_file_attributes=0x400)
+    monkeypatch.setattr(type(store._root), "lstat", Mock(return_value=unsafe))
+    with pytest.raises(RadarCandidateDeliveryError) as caught:
+        store.resolve_pending(
+            "sha256:" + "a" * 64, SourceRecoveryIdentity("sha256:" + "b" * 64)
+        )
+    assert caught.value.failure is DeliveryFailure.INVARIANT

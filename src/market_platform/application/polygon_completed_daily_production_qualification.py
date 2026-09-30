@@ -48,6 +48,7 @@ _NY = ZoneInfo("America/New_York")
 
 class PolygonCompletedDailyQualificationRefusalReason(StrEnum):
     INPUT_UNAVAILABLE = "input_unavailable"
+    REFERENCE_MISMATCH = "retained_material_reference_mismatch"
     HISTORY_INCOMPLETE = "history_incomplete_or_corrupt"
     TEMPORAL_FAILURE = "temporal_failure"
     PROFILE_MISMATCH = "profile_mismatch"
@@ -225,6 +226,65 @@ class PolygonCompletedDailyProductionQualificationApplicationService:
         self._validity_service = validity_service
         self._clock = a._utc_now if execution_clock is None else execution_clock
         self._history = _QualificationHistory()
+
+    def resolve_retained_material(
+        self, request: PolygonCompletedDailyQualificationRequest
+    ) -> c.PolygonCompletedDailyProductionConstructionResult:
+        """Read owned material, rejecting contradictions and superseded cutoffs.
+
+        No acquisition, prerequisite issuance or Qualification occurs here. A
+        missing occurrence is unavailable; an existing occurrence bound to another
+        artifact is a contradiction. Returned material is not portable authority.
+        Current-context callers cannot hide newer relevant owned history behind an
+        earlier knowledge cutoff. Governance conclusions still belong to qualify.
+        """
+        if type(request) is not PolygonCompletedDailyQualificationRequest:
+            raise TypeError("exact qualification lookup request required")
+        request = replace(request)
+        now = a._timestamp(self._clock())
+        cutoff = request.knowledge_as_of or now
+        try:
+            with ExitStack() as stack:
+                self._lock_inputs(stack)
+                current = self._snapshot(request, now)
+                source = self._validity_service._admission_service
+                entries = source._construction_service._history._state[1]
+                for item in entries:
+                    if (
+                        item.receipt.execution_id == request.construction_execution_id
+                        and item.artifact.reference() != request.artifact_reference
+                    ):
+                        raise PolygonCompletedDailyQualificationRefused(
+                            PolygonCompletedDailyQualificationRefusalReason.REFERENCE_MISMATCH,
+                            "Construction occurrence belongs to another artifact",
+                        )
+                if cutoff > now:
+                    raise PolygonCompletedDailyQualificationRefused(
+                        PolygonCompletedDailyQualificationRefusalReason.TEMPORAL_FAILURE,
+                        "future knowledge cutoff",
+                    )
+                history = self._snapshot(request, cutoff)
+                if replace(current, knowledge_as_of=cutoff) != history:
+                    raise PolygonCompletedDailyQualificationRefused(
+                        PolygonCompletedDailyQualificationRefusalReason.TEMPORAL_FAILURE,
+                        "newer relevant governance history must not be hidden",
+                    )
+                if history.constructions and not any(
+                    item.receipt.execution_id == request.construction_execution_id
+                    for item in history.constructions
+                ):
+                    raise PolygonCompletedDailyQualificationRefused(
+                        PolygonCompletedDailyQualificationRefusalReason.REFERENCE_MISMATCH,
+                        "artifact has no matching Construction occurrence",
+                    )
+                return _target(history, request)
+        except PolygonCompletedDailyQualificationRefused:
+            raise
+        except (TypeError, ValueError, RuntimeError) as error:
+            raise PolygonCompletedDailyQualificationRefused(
+                PolygonCompletedDailyQualificationRefusalReason.HISTORY_INCOMPLETE,
+                "retained governed ownership cannot be authenticated",
+            ) from error
 
     def qualify(
         self, request: PolygonCompletedDailyQualificationRequest
