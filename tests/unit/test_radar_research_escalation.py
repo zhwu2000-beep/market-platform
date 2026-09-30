@@ -1742,3 +1742,315 @@ def test_b1_retained_bridge_content_contradiction_precedes_stale_governance(gove
     error = governed_refusal(case, Outcome.REFUSED)
     assert error.finding.code is Code.MATERIAL_CORRESPONDENCE
     assert (case[4]._history._state, case[5]._history._state) == before
+
+
+# Slice 4 reuses authentic fixtures and their no-acquisition/downstream guards.
+@pytest.fixture
+def composition_case(governed, monkeypatch):
+    from market_platform.research import technical_analysis
+
+    # Slice 3 forbids constructing an assessment; Slice 4 explicitly owns it.
+    monkeypatch.setattr(subject, "RadarResearchReadinessAssessment", Assessment)
+    analyzer = Mock(side_effect=AssertionError("Readiness must not analyze"))
+    monkeypatch.setattr(
+        technical_analysis, "analyze_daily_technical_snapshot", analyzer
+    )
+    yield governed
+    analyzer.assert_not_called()
+    governed[0].assert_no_acquisition()
+
+
+def compose(case, *, execution_clock=None):
+    return subject.RadarResearchReadinessApplicationService(
+        RadarResearchPendingResolver(case[0].store),
+        case[3],
+        execution_clock=execution_clock
+        or (lambda: case[2].knowledge_as_of + timedelta(seconds=2)),
+    ).assess(case[2])
+
+
+def assert_partial_composition(result, pending, expected, failure_code):
+    assert result.outcome is expected
+    failures = [f for f in result.findings if f.required_outcome is not None]
+    assert len(failures) == 1
+    assert failures[0].code is failure_code
+    assert failures[0].required_outcome is expected
+    assert tuple(f.code for f in result.findings) == tuple(
+        sorted((f.code for f in result.findings), key=list(Code).index)
+    )
+    if pending is None:
+        assert result.evaluated_context is None
+        assert not any(f.condition is Condition.PASSED for f in result.findings)
+    else:
+        assert result.evaluated_context == EvaluatedContext(
+            candidate_fingerprint=pending.candidate_fingerprint,
+            source_identity=pending.source_identity,
+        )
+        assert [f.code for f in result.findings if f.condition is Condition.PASSED] == [
+            Code.PENDING_AUTHORITY
+        ]
+    assert result.unperformed_checks == tuple(
+        code for code in Code if code is not Code.PENDING_AUTHORITY
+    )
+    assert all(
+        Finding(code, Condition.NOT_CHECKED) in result.findings
+        for code in result.unperformed_checks
+    )
+
+
+def test_slice4_authentic_ready_is_complete_timed_repeatable_and_non_authoritative(
+    composition_case, monkeypatch
+):
+    case = composition_case
+    h, pending, supplied, resolver, qualification, bridge, built, _ = case
+    started = supplied.knowledge_as_of + timedelta(seconds=1)
+    completed = started + timedelta(seconds=1)
+    events = []
+
+    def clock():
+        events.append("clock")
+        return started if len(events) == 1 else completed
+
+    actual_resolve = resolver.resolve
+
+    def resolve(owned_pending, context):
+        events.append("governed")
+        assert owned_pending == pending
+        return actual_resolve(owned_pending, context)
+
+    monkeypatch.setattr(resolver, "resolve", resolve)
+    result = compose(case, execution_clock=clock)
+    assert events == ["clock", "governed", "clock"]
+    assert result.outcome is Outcome.READY
+    assert result.policy.to_dict() == Policy().to_dict()
+    assert result.policy.policy_id == "exact_governed_250_session_technical_readiness"
+    assert result.policy.behavioral_revision == "1"
+    assert (
+        result.policy.schema_version == "radar_research_escalation_readiness_policy/v1"
+    )
+    assert result.execution_started_at == started
+    assert result.execution_completed_at == completed
+    assert result.execution_started_at != supplied.analysis_as_of
+    assert result.request == supplied
+    assert result.findings == passed_findings()
+    assert not result.unperformed_checks
+    context = result.evaluated_context
+    assert all(getattr(context, f.name) is not None for f in fields(context))
+    assert context.candidate_fingerprint == pending.candidate_fingerprint
+    assert context.source_identity == pending.source_identity
+    assert context.artifact_reference == built.artifact.reference()
+    assert context.construction_reference.fingerprint == built.receipt.fingerprint
+    current = qualification.get_qualification_history_as_of(
+        supplied.artifact_reference, knowledge_as_of=supplied.knowledge_as_of
+    )[-1]
+    retained = bridge.get_bridge_history_as_of(
+        supplied.artifact_reference, knowledge_as_of=supplied.knowledge_as_of
+    )[-1]
+    assert context.current_qualification_reference.fingerprint == current.fingerprint
+    assert context.task_freshness_reference.companion_fingerprint == (
+        current.task_freshness_result.companion.fingerprint
+    )
+    assert context.bridge_reference.bridge_fingerprint == retained.fingerprint
+    assert current.available_at == supplied.knowledge_as_of < started
+    assert context.task_freshness_reference.available_at < started
+    assert built.material.query_as_of < started
+    assert retained.target_row_count == current.original_row_count == 250
+    assert h.store.read_pending(pending.candidate_fingerprint) is not None
+    for name in (
+        "authorization",
+        "authorized",
+        "may_execute",
+        "permit",
+        "token",
+        "dispatch",
+        "execute",
+        "technical_result",
+        "strategy_result",
+    ):
+        assert not hasattr(result, name)
+    # Current Qualification mints fresh occurrence references on another real
+    # evaluation. Composition value semantics are stable for identical resolved
+    # references and clocks; it must not cache authority to force equality.
+    monkeypatch.setattr(
+        resolver,
+        "resolve",
+        Mock(return_value=subject.RadarResearchGovernedContextResolution(context)),
+    )
+    events.clear()
+    assert result == compose(case, execution_clock=clock)
+    assert hash(result) == hash(replace(result))
+
+
+@pytest.mark.parametrize("kind", ["missing", "corrupt"])
+def test_slice4_pending_failure_stops_before_governed_resolution(
+    retained_pending, monkeypatch, kind
+):
+    h, (source, _, _, pending, supplied) = retained_pending
+    if kind == "missing":
+        (h.records / storage._filename(pending)).unlink()
+        expected = Outcome.BLOCKED
+    else:
+        (h.records / storage._filename(source)).write_text("{}", encoding="utf-8")
+        expected = Outcome.REFUSED
+    governed_resolver = subject.RadarResearchGovernedContextResolver(
+        h.store, None, None, Mock()
+    )
+    forbidden = Mock(side_effect=AssertionError("No later checks"))
+    monkeypatch.setattr(governed_resolver, "resolve", forbidden)
+    result = subject.RadarResearchReadinessApplicationService(
+        RadarResearchPendingResolver(h.store),
+        governed_resolver,
+        execution_clock=lambda: COMPLETED,
+    ).assess(supplied)
+    assert_partial_composition(result, None, expected, Code.PENDING_AUTHORITY)
+    forbidden.assert_not_called()
+
+
+@pytest.mark.parametrize("kind", ["owner", "material", "stale", "bridge"])
+def test_slice4_ordinary_governed_prerequisites_block(composition_case, kind):
+    case = composition_case
+    if kind == "owner":
+        case[3]._qualification = None
+    elif kind == "bridge":
+        case[3]._bridge = None
+    elif kind == "stale":
+        case = stale_governed_case(case)
+    else:
+        admission = case[4]._validity_service._admission_service
+        for owner in (
+            case[-1],
+            admission._validation_service,
+            admission._freshness_service,
+            admission,
+            case[4]._validity_service,
+        ):
+            owner._history = type(owner._history)()
+    result = compose(case)
+    assert_partial_composition(
+        result, case[1], Outcome.BLOCKED, Code.GOVERNANCE_PREREQUISITES
+    )
+
+
+@pytest.mark.parametrize("governed", [{"variant": "content"}], indirect=True)
+def test_slice4_content_contradiction_precedes_stale_governance(composition_case):
+    case = composition_case
+    assert_partial_composition(
+        compose(case), case[1], Outcome.REFUSED, Code.MATERIAL_CORRESPONDENCE
+    )
+    # Valid retained Bridge exposes the content contradiction before stale checks.
+    case = stale_governed_case(case)
+    before = (case[4]._history._state, case[5]._history._state)
+    assert_partial_composition(
+        compose(case), case[1], Outcome.REFUSED, Code.MATERIAL_CORRESPONDENCE
+    )
+    assert (case[4]._history._state, case[5]._history._state) == before
+
+
+@pytest.mark.parametrize("governed", [{"missing": "admission"}], indirect=True)
+def test_slice4_task_profile_contradiction_precedes_missing_governance(
+    composition_case,
+):
+    case = composition_case
+    assert compose(case).outcome is Outcome.BLOCKED
+    case = contradictory_task_identity(case, "technical_profile_reference")
+    assert_partial_composition(
+        compose(case), case[1], Outcome.REFUSED, Code.INPUT_INTEGRITY
+    )
+    case[3]._qualification = None
+    # Caller disagreement alone is not authenticated contradictory authority.
+    assert_partial_composition(
+        compose(case), case[1], Outcome.BLOCKED, Code.GOVERNANCE_PREREQUISITES
+    )
+
+
+def test_slice4_corrupt_bridge_precedes_stale_governance(composition_case):
+    case = composition_case
+    assert compose(case).outcome is Outcome.READY
+    case = stale_governed_case(case)
+    assert compose(case).outcome is Outcome.BLOCKED
+    retained = case[5]._history._state[1][0]
+    object.__setattr__(
+        retained,
+        "dataset_fingerprint",
+        retained.completed_prices.evidence.dataset_content_fingerprint,
+    )
+    assert_partial_composition(
+        compose(case), case[1], Outcome.REFUSED, Code.INPUT_INTEGRITY
+    )
+
+
+def test_slice4_material_lineage_contradiction_precedes_absent_bridge(composition_case):
+    case = list(composition_case)
+    case[3]._bridge = None
+    assert compose(case).outcome is Outcome.BLOCKED
+    case[2] = replace(
+        case[2],
+        artifact_reference=replace(case[2].artifact_reference, artifact_id="wrong"),
+    )
+    assert_partial_composition(
+        compose(case), case[1], Outcome.REFUSED, Code.GOVERNANCE_PREREQUISITES
+    )
+
+
+def test_slice4_unsupported_same_day_is_refused(composition_case):
+    case = list(composition_case)
+    case[2] = replace(case[2], analysis_as_of=AS_OF, knowledge_as_of=AS_OF)
+    result = compose(case)
+    assert_partial_composition(result, case[1], Outcome.REFUSED, Code.TIMING_CONTEXT)
+    assert case[4]._history._state == case[5]._history._state == (1, ())
+
+
+@pytest.mark.parametrize("field", ["candidate_fingerprint", "source_identity"])
+def test_slice4_resolver_output_linkage_must_match_authenticated_pending(
+    retained_pending, monkeypatch, field
+):
+    h, (*_, supplied) = retained_pending
+    pending = RadarResearchPendingResolver(h.store).resolve(supplied)
+    context = evaluated_context(
+        candidate_fingerprint=pending.candidate_fingerprint,
+        source_identity=pending.source_identity,
+    )
+    value = (
+        ("sha256:" + "0" * 64)
+        if field == "candidate_fingerprint"
+        else (SourceRecoveryIdentity("sha256:" + "0" * 64))
+    )
+    resolver = subject.RadarResearchGovernedContextResolver(h.store, None, None, Mock())
+    monkeypatch.setattr(
+        resolver,
+        "resolve",
+        Mock(
+            return_value=(
+                subject.RadarResearchGovernedContextResolution(
+                    replace(context, **{field: value})
+                )
+            )
+        ),
+    )
+    result = subject.RadarResearchReadinessApplicationService(
+        RadarResearchPendingResolver(h.store),
+        resolver,
+        execution_clock=lambda: COMPLETED,
+    ).assess(supplied)
+    assert_partial_composition(result, pending, Outcome.REFUSED, Code.INPUT_INTEGRITY)
+
+
+@pytest.mark.parametrize("boundary", ["pending", "governed"])
+def test_slice4_unexpected_errors_propagate(retained_pending, monkeypatch, boundary):
+    h, (*_, supplied) = retained_pending
+    pending_resolver = RadarResearchPendingResolver(h.store)
+    governed_resolver = subject.RadarResearchGovernedContextResolver(
+        h.store, None, None, Mock()
+    )
+    unexpected = RuntimeError("unclassified implementation failure")
+    monkeypatch.setattr(
+        pending_resolver if boundary == "pending" else governed_resolver,
+        "resolve",
+        Mock(side_effect=unexpected),
+    )
+    service = subject.RadarResearchReadinessApplicationService(
+        pending_resolver, governed_resolver, execution_clock=lambda: COMPLETED
+    )
+    with pytest.raises(RuntimeError) as caught:
+        service.assess(supplied)
+    assert caught.value is unexpected

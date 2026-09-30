@@ -3,7 +3,7 @@
 Requests identify purported inputs for later owned resolution. Assessments describe
 only their recorded context, even when READY. A future research invoker must
 independently revalidate current Pending trust, material, governance, task freshness,
-policy and timing. This module performs no final assessment or activation.
+policy and timing. Opt-in final assessment stops at a descriptive result.
 Opt-in Pending resolution authenticates only the retained delivery graph.
 Opt-in governed resolution evaluates retained material and current task governance.
 """
@@ -875,3 +875,103 @@ class RadarResearchGovernedContextResolver:
             raise _governed_failure(
                 code.INPUT_INTEGRITY, condition.CONTRADICTORY, str(error)
             ) from error
+
+
+class RadarResearchReadinessApplicationService:
+    """Compose trusted resolution into a recorded assessment, then stop.
+
+    READY describes this assessment only. A future invoker must independently
+    revalidate current conditions. No acquisition or downstream capability is a
+    dependency. Failed governed resolution exposes no partial references/check
+    trace, so its incomplete concern families remain explicitly NOT_CHECKED.
+    """
+
+    def __init__(
+        self,
+        pending_resolver: RadarResearchPendingResolver,
+        governed_context_resolver: RadarResearchGovernedContextResolver,
+        *,
+        execution_clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        if type(pending_resolver) is not RadarResearchPendingResolver:
+            raise TypeError("exact trusted Pending resolver required")
+        if type(governed_context_resolver) is not RadarResearchGovernedContextResolver:
+            raise TypeError("exact trusted governed-context resolver required")
+        self._pending_resolver = pending_resolver
+        self._governed_context_resolver = governed_context_resolver
+        self._clock = execution_clock or (lambda: datetime.now(UTC))
+
+    def assess(
+        self, request: RadarResearchReadinessRequest
+    ) -> RadarResearchReadinessAssessment:
+        # Invalid contract values cannot be retained in the frozen assessment.
+        # Their contract validation errors propagate rather than inventing inputs.
+        supplied = replace(request)
+        started = _timestamp(self._clock())
+        code = RadarResearchReadinessFindingCode
+        condition = RadarResearchReadinessFindingCondition
+        failure: RadarResearchReadinessFinding | None = None
+        context: RadarResearchReadinessEvaluatedContext | None = None
+        try:
+            pending = self._pending_resolver.resolve(supplied)
+        except RadarCandidateDeliveryUnavailableError as error:
+            failure = RadarResearchReadinessFinding(
+                code.PENDING_AUTHORITY, condition.UNAVAILABLE, str(error)
+            )
+        except RadarCandidateDeliveryError as error:
+            failure = RadarResearchReadinessFinding(
+                code.PENDING_AUTHORITY, condition.CONTRADICTORY, str(error)
+            )
+        else:
+            context = RadarResearchReadinessEvaluatedContext(
+                candidate_fingerprint=pending.candidate_fingerprint,
+                source_identity=pending.source_identity,
+            )
+            try:
+                resolved = self._governed_context_resolver.resolve(pending, supplied)
+            except RadarResearchGovernedContextError as error:
+                failure = error.finding
+            else:
+                evaluated = resolved.evaluated_context
+                if (
+                    evaluated.candidate_fingerprint != pending.candidate_fingerprint
+                    or evaluated.source_identity != pending.source_identity
+                ):
+                    failure = RadarResearchReadinessFinding(
+                        code.INPUT_INTEGRITY,
+                        condition.CONTRADICTORY,
+                        "authenticated Pending/governed context mismatch",
+                    )
+                else:
+                    context = evaluated
+
+        findings: list[RadarResearchReadinessFinding] = []
+        for concern in code:
+            if failure is not None and failure.code is concern:
+                findings.append(failure)
+            if failure is None or (
+                concern is code.PENDING_AUTHORITY and context is not None
+            ):
+                findings.append(
+                    RadarResearchReadinessFinding(concern, condition.PASSED)
+                )
+            elif concern is not code.PENDING_AUTHORITY:
+                findings.append(
+                    RadarResearchReadinessFinding(concern, condition.NOT_CHECKED)
+                )
+        outcome = (
+            RadarResearchReadinessOutcome.READY
+            if failure is None
+            else failure.required_outcome
+        )
+        if outcome is None:
+            raise RuntimeError("resolver failure requires a bounded negative condition")
+        return RadarResearchReadinessAssessment(
+            request=supplied,
+            policy=RadarResearchReadinessPolicyIdentity(),
+            outcome=outcome,
+            execution_started_at=started,
+            execution_completed_at=_timestamp(self._clock()),
+            findings=tuple(findings),
+            evaluated_context=context,
+        )
