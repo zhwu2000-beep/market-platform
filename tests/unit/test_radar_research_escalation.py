@@ -1,13 +1,18 @@
-"""Contract-only fixtures: no trusted records or readiness evaluation are created."""
+"""Frozen readiness contracts and opt-in retained Pending authentication."""
 
 import inspect
 import json
 from dataclasses import FrozenInstanceError, fields, replace
 from datetime import UTC, datetime, timedelta, timezone
+from unittest.mock import Mock
 
 import pytest
+from test_radar_application import AS_OF, INSTRUMENT
+from test_radar_candidate_delivery import Harness
 
 from market_platform._fingerprint import canonical_fingerprint
+from market_platform.application import radar_candidate_delivery as delivery
+from market_platform.application import radar_candidate_delivery_store as storage
 from market_platform.application import radar_research_escalation as subject
 from market_platform.application.polygon_completed_daily_production_admission import (
     PolygonCompletedDailyFreshnessExecutionReference,
@@ -15,7 +20,23 @@ from market_platform.application.polygon_completed_daily_production_admission im
 from market_platform.application.polygon_completed_daily_production_technical import (
     PolygonCompletedDailyTechnicalRequest,
 )
-from market_platform.application.radar_candidate_delivery import SourceRecoveryIdentity
+from market_platform.application.radar_candidate import (
+    RadarCandidateDecision,
+    RadarCandidateDecisionReason,
+)
+from market_platform.application.radar_candidate_delivery import (
+    DeliveryFailure,
+    RadarCandidateDeliveryError,
+    SourceRecoveryIdentity,
+)
+from market_platform.application.radar_candidate_delivery_store import (
+    RadarCandidateDeliveryFileStore,
+    RadarCandidateDeliveryUnavailableError,
+)
+from market_platform.application.radar_research_escalation import (
+    RadarResearchPendingResolution,
+    RadarResearchPendingResolver,
+)
 from market_platform.application.radar_research_escalation import (
     RadarResearchReadinessAssessment as Assessment,
 )
@@ -52,6 +73,11 @@ from market_platform.evidence.references import (
     EvidenceIdentityReference,
 )
 from market_platform.evidence.temporal import EvidenceFreshnessEvaluationReference
+from market_platform.radar.lightweight_observation import (
+    EMA8_EMA20_OBSERVATION_LOOKUP,
+    RadarEmaRelation,
+)
+from market_platform.radar.trigger import CURRENT_MARKET_CONTENT_LOOKUP
 
 ANALYSIS = datetime(2026, 9, 24, tzinfo=UTC)
 KNOWLEDGE = ANALYSIS + timedelta(days=1)
@@ -713,3 +739,328 @@ def test_evaluated_context_is_a_value_without_payloads_or_duplicated_timing():
         EvaluatedContext(qualification_result=True)
     with pytest.raises(TypeError):
         EvaluatedContext(bridge_payload={})
+
+
+def retained_graph(h):
+    source = h.store.discover_prepared(INSTRUMENT)[0]
+    accepted = h.store.read_accepted(source.identity)
+    decision = h.store.read_decision(source.identity)
+    pending = h.store.read_pending(decision.decision.candidate.fingerprint)
+    supplied = request(
+        candidate_fingerprint=pending.candidate_fingerprint,
+        source_identity=source.identity,
+    )
+    return source, accepted, decision, pending, supplied
+
+
+def retained_bytes(h):
+    return {
+        str(path.relative_to(h.records.parent)): path.read_bytes()
+        for root in (h.records, h.checkpoints)
+        for path in root.iterdir()
+    }
+
+
+def forbid_regeneration(h, monkeypatch):
+    forbidden = Mock(side_effect=AssertionError("Resolution must only read"))
+    monkeypatch.setattr(delivery, "evaluate_radar_candidate", forbidden)
+    for name in ("recover", "publish", "_complete", "_save"):
+        monkeypatch.setattr(delivery.RadarCandidateDeliveryCoordinator, name, forbidden)
+    monkeypatch.setattr(storage.RadarCandidateDeliveryFileStore, "_publish", forbidden)
+    monkeypatch.setattr(h.checkpoint, "save_state", forbidden)
+    return forbidden
+
+
+@pytest.fixture
+def retained_pending(tmp_path, monkeypatch):
+    h = Harness(tmp_path)
+    h.run(h.coordinator())
+    graph = retained_graph(h)
+    h.restart()
+    forbidden = forbid_regeneration(h, monkeypatch)
+    yield h, graph
+    forbidden.assert_not_called()
+    h.assert_no_acquisition()
+
+
+def test_trusted_complete_pending_resolution_is_bounded_and_non_consuming(
+    retained_pending,
+    monkeypatch,
+):
+    h, (source, accepted, decision, pending, supplied) = retained_pending
+    # Purported material references must not even be projected by this slice.
+    forbidden = Mock(side_effect=AssertionError("No material resolution"))
+    monkeypatch.setattr(EvidenceArtifactReference, "to_dict", forbidden)
+    monkeypatch.setattr(PolygonCompletedDailyTechnicalRequest, "to_dict", forbidden)
+    before = retained_bytes(h)
+    resolver = RadarResearchPendingResolver(h.store)
+    resolved = resolver.resolve(supplied)
+    assert resolved == resolver.resolve(supplied)
+    assert resolved.candidate_fingerprint == pending.candidate_fingerprint
+    assert resolved.source_identity == source.identity == accepted.source_identity
+    assert (
+        resolved.source_identity == decision.source_identity == pending.source_identity
+    )
+    assert resolved.source_identity is not supplied.source_identity
+    assert [item.name for item in fields(resolved)] == [
+        "candidate_fingerprint",
+        "source_identity",
+    ]
+    context = EvaluatedContext(
+        candidate_fingerprint=resolved.candidate_fingerprint,
+        source_identity=resolved.source_identity,
+    )
+    assert all(
+        getattr(context, item.name) is None
+        for item in fields(context)
+        if item.name not in {"candidate_fingerprint", "source_identity"}
+    )
+    assert hash(resolved) == hash(replace(resolved))
+    assert not hasattr(resolved, "__dict__")
+    assert not hasattr(resolved, "outcome")
+    with pytest.raises(FrozenInstanceError):
+        resolved.source_identity = supplied.source_identity
+    assert h.store.read_pending(resolved.candidate_fingerprint) == pending
+    assert retained_bytes(h) == before
+    forbidden.assert_not_called()
+
+
+def test_missing_pending_is_unavailable_without_completing_publication(
+    retained_pending,
+):
+    h, (_, _, _, pending, supplied) = retained_pending
+    (h.records / storage._filename(pending)).unlink()
+    before = retained_bytes(h)
+    with pytest.raises(RadarCandidateDeliveryUnavailableError):
+        RadarResearchPendingResolver(h.store).resolve(supplied)
+    assert retained_bytes(h) == before
+
+
+@pytest.mark.parametrize("missing", [0, 1, 2, "all"])
+def test_missing_graph_links_and_orphan_pending_are_refused(retained_pending, missing):
+    h, graph = retained_pending
+    for index in range(3) if missing == "all" else (missing,):
+        (h.records / storage._filename(graph[index])).unlink()
+    before = retained_bytes(h)
+    with pytest.raises(RadarCandidateDeliveryError) as caught:
+        RadarResearchPendingResolver(h.store).resolve(graph[-1])
+    assert caught.value.failure is DeliveryFailure.INVARIANT
+    assert retained_bytes(h) == before
+
+
+@pytest.mark.parametrize(
+    "contradiction",
+    [
+        "ineligible_decision",
+        "nonmatching_candidate",
+        "pending_decision",
+        "accepted_state",
+        "pending_source",
+        "candidate_fingerprint",
+        "decision_source",
+        "prepared_policy",
+        "decision_policy",
+        "pending_policy",
+    ],
+)
+def test_retained_graph_contradictions_are_refused(retained_pending, contradiction):
+    h, (source, accepted, decision, pending, supplied) = retained_pending
+    record = pending
+    if contradiction == "ineligible_decision":
+        record = replace(
+            decision,
+            decision=RadarCandidateDecision(
+                decision.decision.policy,
+                RadarCandidateDecisionReason.NOT_SELECTED,
+                None,
+            ),
+        )
+    elif contradiction in {"nonmatching_candidate", "pending_decision"}:
+        candidate = decision.decision.candidate
+        altered = replace(
+            candidate.source_observation_state,
+            market_observation=replace(
+                candidate.source_observation_state.market_observation, observed_at=AS_OF
+            ),
+        )
+        record = replace(
+            pending if contradiction == "pending_decision" else decision,
+            decision=replace(
+                decision.decision,
+                candidate=replace(candidate, source_observation_state=altered),
+            ),
+        )
+    elif contradiction == "accepted_state":
+        record = replace(
+            accepted,
+            accepted_state=replace(
+                accepted.accepted_state,
+                market_observation=replace(
+                    accepted.accepted_state.market_observation, observed_at=AS_OF
+                ),
+            ),
+        )
+    elif contradiction.startswith("prepared"):
+        record = source
+    elif contradiction.startswith("decision"):
+        record = decision
+    raw = record.to_dict()
+    if contradiction in {"pending_source", "decision_source"}:
+        raw["source_identity"] = "sha256:" + "f" * 64
+    elif contradiction == "candidate_fingerprint":
+        raw["candidate_fingerprint"] = "sha256:" + "f" * 64
+    elif contradiction.endswith("policy"):
+        policy = raw["policy"] if record is source else raw["decision"]["policy"]
+        policy["behavioral_revision"] = "2"
+    (h.records / storage._filename(record)).write_text(
+        json.dumps(raw), encoding="utf-8"
+    )
+    before = retained_bytes(h)
+    with pytest.raises(RadarCandidateDeliveryError) as caught:
+        RadarResearchPendingResolver(h.store).resolve(supplied)
+    assert caught.value.failure is DeliveryFailure.INVARIANT
+    assert retained_bytes(h) == before
+
+
+@pytest.mark.parametrize("index", range(4))
+def test_malformed_retained_records_are_refused_without_repair(retained_pending, index):
+    h, graph = retained_pending
+    (h.records / storage._filename(graph[index])).write_bytes(b'{"partial":')
+    before = retained_bytes(h)
+    with pytest.raises(RadarCandidateDeliveryError) as caught:
+        RadarResearchPendingResolver(h.store).resolve(graph[-1])
+    assert caught.value.failure is DeliveryFailure.INVARIANT
+    assert retained_bytes(h) == before
+
+
+def test_source_lookup_mismatch_is_refused(retained_pending):
+    h, (*_, supplied) = retained_pending
+    mismatched = replace(
+        supplied, source_identity=SourceRecoveryIdentity("sha256:" + "f" * 64)
+    )
+    with pytest.raises(RadarCandidateDeliveryError) as caught:
+        RadarResearchPendingResolver(h.store).resolve(mismatched)
+    assert caught.value.failure is DeliveryFailure.INVARIANT
+
+
+def test_no_matching_candidate_is_unavailable(retained_pending):
+    h, (*_, supplied) = retained_pending
+    with pytest.raises(RadarCandidateDeliveryUnavailableError):
+        RadarResearchPendingResolver(h.store).resolve(
+            replace(supplied, candidate_fingerprint="sha256:" + "f" * 64)
+        )
+
+
+def test_unreadable_retained_record_is_unavailable_without_repair(
+    retained_pending,
+    monkeypatch,
+):
+    h, (_, _, _, pending, supplied) = retained_pending
+    path = h.records / storage._filename(pending)
+    before = retained_bytes(h)
+    original = type(path).open
+
+    def unavailable(target, *args, **kwargs):
+        if target == path:
+            raise PermissionError("Retained record inaccessible")
+        return original(target, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(type(path), "open", unavailable)
+        with pytest.raises(RadarCandidateDeliveryUnavailableError):
+            RadarResearchPendingResolver(h.store).resolve(supplied)
+    assert retained_bytes(h) == before
+
+
+@pytest.mark.parametrize("detached", ["pending", "candidate", "json", "resolution"])
+def test_detached_records_cannot_replace_owner_lookup(retained_pending, detached):
+    h, (_, _, _, pending, supplied) = retained_pending
+    values = {
+        "pending": pending,
+        "candidate": pending.decision.candidate,
+        "json": pending.to_dict(),
+        "resolution": RadarResearchPendingResolution(
+            pending.candidate_fingerprint, pending.source_identity
+        ),
+    }
+    with pytest.raises(RadarCandidateDeliveryError) as caught:
+        RadarResearchPendingResolver(h.store).resolve(values[detached])
+    assert caught.value.failure is DeliveryFailure.INVARIANT
+    for path in h.records.iterdir():
+        path.unlink()
+    # Keeping all detached values cannot restore the lost owned graph.
+    with pytest.raises(RadarCandidateDeliveryUnavailableError):
+        RadarResearchPendingResolver(h.store).resolve(supplied)
+    with pytest.raises(TypeError):
+        RadarResearchPendingResolver(values[detached])
+
+
+@pytest.mark.parametrize("owner", ["none", "missing_root", "inaccessible_root"])
+def test_lost_trusted_owner_fails_closed_without_root_creation(
+    retained_pending,
+    monkeypatch,
+    owner,
+):
+    h, (*_, supplied) = retained_pending
+    store = h.store
+    missing = h.records.parent / "lost-owner"
+    before = retained_bytes(h)
+    if owner == "none":
+        store = None
+    elif owner == "missing_root":
+        store = RadarCandidateDeliveryFileStore(missing)
+    with monkeypatch.context() as patch:
+        if owner == "inaccessible_root":
+            patch.setattr(storage.os, "scandir", Mock(side_effect=PermissionError))
+        with pytest.raises(RadarCandidateDeliveryUnavailableError):
+            RadarResearchPendingResolver(store).resolve(supplied)
+    assert not missing.exists()
+    assert retained_bytes(h) == before
+
+
+@pytest.mark.parametrize("field", ["candidate_fingerprint", "source_identity"])
+def test_corrupted_lookup_identity_is_refused_even_when_owner_unavailable(field):
+    supplied = request()
+    object.__setattr__(supplied, field, "invalid")
+    with pytest.raises(RadarCandidateDeliveryError) as caught:
+        RadarResearchPendingResolver(None).resolve(supplied)
+    assert caught.value.failure is DeliveryFailure.INVARIANT
+
+
+def test_previous_pending_resolves_after_later_checkpoint_replacement(
+    tmp_path, monkeypatch
+):
+    h = Harness(tmp_path)
+    h.run(h.coordinator())
+    source, _, _, pending, supplied = retained_graph(h)
+    new_light = replace(
+        h.loaders[EMA8_EMA20_OBSERVATION_LOOKUP].return_value.observation,
+        relation=RadarEmaRelation.BELOW,
+        normalized_market_content_identity="sha256:" + "c" * 64,
+    )
+    current = h.loaders[CURRENT_MARKET_CONTENT_LOOKUP].return_value
+    h.loaders[CURRENT_MARKET_CONTENT_LOOKUP].return_value = replace(
+        current,
+        content=replace(
+            current.content,
+            normalized_market_content_identity=new_light.normalized_market_content_identity,
+        ),
+    )
+    lookup = h.loaders[EMA8_EMA20_OBSERVATION_LOOKUP].return_value
+    h.loaders[EMA8_EMA20_OBSERVATION_LOOKUP].return_value = replace(
+        lookup, observation=new_light
+    )
+    later = h.run(h.coordinator())
+    assert later.saved_state != source.proposed_state
+    assert len(h.store.discover_prepared(INSTRUMENT)) == 2
+    assert len(list(h.records.glob("pending-*"))) == 2
+    h.restart()
+    forbidden = forbid_regeneration(h, monkeypatch)
+    before = retained_bytes(h)
+    resolved = RadarResearchPendingResolver(h.store).resolve(supplied)
+    assert resolved.source_identity == source.identity
+    assert resolved.candidate_fingerprint == pending.candidate_fingerprint
+    assert h.store.read_pending(resolved.candidate_fingerprint) == pending
+    assert retained_bytes(h) == before
+    forbidden.assert_not_called()
+    h.assert_no_acquisition()

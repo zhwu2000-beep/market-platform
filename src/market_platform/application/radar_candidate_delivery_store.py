@@ -86,6 +86,14 @@ def _safe(info: os.stat_result, *, directory: bool = False) -> None:
         raise ValueError("Delivery entry must be regular and non-reparse")
 
 
+class RadarCandidateDeliveryUnavailableError(RuntimeError):
+    """Pending lookup cannot establish availability; no contradiction is claimed.
+
+    Used only by read-only resolution, without changing publication/recovery errors.
+    Missing Pending or a lost/inaccessible trusted owner is not corrupt authority.
+    """
+
+
 class RadarCandidateDeliveryFileStore:
     """No root creation, deletion, secondary index, or generic repository API."""
 
@@ -208,6 +216,49 @@ class RadarCandidateDeliveryFileStore:
         if result is not None and type(result) is not PendingCandidateWork:
             raise RadarCandidateDeliveryError(DeliveryFailure.INVARIANT)
         return result
+
+    def resolve_pending(
+        self,
+        candidate_fingerprint: str,
+        source_identity: SourceRecoveryIdentity,
+    ) -> PendingCandidateWork | None:
+        """Authenticate retained Pending through the complete owned inventory.
+
+        Individual reads and caller records are insufficient. Preserve inventory
+        failure precedence, including orphan/corrupt records even when the requested
+        Pending is absent. Historical graphs need no current checkpoint or policy.
+        This read neither completes publication nor consumes or repairs records.
+        """
+        try:
+            _fingerprint(candidate_fingerprint)
+            _identity_key(source_identity)
+            try:
+                self._check_root()
+            except OSError as exc:
+                raise RadarCandidateDeliveryUnavailableError(
+                    "Trusted delivery root unavailable"
+                ) from exc
+        except RadarCandidateDeliveryUnavailableError:
+            raise
+        except Exception as exc:
+            raise RadarCandidateDeliveryError(DeliveryFailure.INVARIANT) from exc
+        try:
+            records = self._inventory()
+        except RadarCandidateDeliveryError as exc:
+            if isinstance(exc.__cause__, OSError):
+                raise RadarCandidateDeliveryUnavailableError(
+                    "Retained delivery graph unavailable"
+                ) from exc
+            raise
+        for record in records:
+            if (
+                type(record) is PendingCandidateWork
+                and record.candidate_fingerprint == candidate_fingerprint
+            ):
+                if record.source_identity != source_identity:
+                    raise RadarCandidateDeliveryError(DeliveryFailure.INVARIANT)
+                return record
+        return None
 
     def _inventory(self) -> tuple[DeliveryRecord, ...]:
         try:

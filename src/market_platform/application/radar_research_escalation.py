@@ -4,6 +4,7 @@ Requests identify purported inputs for later owned resolution. Assessments descr
 only their recorded context, even when READY. A future research invoker must
 independently revalidate current Pending trust, material, governance, task freshness,
 policy and timing. This module performs no assessment, governance or activation.
+Opt-in Pending resolution authenticates only the retained delivery graph.
 """
 
 import re
@@ -18,7 +19,15 @@ from market_platform.application.polygon_completed_daily_production_admission im
 from market_platform.application.polygon_completed_daily_production_technical import (
     PolygonCompletedDailyTechnicalRequest,
 )
-from market_platform.application.radar_candidate_delivery import SourceRecoveryIdentity
+from market_platform.application.radar_candidate_delivery import (
+    DeliveryFailure,
+    RadarCandidateDeliveryError,
+    SourceRecoveryIdentity,
+)
+from market_platform.application.radar_candidate_delivery_store import (
+    RadarCandidateDeliveryFileStore,
+    RadarCandidateDeliveryUnavailableError,
+)
 from market_platform.evidence.references import (
     EvidenceArtifactReference,
     EvidenceIdentityReference,
@@ -148,6 +157,64 @@ class RadarResearchReadinessRequest:
         object.__setattr__(self, "knowledge_as_of", _timestamp(self.knowledge_as_of))
         if self.analysis_as_of > self.knowledge_as_of:
             raise ValueError("analysis/effective cutoff is after knowledge cutoff")
+
+
+@dataclass(frozen=True, slots=True)
+class RadarResearchPendingResolution:
+    """References returned after trusted owner authentication of a Pending graph.
+
+    The source identity binds Prepared/Accepted/Decision and its retained policy;
+    the Candidate fingerprint identifies exact Pending work. No material or
+    readiness conclusion is made. Constructing this value authenticates nothing,
+    and it is never a permit; only the resolver establishes owned correspondence.
+    """
+
+    candidate_fingerprint: str
+    source_identity: SourceRecoveryIdentity
+
+    def __post_init__(self) -> None:
+        _fingerprint(self.candidate_fingerprint, "candidate_fingerprint")
+        if type(self.source_identity) is not SourceRecoveryIdentity:
+            raise TypeError("source_identity must be SourceRecoveryIdentity")
+        object.__setattr__(self, "source_identity", replace(self.source_identity))
+
+
+class RadarResearchPendingResolver:
+    """Explicit read-only boundary; authentic Pending is insufficient for READY.
+
+    The injected existing owner is trusted by composition, never supplied as a
+    request record. Unavailability raises RadarCandidateDeliveryUnavailableError
+    (BLOCKED-type); malformed input and graph contradictions retain the existing
+    RadarCandidateDeliveryError (REFUSED-type). No later readiness checks run.
+    """
+
+    def __init__(self, store: RadarCandidateDeliveryFileStore | None) -> None:
+        if store is not None and type(store) is not RadarCandidateDeliveryFileStore:
+            raise TypeError("Expected owned Candidate delivery store or None")
+        self._store = store
+
+    def resolve(
+        self, request: RadarResearchReadinessRequest
+    ) -> RadarResearchPendingResolution:
+        if type(request) is not RadarResearchReadinessRequest:
+            raise RadarCandidateDeliveryError(DeliveryFailure.INVARIANT)
+        # Validate only Pending lookup identities; other references remain untrusted
+        # and unexamined. Neither copied records nor evaluated contexts are inputs.
+        try:
+            _fingerprint(request.candidate_fingerprint, "candidate_fingerprint")
+            if type(request.source_identity) is not SourceRecoveryIdentity:
+                raise TypeError("Expected source recovery identity")
+            identity = replace(request.source_identity)
+        except Exception as exc:
+            raise RadarCandidateDeliveryError(DeliveryFailure.INVARIANT) from exc
+        if self._store is None:
+            raise RadarCandidateDeliveryUnavailableError("Trusted owner unavailable")
+        pending = self._store.resolve_pending(request.candidate_fingerprint, identity)
+        if pending is None:
+            raise RadarCandidateDeliveryUnavailableError("Retained Pending unavailable")
+        return RadarResearchPendingResolution(
+            pending.candidate_fingerprint, pending.source_identity
+        )
 
 
 @dataclass(frozen=True, slots=True)
