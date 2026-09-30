@@ -3,16 +3,24 @@
 Requests identify purported inputs for later owned resolution. Assessments describe
 only their recorded context, even when READY. A future research invoker must
 independently revalidate current Pending trust, material, governance, task freshness,
-policy and timing. This module performs no assessment, governance or activation.
+policy and timing. This module performs no final assessment or activation.
 Opt-in Pending resolution authenticates only the retained delivery graph.
+Opt-in governed resolution evaluates retained material and current task governance.
 """
 
 import re
+from collections.abc import Callable
+from contextlib import ExitStack
 from dataclasses import dataclass, field, fields, replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from enum import StrEnum
+from zoneinfo import ZoneInfo
 
 from market_platform._fingerprint import canonical_fingerprint
+from market_platform.application import polygon_completed_daily_production_bridge as b
+from market_platform.application import (
+    polygon_completed_daily_production_qualification as q,
+)
 from market_platform.application.polygon_completed_daily_production_admission import (
     PolygonCompletedDailyFreshnessExecutionReference,
 )
@@ -32,6 +40,7 @@ from market_platform.evidence.references import (
     EvidenceArtifactReference,
     EvidenceIdentityReference,
 )
+from market_platform.radar.calendar import CalendarError, ExchangeSessionCalendar
 
 READINESS_POLICY_ID = "exact_governed_250_session_technical_readiness"
 READINESS_POLICY_REVISION = "1"
@@ -485,3 +494,384 @@ class RadarResearchReadinessAssessment:
             )
             or not any(item.code is code for item in self.findings)
         )
+
+
+class RadarResearchGovernedContextError(RuntimeError):
+    """A bounded finding, with typed canonical cause retained when applicable."""
+
+    def __init__(self, finding: RadarResearchReadinessFinding) -> None:
+        self.finding = finding
+        super().__init__(finding.detail)
+
+
+@dataclass(frozen=True, slots=True)
+class RadarResearchGovernedContextResolution:
+    """Authenticated references for this context only; never a research permit.
+
+    Construction authenticates nothing. No READY assessment is made. The existing
+    evaluated context supplies the governed fields without duplicating reference
+    types or payloads; Pending fields record the owned input reauthenticated here.
+    """
+
+    evaluated_context: RadarResearchReadinessEvaluatedContext
+
+    def __post_init__(self) -> None:
+        if type(self.evaluated_context) is not RadarResearchReadinessEvaluatedContext:
+            raise TypeError("exact evaluated context required")
+        context = replace(self.evaluated_context)
+        if any(getattr(context, item.name) is None for item in fields(context)):
+            raise ValueError("resolved context requires all authenticated references")
+        object.__setattr__(self, "evaluated_context", context)
+
+
+def _governed_failure(
+    code: RadarResearchReadinessFindingCode,
+    condition: RadarResearchReadinessFindingCondition,
+    detail: str,
+) -> RadarResearchGovernedContextError:
+    return RadarResearchGovernedContextError(
+        RadarResearchReadinessFinding(code, condition, detail)
+    )
+
+
+class RadarResearchGovernedContextResolver:
+    """Explicit no-refetch resolution over trusted owners; no downstream executor.
+
+    Pending resolution values are not bearer proof. The same Slice-2 resolver and
+    delivery owner are required again, so a detached or fabricated value cannot
+    bypass Pending authentication. Composition supplies exact trusted governance
+    services and the same exchange calendar semantics used for Radar acceptance.
+    No production composition calls this boundary.
+    """
+
+    def __init__(
+        self,
+        store: RadarCandidateDeliveryFileStore | None,
+        qualification_service: (
+            q.PolygonCompletedDailyProductionQualificationApplicationService | None
+        ),
+        bridge_service: b.PolygonCompletedDailyProductionBridgeApplicationService
+        | None,
+        calendar: ExchangeSessionCalendar,
+        *,
+        execution_clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._pending_resolver = RadarResearchPendingResolver(store)
+        for owner, expected in (
+            (
+                qualification_service,
+                q.PolygonCompletedDailyProductionQualificationApplicationService,
+            ),
+            (bridge_service, b.PolygonCompletedDailyProductionBridgeApplicationService),
+        ):
+            if owner is not None and type(owner) is not expected:
+                raise TypeError("exact trusted governed owner required")
+        self._store = store
+        self._qualification = qualification_service
+        self._bridge = bridge_service
+        self._calendar = calendar
+        self._clock = execution_clock or (lambda: datetime.now(UTC))
+
+    def resolve(
+        self,
+        pending: RadarResearchPendingResolution,
+        request: RadarResearchReadinessRequest,
+    ) -> RadarResearchGovernedContextResolution:
+        code = RadarResearchReadinessFindingCode
+        condition = RadarResearchReadinessFindingCondition
+        try:
+            if type(pending) is not RadarResearchPendingResolution:
+                raise TypeError("owned Pending resolution required")
+            authenticated = self._pending_resolver.resolve(request)
+            if replace(pending) != authenticated:
+                raise RadarCandidateDeliveryError(DeliveryFailure.INVARIANT)
+            assert self._store is not None
+            work = self._store.resolve_pending(
+                authenticated.candidate_fingerprint, authenticated.source_identity
+            )
+            if work is None:
+                raise RadarCandidateDeliveryUnavailableError("Pending disappeared")
+        except RadarCandidateDeliveryUnavailableError as error:
+            raise _governed_failure(
+                code.PENDING_AUTHORITY, condition.UNAVAILABLE, str(error)
+            ) from error
+        except (TypeError, ValueError, RadarCandidateDeliveryError) as error:
+            raise _governed_failure(
+                code.PENDING_AUTHORITY, condition.CONTRADICTORY, str(error)
+            ) from error
+        try:
+            supplied = replace(request)
+            now = _timestamp(self._clock())
+            if supplied.knowledge_as_of > now:
+                raise _governed_failure(
+                    code.TIMING_CONTEXT,
+                    condition.UNSUPPORTED,
+                    "future knowledge cutoff",
+                )
+            candidate = work.decision.candidate
+            assert candidate is not None
+            observation = candidate.source_observation_state.lightweight_observation
+            scope = observation.content_scope
+            # Exact material cannot legitimately include the NY query civil date.
+            if (
+                observation.completed_session
+                >= supplied.knowledge_as_of.astimezone(
+                    ZoneInfo("America/New_York")
+                ).date()
+            ):
+                raise _governed_failure(
+                    code.TIMING_CONTEXT,
+                    condition.UNSUPPORTED,
+                    "same-day/post-close exact governance unsupported",
+                )
+            # Approved task identity does not depend on current consumability.
+            # An unavailable Qualification owner cannot establish this comparison.
+            if self._qualification is not None:
+                profile = q._approved_profile()
+                profile_fingerprint = profile.analysis_profile.get(
+                    "profile_fingerprint"
+                )
+                if type(profile_fingerprint) is not str:
+                    raise ValueError("approved technical profile fingerprint required")
+                if (
+                    supplied.consumer_reference
+                    != EvidenceIdentityReference(
+                        "consumer",
+                        profile.consumer.definition_id,
+                        profile.consumer.definition_version,
+                        profile.consumer.fingerprint,
+                    )
+                    or supplied.intended_use_reference
+                    != EvidenceIdentityReference(
+                        "use",
+                        profile.use.definition_id,
+                        profile.use.definition_version,
+                        profile.use.fingerprint,
+                    )
+                    or supplied.technical_profile_reference
+                    != EvidenceIdentityReference(
+                        "analysis_profile",
+                        profile.analysis_profile.definition_id,
+                        profile.analysis_profile.definition_version,
+                        profile_fingerprint,
+                    )
+                ):
+                    raise _governed_failure(
+                        code.INPUT_INTEGRITY,
+                        condition.CONTRADICTORY,
+                        "exact task/profile linkage mismatch",
+                    )
+            # Authenticate retained representation and original provenance without
+            # requalifying its historical context or issuing a new Bridge.
+            if self._bridge is not None:
+                original_owner = self._bridge._qualification_service
+                with ExitStack() as stack:
+                    original_owner._lock_inputs(stack)
+                    stack.enter_context(original_owner._history._lock)
+                    for retained in self._bridge.get_bridge_history_as_of(
+                        supplied.artifact_reference,
+                        knowledge_as_of=supplied.knowledge_as_of,
+                    ):
+                        original = retained.qualification
+                        try:
+                            owned = self._bridge._resolve(
+                                b.PolygonCompletedDailyBridgeRequest(
+                                    supplied.artifact_reference,
+                                    original.construction_result.receipt.execution_id,
+                                    original.execution_id,
+                                    original.fingerprint,
+                                ),
+                                now,
+                            )
+                        except b.PolygonCompletedDailyBridgeRefused as error:
+                            if error.reason is not (
+                                b.PolygonCompletedDailyBridgeRefusalReason.QUALIFICATION_UNAVAILABLE
+                            ):
+                                raise
+                            # Absence proves no provenance contradiction. The
+                            # required current Bridge resolution still runs below.
+                            continue
+                        if owned != original:
+                            raise ValueError("retained Bridge/Qualification mismatch")
+                        retained_evidence = retained.completed_prices.evidence
+                        if (
+                            owned.construction_result.receipt.execution_id
+                            == supplied.construction_execution_id
+                            and retained_evidence.dataset_content_fingerprint
+                            != observation.normalized_market_content_identity
+                        ):
+                            raise _governed_failure(
+                                code.MATERIAL_CORRESPONDENCE,
+                                condition.CONTRADICTORY,
+                                "normalized historical-content mismatch",
+                            )
+            if self._qualification is None:
+                raise _governed_failure(
+                    code.GOVERNANCE_PREREQUISITES,
+                    condition.UNAVAILABLE,
+                    "trusted governed owner unavailable",
+                )
+            intent = q.PolygonCompletedDailyQualificationRequest(
+                supplied.artifact_reference,
+                supplied.construction_execution_id,
+                supplied.analysis_as_of,
+                supplied.knowledge_as_of,
+            )
+            material_owner = self._qualification.resolve_retained_material(intent)
+            material = material_owner.material
+            if (
+                material.canonical_subject.subject_id
+                != observation.instrument.instrument_id
+            ):
+                raise _governed_failure(
+                    code.MATERIAL_CORRESPONDENCE,
+                    condition.CONTRADICTORY,
+                    "canonical instrument mismatch",
+                )
+            expected = self._calendar.sessions_in_range(
+                scope.history_start, scope.history_end
+            )
+            dates = tuple(date.fromisoformat(row.session_date) for row in material.rows)
+            start = observation.completed_session
+            for _ in range(249):
+                start = self._calendar.previous_session(start)
+            if (
+                len(expected) != 250
+                or scope.history_start != start
+                or self._calendar.latest_completed_session(observation.as_of)
+                != observation.completed_session
+                or tuple(sorted(set(expected))) != expected
+                or dates != expected
+                or expected[-1] != observation.completed_session
+                or material.start_session_date != scope.history_start.isoformat()
+                or material.end_session_date != scope.history_end.isoformat()
+            ):
+                raise _governed_failure(
+                    code.MATERIAL_CORRESPONDENCE,
+                    condition.CONTRADICTORY,
+                    "exact ordered 250-session triggering window mismatch",
+                )
+            if (
+                dates[-1]
+                >= material.query_as_of.astimezone(ZoneInfo("America/New_York")).date()
+            ):
+                raise _governed_failure(
+                    code.TIMING_CONTEXT,
+                    condition.UNSUPPORTED,
+                    "original source timing does not govern triggering row",
+                )
+            if self._bridge is None:
+                raise _governed_failure(
+                    code.GOVERNANCE_PREREQUISITES,
+                    condition.UNAVAILABLE,
+                    "trusted Bridge owner unavailable",
+                )
+            qualified = self._qualification.qualify(intent)
+            if qualified.construction_result.receipt != material_owner.receipt:
+                raise _governed_failure(
+                    code.INPUT_INTEGRITY,
+                    condition.CONTRADICTORY,
+                    "exact material linkage mismatch",
+                )
+            bridge = self._bridge.bridge(
+                b.PolygonCompletedDailyBridgeRequest(
+                    supplied.artifact_reference,
+                    supplied.construction_execution_id,
+                    qualified.execution_id,
+                    qualified.fingerprint,
+                )
+            )
+            # Issuance resolves its own retained Qualification and proves no-drop
+            # correspondence, including current storage. Dataset and normalized
+            # historical identities intentionally have different meanings.
+            bridge.to_dict()
+            if bridge.qualification != qualified:
+                raise _governed_failure(
+                    code.MATERIAL_CORRESPONDENCE,
+                    condition.CONTRADICTORY,
+                    "Bridge/Qualification linkage mismatch",
+                )
+            if (
+                bridge.completed_prices.evidence.dataset_content_fingerprint
+                != observation.normalized_market_content_identity
+            ):
+                raise _governed_failure(
+                    code.MATERIAL_CORRESPONDENCE,
+                    condition.CONTRADICTORY,
+                    "normalized historical-content mismatch",
+                )
+            task = qualified.task_freshness_result
+            companion = task.companion
+            receipt = material_owner.receipt
+            return RadarResearchGovernedContextResolution(
+                RadarResearchReadinessEvaluatedContext(
+                    candidate_fingerprint=authenticated.candidate_fingerprint,
+                    source_identity=authenticated.source_identity,
+                    artifact_reference=material_owner.artifact.reference(),
+                    construction_reference=RadarResearchReadinessOccurrenceReference(
+                        receipt.execution_id,
+                        receipt.history_namespace_id,
+                        receipt.history_sequence,
+                        receipt.fingerprint,
+                    ),
+                    current_qualification_reference=RadarResearchReadinessOccurrenceReference(
+                        qualified.execution_id,
+                        qualified.history_namespace_id,
+                        qualified.history_sequence,
+                        qualified.fingerprint,
+                    ),
+                    task_freshness_reference=PolygonCompletedDailyFreshnessExecutionReference(
+                        task.freshness_record.reference(),
+                        companion.execution_id,
+                        companion.history_namespace_id,
+                        companion.history_sequence,
+                        companion.available_at,
+                        companion.fingerprint,
+                    ),
+                    bridge_reference=PolygonCompletedDailyTechnicalRequest(
+                        supplied.artifact_reference,
+                        bridge.history_namespace_id,
+                        bridge.history_sequence,
+                        bridge.execution_id,
+                        bridge.fingerprint,
+                    ),
+                )
+            )
+        except RadarResearchGovernedContextError:
+            raise
+        except q.PolygonCompletedDailyQualificationRefused as error:
+            reason = error.reason
+            blocked = reason in (
+                q.PolygonCompletedDailyQualificationRefusalReason.INPUT_UNAVAILABLE,
+                q.PolygonCompletedDailyQualificationRefusalReason.TASK_UNAVAILABLE,
+                q.PolygonCompletedDailyQualificationRefusalReason.LIFECYCLE_REFUSED,
+            )
+            raise _governed_failure(
+                code.GOVERNANCE_PREREQUISITES,
+                condition.UNSATISFIED if blocked else condition.CONTRADICTORY,
+                str(error),
+            ) from error
+        except b.PolygonCompletedDailyBridgeRefused as error:
+            absent = (
+                error.reason
+                is b.PolygonCompletedDailyBridgeRefusalReason.QUALIFICATION_UNAVAILABLE
+            )
+            raise _governed_failure(
+                code.GOVERNANCE_PREREQUISITES,
+                condition.UNAVAILABLE if absent else condition.CONTRADICTORY,
+                str(error),
+            ) from error
+        except CalendarError as error:
+            raise _governed_failure(
+                code.MATERIAL_CORRESPONDENCE, condition.UNSUPPORTED, str(error)
+            ) from error
+        except (
+            TypeError,
+            ValueError,
+            RuntimeError,
+            AttributeError,
+            ArithmeticError,
+        ) as error:
+            raise _governed_failure(
+                code.INPUT_INTEGRITY, condition.CONTRADICTORY, str(error)
+            ) from error

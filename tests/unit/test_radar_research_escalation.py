@@ -1064,3 +1064,681 @@ def test_previous_pending_resolves_after_later_checkpoint_replacement(
     assert retained_bytes(h) == before
     forbidden.assert_not_called()
     h.assert_no_acquisition()
+
+
+# Slice 3 uses genuine owners. Only source acquisition is faked during setup.
+def governed_setup(tmp_path, *, variant=None, missing=None):
+    from datetime import date
+
+    import pandas as pd
+    from test_polygon_completed_daily_production_admission_validity import _activate
+    from test_polygon_completed_daily_production_validation import (
+        _construction,
+        _mapping,
+        _request,
+        _row,
+        _validation_service,
+    )
+    from test_radar_application import CONTENT, LIGHT, state_for
+
+    from market_platform.application import (
+        polygon_completed_daily_production_bridge as b,
+    )
+    from market_platform.application import (
+        polygon_completed_daily_production_qualification as q,
+    )
+    from market_platform.data.historical import HistoricalPriceSeries
+    from market_platform.instruments import CanonicalInstrumentId
+    from market_platform.radar.calendar import ExchangeCalendarsSessionCalendar
+    from market_platform.radar.observation import RadarMarketContentScope
+
+    calendar = ExchangeCalendarsSessionCalendar()
+    end = date(2026, 9, 23)
+    start = end
+    for _ in range(249):
+        start = calendar.previous_session(start)
+    sessions = calendar.sessions_in_range(start, end)
+    scope = RadarMarketContentScope(start, end)
+    frame = pd.DataFrame(
+        [
+            {
+                "symbol": "AAPL",
+                "timestamp": datetime.combine(d, datetime.min.time(), UTC),
+                "open": 100.0,
+                "high": 102.0,
+                "low": 99.0,
+                "close": 101.0,
+                "volume": 1000.0,
+                "provider": "radar_fixture",
+            }
+            for d in sessions
+        ]
+    )
+    radar_history = HistoricalPriceSeries(frame)
+    digest = radar_history.content_fingerprint
+    h = Harness(tmp_path)
+    light = replace(
+        LIGHT, content_scope=scope, normalized_market_content_identity=digest
+    )
+    content = replace(
+        CONTENT, content_scope=scope, normalized_market_content_identity=digest
+    )
+    market = replace(
+        h.predecessor.state.market_observation,
+        content_scope=scope,
+        normalized_market_content_identity="sha256:" + "b" * 64,
+    )
+    prior = replace(
+        light,
+        relation=RadarEmaRelation.BELOW,
+        normalized_market_content_identity=market.normalized_market_content_identity,
+    )
+    h.checkpoint.save_state(state_for(market, prior))
+    h.loaders[CURRENT_MARKET_CONTENT_LOOKUP].return_value = replace(
+        h.loaders[CURRENT_MARKET_CONTENT_LOOKUP].return_value, content=content
+    )
+    h.loaders[EMA8_EMA20_OBSERVATION_LOOKUP].return_value = replace(
+        h.loaders[EMA8_EMA20_OBSERVATION_LOOKUP].return_value, observation=light
+    )
+    h.run(h.coordinator())
+    supplied = retained_graph(h)[-1]
+    pending = RadarResearchPendingResolver(h.store).resolve(supplied)
+    h.restart()
+
+    dates = sessions
+    if variant in ("249", "trigger_missing"):
+        dates = sessions[:-1]
+    elif variant == "251":
+        dates = (calendar.previous_session(start), *sessions)
+    elif variant == "wrong_start":
+        dates = (calendar.previous_session(start), *sessions[1:])
+    elif variant == "wrong_end":
+        dates = (*sessions[:-1], calendar.next_session(end))
+    elif variant == "interior":
+        dates = (*sessions[:100], date(2026, 1, 3), *sessions[101:])
+        dates = tuple(sorted(dates))
+    mapping = _mapping()
+    canonical = replace(mapping.canonical_instrument, instrument_id=INSTRUMENT)
+    if variant == "instrument":
+        canonical = replace(
+            canonical, instrument_id=CanonicalInstrumentId("wrong_canonical")
+        )
+    mapping = replace(mapping, canonical_instrument=canonical)
+    if variant == "mapping":
+        mapping = replace(mapping, valid_from=datetime(2026, 1, 1, tzinfo=UTC))
+    rows = tuple(_row(d, close="100" if variant == "content" else "101") for d in dates)
+    construction, built = _construction(
+        rows,
+        requested_from=dates[0],
+        requested_to=dates[-1],
+        mapping=mapping,
+    )
+    instant = built.receipt.available_at + timedelta(minutes=3)
+    validator = _validation_service(construction, built, constant=True)
+    if missing != "validation":
+        validator.execute_profile(_request(built))
+    fresh = q.f.PolygonCompletedDailyProductionFreshnessApplicationService(
+        construction, execution_clock=lambda: instant
+    )
+    fresh.execute_admission(
+        q.f.PolygonCompletedDailyAdmissionFreshnessRequest(
+            built.artifact.reference(),
+            built.receipt.execution_id,
+        )
+    )
+    issuer = q.a.PolygonCompletedDailyProductionAdmissionApplicationService(
+        construction,
+        validator,
+        fresh,
+        execution_clock=lambda: instant,
+    )
+    admission_request = q.a.PolygonCompletedDailyAdmissionRequest(
+        built.artifact.reference(),
+        built.receipt.execution_id,
+    )
+    if missing not in ("admission", "validation"):
+        issuer.issue_admission(admission_request)
+    validity, active_request = _activate(issuer, admission_request, instant)
+    if missing not in ("active", "admission", "validation"):
+        validity.issue_initial_active(active_request)
+    now = instant + timedelta(minutes=1)
+    fresh._execution_clock = lambda: now
+    qualified_owner = q.PolygonCompletedDailyProductionQualificationApplicationService(
+        validity,
+        execution_clock=lambda: now,
+    )
+    bridge_owner = b.PolygonCompletedDailyProductionBridgeApplicationService(
+        qualified_owner,
+        execution_clock=lambda: now,
+    )
+    profile = q._PROFILE
+    supplied = replace(
+        supplied,
+        artifact_reference=built.artifact.reference(),
+        construction_execution_id=built.receipt.execution_id,
+        consumer_reference=EvidenceIdentityReference(
+            "consumer",
+            profile.consumer.definition_id,
+            profile.consumer.definition_version,
+            profile.consumer.fingerprint,
+        ),
+        intended_use_reference=EvidenceIdentityReference(
+            "use",
+            profile.use.definition_id,
+            profile.use.definition_version,
+            profile.use.fingerprint,
+        ),
+        technical_profile_reference=EvidenceIdentityReference(
+            "analysis_profile",
+            profile.analysis_profile.definition_id,
+            profile.analysis_profile.definition_version,
+            profile.analysis_profile.get("profile_fingerprint"),
+        ),
+        analysis_as_of=now,
+        knowledge_as_of=now,
+    )
+    resolver = subject.RadarResearchGovernedContextResolver(
+        h.store,
+        qualified_owner,
+        bridge_owner,
+        calendar,
+        execution_clock=lambda: now,
+    )
+    construction._candidate_service._acquirer.get_completed_daily_acquisition = Mock(
+        side_effect=AssertionError("Slice 3 must never acquire or repair material")
+    )
+    return (
+        h,
+        pending,
+        supplied,
+        resolver,
+        qualified_owner,
+        bridge_owner,
+        built,
+        construction,
+    )
+
+
+@pytest.fixture
+def governed(tmp_path, monkeypatch, request):
+    result = governed_setup(tmp_path, **getattr(request, "param", {}))
+    from market_platform.application import (
+        polygon_completed_daily_production_assessment as assessment_owner,
+    )
+    from market_platform.application import (
+        polygon_completed_daily_production_interpretation as interpretation,
+    )
+    from market_platform.application import (
+        polygon_completed_daily_production_strategy as strategy,
+    )
+    from market_platform.application import (
+        polygon_completed_daily_production_technical as t,
+    )
+    from market_platform.data.service import MarketDataService
+
+    forbidden = Mock(
+        side_effect=AssertionError("No acquisition or downstream execution")
+    )
+    construction = result[-1]
+    monkeypatch.setattr(type(construction), "execute", forbidden)
+    monkeypatch.setattr(
+        type(construction._candidate_service._acquirer),
+        "get_completed_daily_acquisition",
+        forbidden,
+    )
+    monkeypatch.setattr(
+        t.PolygonCompletedDailyProductionTechnicalApplicationService,
+        "execute",
+        forbidden,
+    )
+    for owner in (
+        interpretation.PolygonCompletedDailyProductionInterpretationApplicationService,
+        assessment_owner.PolygonCompletedDailyProductionAssessmentApplicationService,
+        strategy.PolygonCompletedDailyProductionStrategyApplicationService,
+    ):
+        monkeypatch.setattr(owner, "execute", forbidden)
+    monkeypatch.setattr(subject, "RadarResearchReadinessAssessment", forbidden)
+    forbid_regeneration(result[0], monkeypatch)
+    for name in ("get_daily_prices",):
+        monkeypatch.setattr(MarketDataService, name, forbidden)
+    before = retained_bytes(result[0])
+    yield result
+    forbidden.assert_not_called()
+    assert retained_bytes(result[0]) == before
+
+
+def governed_refusal(case, expected):
+    _, pending, supplied, resolver, *_ = case
+    with pytest.raises(subject.RadarResearchGovernedContextError) as caught:
+        resolver.resolve(pending, supplied)
+    assert caught.value.finding.required_outcome is expected
+    acquirer = case[-1]._candidate_service._acquirer
+    acquirer.get_completed_daily_acquisition.assert_not_called()
+    return caught.value
+
+
+def test_authentic_exact_governed_context_stops_with_references(governed):
+    h, pending, supplied, resolver, qualification, bridge, built, _ = governed
+    result = resolver.resolve(pending, supplied)
+    assert type(result) is subject.RadarResearchGovernedContextResolution
+    context = result.evaluated_context
+    assert context.candidate_fingerprint == pending.candidate_fingerprint
+    assert context.source_identity == pending.source_identity
+    assert context.artifact_reference == built.artifact.reference()
+    assert context.construction_reference.fingerprint == built.receipt.fingerprint
+    actual_q = qualification.get_qualification_history_as_of(
+        supplied.artifact_reference,
+        knowledge_as_of=supplied.knowledge_as_of,
+    )[-1]
+    actual_b = bridge.get_bridge_history_as_of(
+        supplied.artifact_reference,
+        knowledge_as_of=supplied.knowledge_as_of,
+    )[-1]
+    assert actual_q.original_row_count == actual_b.target_row_count == 250
+    assert actual_q.original_ordered_dates[-1] == "2026-09-23"
+    assert context.current_qualification_reference.fingerprint == actual_q.fingerprint
+    assert (
+        context.task_freshness_reference.companion_fingerprint
+        == actual_q.task_freshness_result.companion.fingerprint
+    )
+    assert context.bridge_reference.bridge_fingerprint == actual_b.fingerprint
+    assert (
+        actual_b.dataset_fingerprint
+        != actual_b.completed_prices.evidence.dataset_content_fingerprint
+    )
+    assert actual_b.qualification == actual_q
+    assert actual_q.all_row_mapping_covered and actual_q.canonical_state.is_consumable
+    assert built.material.query_as_of > AS_OF  # Independent later acquisition.
+    assert actual_q.available_at == supplied.knowledge_as_of
+    assert not hasattr(result, "outcome")
+    assert not hasattr(result, "authorized")
+    assert not hasattr(result, "technical_result")
+    assert hash(result) == hash(replace(result))
+    with pytest.raises(FrozenInstanceError):
+        result.evaluated_context = context
+    h.assert_no_acquisition()
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "instrument",
+        "wrong_start",
+        "wrong_end",
+        "249",
+        "251",
+        "interior",
+        "trigger_missing",
+        "content",
+        "mapping",
+    ],
+)
+def test_exact_material_contradictions_refused(tmp_path, variant):
+    case = governed_setup(tmp_path, variant=variant)
+    governed_refusal(case, Outcome.REFUSED)
+
+
+@pytest.mark.parametrize("missing", ["validation", "admission", "active"])
+def test_missing_current_governance_blocks(tmp_path, missing):
+    governed_refusal(governed_setup(tmp_path, missing=missing), Outcome.BLOCKED)
+
+
+@pytest.mark.parametrize("owner", ["qualification", "bridge"])
+def test_missing_governed_owner_blocks(governed, owner):
+    resolver = governed[3]
+    setattr(resolver, "_" + owner, None)
+    governed_refusal(governed, Outcome.BLOCKED)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["artifact_reference", "construction_execution_id", "technical_profile_reference"],
+)
+def test_wrong_governed_lookup_references_refused(governed, field):
+    case = list(governed)
+    supplied = case[2]
+    value = getattr(supplied, field)
+    if field == "artifact_reference":
+        value = replace(value, artifact_id="wrong_artifact")
+    elif field == "technical_profile_reference":
+        value = replace(value, identity_fingerprint="sha256:" + "0" * 64)
+    else:
+        value = "polygon_completed_daily_construction:" + "0" * 32
+    case[2] = replace(supplied, **{field: value})
+    governed_refusal(case, Outcome.REFUSED)
+
+
+def test_lost_construction_owner_after_restart_blocks(governed):
+    case = governed
+    owner = case[-1]
+    from market_platform.application import (
+        polygon_completed_daily_production_construction as construction,
+    )
+
+    owner._history = construction._InMemoryPolygonCompletedDailyConstructionHistory()
+    # Other retained owners now contradict the recreated empty root: fail closed.
+    governed_refusal(case, Outcome.REFUSED)
+
+
+def test_stale_task_context_blocks(governed):
+    case = list(governed)
+    now = case[2].knowledge_as_of + timedelta(days=10)
+    case[2] = replace(case[2], analysis_as_of=now, knowledge_as_of=now)
+    case[3]._clock = lambda: now
+    case[4]._clock = lambda: now
+    case[4]._validity_service._admission_service._freshness_service._execution_clock = (
+        lambda: now
+    )
+    governed_refusal(case, Outcome.BLOCKED)
+
+
+def test_unsupported_same_day_is_not_legitimized_by_elapsed_time(governed):
+    case = list(governed)
+    same_day = AS_OF
+    case[2] = replace(case[2], analysis_as_of=same_day, knowledge_as_of=same_day)
+    error = governed_refusal(case, Outcome.REFUSED)
+    assert error.finding.code is Code.TIMING_CONTEXT
+    assert case[4]._history._state == (1, ())
+    assert case[5]._history._state == (1, ())
+
+
+@pytest.mark.parametrize(
+    "kind", ["pending", "request", "corrupt_history", "bridge", "cached_bridge_storage"]
+)
+def test_detached_or_corrupt_authority_refused(governed, kind):
+    case = list(governed)
+    if kind == "pending":
+        case[1] = RadarResearchPendingResolution(
+            "sha256:" + "0" * 64, case[1].source_identity
+        )
+    elif kind == "request":
+        object.__setattr__(case[2], "construction_execution_id", "malformed")
+    elif kind == "corrupt_history":
+        case[-1]._history._state = (2, ())
+    else:
+        case[3].resolve(case[1], case[2])
+        retained = case[5]._history._state[1][0]
+        if kind == "cached_bridge_storage":
+            prices = retained.completed_prices._prices
+            old_digest = prices.content_fingerprint
+            prices._frame.loc[100, "close"] = 100.0
+            assert prices.content_fingerprint == old_digest
+        else:
+            object.__setattr__(
+                retained,
+                "dataset_fingerprint",
+                retained.completed_prices.evidence.dataset_content_fingerprint,
+            )
+    governed_refusal(case, Outcome.REFUSED)
+
+
+def test_empty_governed_owners_after_restart_block_without_repair(governed):
+    qualification = governed[4]
+    validity = qualification._validity_service
+    admission = validity._admission_service
+    for owner in (
+        governed[-1],
+        admission._validation_service,
+        admission._freshness_service,
+        admission,
+        validity,
+        qualification,
+        governed[5],
+    ):
+        owner._history = type(owner._history)()
+    governed_refusal(governed, Outcome.BLOCKED)
+
+
+def test_bridge_with_lost_qualification_owner_blocks(governed):
+    from market_platform.application import (
+        polygon_completed_daily_production_bridge as b,
+    )
+    from market_platform.application import (
+        polygon_completed_daily_production_qualification as q,
+    )
+
+    qualification = governed[4]
+    restarted = q.PolygonCompletedDailyProductionQualificationApplicationService(
+        qualification._validity_service,
+        execution_clock=qualification._clock,
+    )
+    governed[3]._bridge = b.PolygonCompletedDailyProductionBridgeApplicationService(
+        restarted,
+        execution_clock=qualification._clock,
+    )
+    governed_refusal(governed, Outcome.BLOCKED)
+
+
+def test_imported_terminal_validity_is_corrupt_authority(governed):
+    import market_platform.evidence as evidence
+
+    validity = governed[4]._validity_service
+    retained = validity._history._state[1][0]
+    active = retained.validity_event
+    terminal = evidence.create_evidence_validity_event(
+        validity_event_id="unsupported.terminal.fixture",
+        artifact_reference=active.artifact_reference,
+        status=evidence.EvidenceValidityStatus.REVOKED,
+        recorded_at=governed[2].analysis_as_of,
+        effective_at=governed[2].analysis_as_of,
+        actor_identity=active.actor_identity,
+        scope=active.scope,
+        predecessor=active,
+        reason="Unsupported import must fail closed",
+    )
+    object.__setattr__(retained, "validity_event", terminal)
+    governed_refusal(governed, Outcome.REFUSED)
+
+
+def test_later_independent_source_cannot_replace_original_occurrence(tmp_path):
+    import asyncio
+
+    from test_polygon_completed_daily_production_validation import _Acquirer
+
+    case = list(governed_setup(tmp_path))
+    construction = case[-1]
+    original = case[-2]
+    old_acquisition = construction._candidate_service._acquirer.acquisition
+    now = case[2].knowledge_as_of + timedelta(minutes=1)
+    new_acquisition = replace(
+        old_acquisition,
+        response_received_at=now,
+        request_id="independent-later-request",
+    )
+    construction._candidate_service._acquirer = _Acquirer(new_acquisition)
+    construction._candidate_service._creation_clock = lambda: now
+    construction._execution_clock = lambda: now
+    newer = asyncio.run(
+        construction.execute(replace(original.request, query_as_of=now))
+    )
+    assert newer.material.rows == original.material.rows
+    assert newer.artifact.reference() != original.artifact.reference()
+    assert newer.receipt.execution_id != original.receipt.execution_id
+    construction._candidate_service._acquirer.get_completed_daily_acquisition = Mock(
+        side_effect=AssertionError("No provider repair")
+    )
+    case[2] = replace(case[2], construction_execution_id=newer.receipt.execution_id)
+    # Exact old artifact remains requested; matching rows cannot replace lineage.
+    governed_refusal(case, Outcome.REFUSED)
+
+
+def stale_governed_case(governed):
+    case = list(governed)
+    now = case[2].knowledge_as_of + timedelta(days=10)
+    case[2] = replace(case[2], analysis_as_of=now, knowledge_as_of=now)
+    case[3]._clock = lambda: now
+    case[4]._clock = lambda: now
+    case[4]._validity_service._admission_service._freshness_service._execution_clock = (
+        lambda: now
+    )
+    return case
+
+
+TASK_IDENTITY_FIELDS = (
+    "consumer_reference",
+    "intended_use_reference",
+    "technical_profile_reference",
+)
+
+
+def contradictory_task_identity(case, field):
+    case = list(case)
+    case[2] = replace(
+        case[2],
+        **{
+            field: replace(
+                getattr(case[2], field), identity_fingerprint="sha256:" + "0" * 64
+            )
+        },
+    )
+    return case
+
+
+@pytest.mark.parametrize("governed", [{"missing": "admission"}], indirect=True)
+@pytest.mark.parametrize("field", TASK_IDENTITY_FIELDS)
+def test_b1_task_identity_precedes_missing_governance(governed, field):
+    # The authentic context really is BLOCKED before adding the contradiction.
+    governed_refusal(governed, Outcome.BLOCKED)
+    case = contradictory_task_identity(governed, field)
+    before = (case[4]._history._state, case[5]._history._state)
+    error = governed_refusal(case, Outcome.REFUSED)
+    assert error.finding.code is Code.INPUT_INTEGRITY
+    assert (case[4]._history._state, case[5]._history._state) == before
+
+
+@pytest.mark.parametrize("field", TASK_IDENTITY_FIELDS)
+def test_b1_task_identity_precedes_stale_governance(governed, field):
+    case = stale_governed_case(governed)
+    governed_refusal(case, Outcome.BLOCKED)
+    error = governed_refusal(contradictory_task_identity(case, field), Outcome.REFUSED)
+    assert error.finding.code is Code.INPUT_INTEGRITY
+    assert case[4]._history._state == (1, ())
+    assert case[5]._history._state == (1, ())
+
+
+@pytest.mark.parametrize("kind", ["dataset", "storage", "original_history"])
+def test_b1_retained_bridge_corruption_precedes_stale_governance(governed, kind):
+    governed[3].resolve(governed[1], governed[2])
+    case = stale_governed_case(governed)
+    governed_refusal(case, Outcome.BLOCKED)
+    retained = case[5]._history._state[1][0]
+    if kind == "dataset":
+        object.__setattr__(
+            retained,
+            "dataset_fingerprint",
+            retained.completed_prices.evidence.dataset_content_fingerprint,
+        )
+    elif kind == "storage":
+        prices = retained.completed_prices._prices
+        cached = prices.content_fingerprint
+        prices._frame.loc[100, "close"] = 100.0
+        assert prices.content_fingerprint == cached
+    else:
+        # Bridge remains internally valid, but its original owner is corrupt.
+        retained.to_dict()
+        case[4]._history._state = (2, ())
+    error = governed_refusal(case, Outcome.REFUSED)
+    assert error.finding.condition is Condition.CONTRADICTORY
+
+
+def test_b1_material_lineage_contradiction_precedes_absent_bridge(governed):
+    from market_platform.application import (
+        polygon_completed_daily_production_qualification as q,
+    )
+
+    case = list(governed)
+    case[3]._bridge = None
+    governed_refusal(case, Outcome.BLOCKED)
+    case[2] = replace(
+        case[2],
+        artifact_reference=replace(case[2].artifact_reference, artifact_id="wrong"),
+    )
+    error = governed_refusal(case, Outcome.REFUSED)
+    assert (
+        error.__cause__.reason
+        is q.PolygonCompletedDailyQualificationRefusalReason.REFERENCE_MISMATCH
+    )
+    assert case[4]._history._state == (1, ())
+    assert case[5]._history._state == (1, ())
+
+
+@pytest.mark.parametrize("field", TASK_IDENTITY_FIELDS)
+def test_b1_missing_identity_owner_does_not_manufacture_refusal(governed, field):
+    case = contradictory_task_identity(governed, field)
+    case[3]._qualification = None
+    error = governed_refusal(case, Outcome.BLOCKED)
+    assert error.finding.condition is Condition.UNAVAILABLE
+
+
+def test_b1_missing_material_owner_does_not_manufacture_refusal(governed):
+    from market_platform.application import (
+        polygon_completed_daily_production_qualification as q,
+    )
+
+    case = list(governed)
+    admission = case[4]._validity_service._admission_service
+    for owner in (
+        case[-1],
+        admission._validation_service,
+        admission._freshness_service,
+        admission,
+        case[4]._validity_service,
+    ):
+        owner._history = type(owner._history)()
+    case[3]._bridge = None
+    case[2] = replace(
+        case[2],
+        artifact_reference=replace(case[2].artifact_reference, artifact_id="unknown"),
+        construction_execution_id="polygon_completed_daily_construction:" + "0" * 32,
+    )
+    error = governed_refusal(case, Outcome.BLOCKED)
+    assert (
+        error.__cause__.reason
+        is q.PolygonCompletedDailyQualificationRefusalReason.INPUT_UNAVAILABLE
+    )
+
+
+def test_b1_missing_original_qualification_does_not_manufacture_refusal(governed):
+    from market_platform.application import (
+        polygon_completed_daily_production_qualification as q,
+    )
+
+    governed[3].resolve(governed[1], governed[2])
+    case = stale_governed_case(governed)
+    restarted = q.PolygonCompletedDailyProductionQualificationApplicationService(
+        case[4]._validity_service, execution_clock=case[4]._clock
+    )
+    case[5]._qualification_service = restarted
+    error = governed_refusal(case, Outcome.BLOCKED)
+    assert error.finding.condition is Condition.UNSATISFIED
+
+
+@pytest.mark.parametrize("governed", [{"variant": "content"}], indirect=True)
+def test_b1_retained_bridge_content_contradiction_precedes_stale_governance(governed):
+    from market_platform.application import (
+        polygon_completed_daily_production_qualification as q,
+    )
+
+    # The initial resolution retains a valid Bridge before comparing its content
+    # with authenticated Pending. Its corruption checks alone cannot expose this.
+    error = governed_refusal(governed, Outcome.REFUSED)
+    assert error.finding.code is Code.MATERIAL_CORRESPONDENCE
+    retained = governed[5]._history._state[1][0]
+    retained.to_dict()
+    case = stale_governed_case(governed)
+    intent = q.PolygonCompletedDailyQualificationRequest(
+        case[2].artifact_reference,
+        case[2].construction_execution_id,
+        case[2].analysis_as_of,
+        case[2].knowledge_as_of,
+    )
+    with pytest.raises(q.PolygonCompletedDailyQualificationRefused) as stale:
+        case[4].qualify(intent)
+    assert stale.value.reason in (
+        q.PolygonCompletedDailyQualificationRefusalReason.TASK_UNAVAILABLE,
+        q.PolygonCompletedDailyQualificationRefusalReason.LIFECYCLE_REFUSED,
+    )
+    before = (case[4]._history._state, case[5]._history._state)
+    error = governed_refusal(case, Outcome.REFUSED)
+    assert error.finding.code is Code.MATERIAL_CORRESPONDENCE
+    assert (case[4]._history._state, case[5]._history._state) == before

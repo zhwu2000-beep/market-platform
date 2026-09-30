@@ -634,3 +634,60 @@ def test_incomplete_trusted_store_cannot_be_pruned(kind):
     next_sequence, entries = store._state
     store._state = (next_sequence, entries[:-1])
     _refuse(service, request, R.HISTORY_INCOMPLETE)
+
+
+def test_owned_material_resolution_is_read_only_and_exact():
+    service, request = _ready()
+    target = service.resolve_retained_material(request)
+    assert target.receipt.execution_id == request.construction_execution_id
+    assert target.artifact.reference() == request.artifact_reference
+    assert service._history._state == (1, ())
+    assert (
+        service._validity_service._admission_service._freshness_service.get_task_freshness_history(
+            request.artifact_reference,
+            construction_execution_id=request.construction_execution_id,
+        )
+        == ()
+    )
+
+
+@pytest.mark.parametrize("field", ["artifact_reference", "construction_execution_id"])
+def test_owned_material_resolution_rejects_reference_contradiction(field):
+    service, request = _ready()
+    value = (
+        replace(request.artifact_reference, artifact_id="other")
+        if field == "artifact_reference"
+        else "polygon_completed_daily_construction:" + "0" * 32
+    )
+    with pytest.raises(q.PolygonCompletedDailyQualificationRefused) as caught:
+        service.resolve_retained_material(replace(request, **{field: value}))
+    assert caught.value.reason is R.REFERENCE_MISMATCH
+
+
+def test_owned_material_resolution_rejects_pruned_history():
+    service, request = _ready()
+    owner = service._validity_service._admission_service._construction_service._history
+    owner._state = (2, ())
+    with pytest.raises(q.PolygonCompletedDailyQualificationRefused) as caught:
+        service.resolve_retained_material(request)
+    assert caught.value.reason is R.HISTORY_INCOMPLETE
+
+
+def test_owned_resolution_cannot_hide_newer_current_history():
+    service, request = _ready()
+    first = service.qualify(request)
+    validator = service._validity_service._admission_service._validation_service
+    later = first.available_at + timedelta(minutes=1)
+    validator._execution_clock = lambda: later
+    validator.execute_profile(
+        q.v.PolygonCompletedDailyValidationRequest(
+            request.artifact_reference,
+            request.construction_execution_id,
+        )
+    )
+    service._clock = lambda: later
+    with pytest.raises(q.PolygonCompletedDailyQualificationRefused) as caught:
+        service.resolve_retained_material(
+            replace(request, knowledge_as_of=first.knowledge_as_of)
+        )
+    assert caught.value.reason is R.TEMPORAL_FAILURE
