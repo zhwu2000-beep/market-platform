@@ -1,8 +1,11 @@
 # Market Platform Work Transition Handoff
 
-**Status:** FINAL TRANSITION HANDOFF  
-**Purpose:** One-time project-context transfer from the historical Chat/Codex-centered workflow to ChatGPT Work  
-**Current coordination baseline:** post-v0.85 runtime-validation closure  
+**Status:** FINAL TRANSITION HANDOFF
+
+**Purpose:** One-time project-context transfer from the historical Chat/Codex-centered workflow to ChatGPT Work
+
+**Current coordination baseline:** post-v0.85 runtime-validation closure
+
 **Implementation status of next architecture phase:** not started
 
 ---
@@ -383,8 +386,10 @@ their own truthful provenance.
 
 This means the platform can legitimately say:
 
-> Radar saw this market state in X.  
-> Governance later independently acquired Y.  
+> Radar saw this market state in X.
+>
+> Governance later independently acquired Y.
+>
 > Y exactly corresponds to the Candidate's governed market content.
 
 It must never say:
